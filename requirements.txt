@@ -1,0 +1,4 @@
+langgraph~=1.0.10
+langchain-core~=1.2.18
+redis~=7.1.0
+pydantic~=2.12.5

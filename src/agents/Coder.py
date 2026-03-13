@@ -1,6 +1,6 @@
 from langchain_core.messages import SystemMessage
-from state import AgentState
-from llm_engine import llm
+from src.core.state import AgentState
+from src.core.llm_engine import llm
 
 # ==========================================
 # 5. 工程师节点定义 (Coder Node)

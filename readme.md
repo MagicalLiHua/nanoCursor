@@ -30,7 +30,7 @@
 
 * **结构化全局状态 (State Management):** 严格区分“对话上下文 (Messages)”与“工程上下文 (Plan, Active Files, Test Output)”，避免上下文污染。
 * **基于 Search/Replace 的精准文件修改 (攻坚中):** 摒弃极易产生幻觉的“纯行号替换”和“全量覆盖”，采用基于锚点的局部块替换逻辑，大幅降低 Token 消耗并提升修改精准度。
-* **极端的 Token 裁剪策略:** 针对多轮 Bug 修复导致的 Token 爆炸问题，设计针对终端 Error 信息首尾截断算法与历史 ToolMessage 的动态滑动窗口。
+* **Token 裁剪策略:** 针对多轮 Bug 修复导致的 Token 爆炸问题，设计针对终端 Error 信息首尾截断算法与历史 ToolMessage 的动态滑动窗口。
 
 ## 🚀 快速启动 (Quick Start)
 

@@ -1,6 +1,6 @@
 import os
 from langchain_core.tools import tool
-from config import WORKSPACE_DIR
+from src.core.config import WORKSPACE_DIR
 
 # ==========================================
 # 工具定义 (Tools)

@@ -1,5 +1,5 @@
 from langchain_ollama import ChatOllama
-from tools import tools
+from src.tools.file_tools import tools
 
 # 初始化本地大语言模型 (接入你部署好的 Ollama)
 llm = ChatOllama(
