@@ -35,4 +35,56 @@ def write_python_file(filename: str, code: str) -> str:
     except Exception as e:
         return f"❌ 写入文件失败: {str(e)}"
 
-tools = [write_python_file]
+
+@tool
+def write_file(filename: str, content: str) -> str:
+    """Only use this to CREATE a completely new file. Do not use this to modify existing files."""
+    filepath = os.path.join(WORKSPACE_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Successfully created new file {filename}."
+
+
+@tool
+def edit_file(filename: str, search_block: str, replace_block: str) -> str:
+    """
+    MODIFY an existing file by replacing a specific block of code.
+
+    Args:
+        filename: The name of the file to edit.
+        search_block: The EXACT code block you want to replace. Must match the file's content perfectly (including indentation and line breaks).
+        replace_block: The new code block to insert in place of search_block.
+    """
+    filepath = os.path.join(WORKSPACE_DIR, filename)
+
+    if not os.path.exists(filepath):
+        return f"Error: File {filename} does not exist. Use write_file to create it first."
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 核心痛点防范：大模型有时会在 search_block 找不到对应内容（比如多加了空格）
+    if search_block not in content:
+        # 尝试去掉首尾的换行符再找一次（增加容错率）
+        if search_block.strip() in content:
+            search_block = search_block.strip()
+        else:
+            # 找不到时，返回明确的报错，让 Reviewer 或 Coder 知道定位失败，重试
+            return (
+                f"Error: `search_block` not found in {filename}.\n"
+                f"Make sure you copy the exact lines from the file, including all indentation."
+            )
+
+    # 执行替换
+    new_content = content.replace(search_block, replace_block)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    return f"Successfully edited {filename}. Replaced the requested block."
+
+
+tools = [write_file, edit_file]
+
+
+# tools = [write_python_file]
