@@ -4,9 +4,6 @@ from langchain_core.tools import tool
 from src.core.config import WORKSPACE_DIR
 
 
-# ==========================================
-# 🛡️ 核心安全守卫 (Path Security Guard)
-# ==========================================
 def _get_safe_filepath(filename: str) -> str:
     """
     将用户提供的相对路径转换为绝对路径，并严格校验其是否在 WORKSPACE_DIR 内部。
@@ -18,7 +15,7 @@ def _get_safe_filepath(filename: str) -> str:
     # 拼接并获取目标文件的绝对路径
     target_abs = os.path.abspath(os.path.join(workspace_abs, filename))
 
-    # 🚨 核心校验：如果目标路径不是以工作区路径开头，说明越界了！
+    # 核心校验：如果目标路径不是以工作区路径开头，说明越界了！
     if not target_abs.startswith(workspace_abs):
         raise ValueError(f"安全拦截：禁止访问工作区之外的路径 -> {filename}")
 
@@ -75,7 +72,7 @@ def write_file(filename: str, content: str) -> str:
     except ValueError as e:
         return str(e)
 
-    # 💡 增强功能：如果大模型想在不存在的子目录创建文件，自动帮它创建目录
+    # 增强功能：如果大模型想在不存在的子目录创建文件，自动帮它创建目录
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     try:
@@ -146,7 +143,7 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
                     best_start = i
                     best_end = i + search_len
 
-            # 设定相似度阈值 (比如 80% 以上才认为是 LLM 想要修改的块)
+            # 设定相似度阈值
             if best_ratio > 0.9:
                 # 执行块替换
                 before_block = '\n'.join(content_lines[:best_start])
@@ -200,9 +197,9 @@ def list_directory(sub_path: str = "") -> str:
         dirs, files = [], []
         for entry in valid_entries:
             if os.path.isdir(os.path.join(target_dir, entry)):
-                dirs.append(f"📁 {entry}/")
+                dirs.append(f"{entry}/")
             else:
-                files.append(f"📄 {entry}")
+                files.append(f"{entry}")
 
         dirs.sort()
         files.sort()

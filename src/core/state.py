@@ -6,18 +6,12 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.redis import RedisSaver
 from redis import Redis
 
-# ==========================================
-# 1. 基础环境与大模型初始化
-# ==========================================
-
 # 初始化 Redis 作为 LangGraph 的 Checkpointer (实现时间回溯和 HITL 的基础)
-# 注意：这里我们使用标准的 redis 客户端连接
-redis_client = Redis(host="10.160.108.2", port=6379, db=0, decode_responses=False)
+# redis_client = Redis(host="", port=6379, db=0, decode_responses=False)
 checkpointer = InMemorySaver()
 
-# ==========================================
 # 2. 全局状态机定义 (AgentState)
-# ==========================================
+
 
 class AgentState(TypedDict):
     """

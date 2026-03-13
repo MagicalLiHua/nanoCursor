@@ -1,53 +1,11 @@
 from langchain_core.messages import SystemMessage
 from src.core.state import AgentState
 from src.core.llm_engine import llm
-
-
-# def coder_node(state: AgentState):
-#     print("💻 [Coder] 正在执行代码编写与修改...")
-#
-#     plan = state.get("current_plan", "暂无计划")
-#     active_files = state.get("active_files", [])
-#     error_trace = state.get("error_trace", "")
-#
-#     system_prompt = f"""你是一位精通软件工程的专家 (Coder)。
-#     你的目标是执行 Planner 的计划，或修复 Reviewer 发现的 Bug。
-#
-#     【当前执行计划】
-#     {plan}
-#
-#     【目标文件】
-#     {', '.join(active_files) if active_files else '未指定'}
-#
-#     🚨 【文件操作的强制性规范】
-#     1. 探索：你可以使用 `list_directory` 确认文件路径。
-#     2. 创建：使用 `write_file` 创建全新文件。
-#     3. 修改：你**必须先使用** `read_file` 工具读取文件的最新内容，然后再使用 `edit_file` 工具进行精准替换。
-#        - `search_block` 必须与你刚才读到的内容完全匹配（包括空格和缩进）。
-#     4. 交付：当你认为所有代码修改都已经完成，不需要再调用任何工具时，请直接回复文本 "DONE" 并简述你的修改，系统会自动进入沙盒测试。
-#     """
-#
-#     if error_trace:
-#         print("🔧 [Coder] 检测到报错信息，进入 Debug 修复模式...")
-#         system_prompt += f"\n\n🚨 【沙盒运行报错信息，请先使用 read_file 查看文件，再修复 Bug】\n{error_trace}"
-#
-#     messages = [SystemMessage(content=system_prompt)] + state["messages"]
-#     response = llm.invoke(messages)
-#
-#     if getattr(response, 'tool_calls', []):
-#         print(f"🛠️ [Coder] 调用工具执行操作: {[t['name'] for t in response.tool_calls]}")
-#
-#     return {"messages": [response]}
-
-
-from langchain_core.messages import SystemMessage
-from src.core.state import AgentState
-from src.core.llm_engine import llm
 from src.core.config import WINDOW_SIZE
 
 
 def coder_node(state: AgentState):
-    print("💻 [Coder] 正在执行代码编写与修改...")
+    print("[Coder] 正在执行代码编写与修改...")
 
     plan = state.get("current_plan", "暂无计划")
     active_files = state.get("active_files", [])
@@ -63,7 +21,7 @@ def coder_node(state: AgentState):
     【目标文件】
     {', '.join(active_files) if active_files else '未指定'}
 
-    🚨 【文件操作的强制性规范】
+    【文件操作的强制性规范】
     1. 探索：你可以使用 `list_directory` 确认文件路径。
     2. 创建：使用 `write_file` 创建全新文件。
     3. 修改：你**必须先使用** `read_file` 工具读取文件的最新内容，然后再使用 `edit_file` 工具进行精准替换。
@@ -72,8 +30,8 @@ def coder_node(state: AgentState):
     """
 
     if error_trace:
-        print("🔧 [Coder] 检测到报错信息，进入 Debug 修复模式...")
-        system_prompt += f"\n\n🚨 【沙盒运行报错信息，请先使用 read_file 查看文件，再修复 Bug】\n{error_trace}"
+        print("[Coder] 检测到报错信息，进入 Debug 修复模式...")
+        system_prompt += f"\n\n【沙盒运行报错信息，请先使用 read_file 查看文件，再修复 Bug】\n{error_trace}"
 
     # ==========================================
     # 🌟 核心改造：引入 Context Manager (上下文裁剪)
