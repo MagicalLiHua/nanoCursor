@@ -17,28 +17,34 @@ workflow = StateGraph(AgentState)
 # ==========================================
 # 2. 注册所有节点 (Nodes)
 # ==========================================
-# 把我们写好的函数注册为图中的节点，并起个名字
 workflow.add_node("planner", planner_node)
 workflow.add_node("coder", coder_node)
-# ToolNode 是 LangGraph 自带的，专门用来执行 Coder 发出的工具调用请求
-workflow.add_node("tools", ToolNode(tools))
+
+# 🚨 核心重构：给 Planner 和 Coder 分别配备独立的工具执行节点
+workflow.add_node("planner_tools", ToolNode(tools))
+workflow.add_node("coder_tools", ToolNode(tools))
+
 workflow.add_node("sandbox", sandbox_node)
 workflow.add_node("reviewer", reviewer_node)
 
 # ==========================================
 # 3. 定义路由逻辑 (Conditional Edges)
 # ==========================================
+def route_after_planner(state: AgentState):
+    """判断 Planner 是在探索工具，还是做好了计划"""
+    last_message = state["messages"][-1]
+    if getattr(last_message, 'tool_calls', []):
+        return "planner_tools"
+    return "coder"  # 没调用工具说明计划做好了，交棒给 Coder
+
 
 def route_after_coder(state: AgentState):
-    """判断 Coder 是否调用了工具"""
-    messages = state.get("messages", [])
-    last_message = messages[-1]
-
-    # 兼容性写法：使用 getattr 防止某些模型没返回 tool_calls 属性报错
+    """判断 Coder 是在敲代码/看文件，还是全部完工了"""
+    last_message = state["messages"][-1]
     if getattr(last_message, 'tool_calls', []):
-        return "tools"
-
-    return END
+        return "coder_tools"
+    print("💡 [Router] Coder 认为修改已完成。移交沙盒测试...")
+    return "sandbox"  # 没调用工具说明代码敲完了，去测试
 
 
 def route_after_sandbox(state: AgentState):
@@ -68,19 +74,19 @@ def route_after_sandbox(state: AgentState):
 
 # 起点 -> 规划师 -> 工程师
 workflow.add_edge(START, "planner")
-workflow.add_edge("planner", "coder")
 
-# 工程师写完代码后，进行条件判断：去执行工具 还是 结束？
+# --- Planner 微循环 ---
+workflow.add_conditional_edges("planner", route_after_planner)
+workflow.add_edge("planner_tools", "planner") # 工具执行完，把结果还给 Planner
+
+# --- Coder 微循环 ---
 workflow.add_conditional_edges("coder", route_after_coder)
+workflow.add_edge("coder_tools", "coder") # 工具执行完，把结果还给 Coder
 
-# 工具执行完毕后（代码已落盘），直接进入沙盒运行测试
-workflow.add_edge("tools", "sandbox")
-
-# 沙盒运行完毕后，进行条件判断：结束 还是 回炉重造？
+# --- 测试与反思回环 ---
 workflow.add_conditional_edges("sandbox", route_after_sandbox)
+workflow.add_edge("reviewer", "coder") # 报错诊断后，打回给 Coder 继续改
 
-# 增加一条线：Reviewer 分析完之后，固定把控制权交给 Coder 去改代码
-workflow.add_edge("reviewer", "coder")
 
 # ==========================================
 # 5. 编译并打包系统
@@ -101,21 +107,9 @@ if __name__ == "__main__":
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    # 我们直接给一个带有 TDD (测试驱动开发) 要求的复杂指令
-    # user_prompt = """
-    # 请帮我写一个 Python 函数，用于进行对列表进行二分查找。
-    # 要求：
-    # 1. 必须处理边界的情况。
-    # 2. 写好代码后，必须在文件末尾加上至少 3 个 assert 测试用例来验证逻辑（包含正常值和异常值）。
-    # 3. 将代码保存到你命名好的文件中。
-    # """
-
     user_prompt = """
-    请帮我写一个 Python 函数，用于进行对列表进行二分查找。
-    要求：
-    1. 必须处理边界的情况。
-    2. 写好代码后，必须在文件末尾加上至少 3 个 assert 测试用例来验证逻辑（包含正常值和异常值）。
-    3. 将代码保存到你命名好的文件中。
+    我们的项目里有一个文件出了 Bug。我只记得它是一个查找算法相关的 Python 文件，但是我不记得它在哪个目录下了。
+    请帮我找出这个文件，读取它，并修复里面导致测试不通过的 Bug。
     """
 
     initial_state = {
