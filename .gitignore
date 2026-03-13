@@ -1,0 +1,16 @@
+# 忽略所有层级的 .idea 文件夹
+.idea/
+**/.idea/
+*.iml
+
+# 忽略所有层级的 .env 文件
+.env
+**/.env
+
+# Python 相关
+__pycache__/
+venv/
+*.pyc
+
+# 日志
+*.log
