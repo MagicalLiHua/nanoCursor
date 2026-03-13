@@ -1,9 +1,23 @@
 import json
 import re
 
+from typing import List
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
 from langchain_core.messages import SystemMessage, AIMessage
 from src.core.state import AgentState
 from src.core.llm_engine import llm
+
+
+# ==========================================
+# 🌟 核心改造 1: 定义强类型的输出结构 (Schema)
+# ==========================================
+class PlanOutput(BaseModel):
+    plan: str = Field(description="详细的分步执行计划，必须包含具体的测试用例和边界情况检查")
+    files: List[str] = Field(description="需要修改或查看的本地目标文件路径列表", default_factory=list)
+
+# 实例化 Pydantic 解析器
+parser = PydanticOutputParser(pydantic_object=PlanOutput)
 
 
 def planner_node(state: AgentState):
@@ -35,22 +49,20 @@ def planner_node(state: AgentState):
         print("🔎 [Planner] 决定调用工具探索项目...")
         return {"messages": [response]}
 
-    # 2. 如果没有调用工具，说明它思考完毕，输出了最终计划。我们需要解析它的 JSON。
+    # ==========================================
+    # 使用 Pydantic 解析器替代脆弱的正则
+    # ==========================================
     print("✅ [Planner] 探索完毕，生成最终计划！")
-    content = response.content
-    new_plan = "解析异常"
-    target_files = []
 
-    # 使用正则提取 Markdown 里的 JSON
-    json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1))
-            new_plan = result.get("plan", "计划提取失败")
-            target_files = result.get("files", [])
-        except json.JSONDecodeError:
-            print("⚠️ [Planner] JSON 解析失败，格式错误。")
-            new_plan = content  # 兜底保存全文
+    try:
+        # parser.invoke 会自动处理各种边界情况（剥离 markdown、处理转义符）
+        parsed_result = parser.invoke(response.content)
+        new_plan = parsed_result.plan
+        target_files = parsed_result.files
+    except Exception as e:
+        print(f"⚠️ [Planner] 结构化解析失败，触发兜底机制。错误: {e}")
+        new_plan = response.content
+        target_files = []
 
     display_content = f"📝 **架构师最终计划:**\n{new_plan}\n\n📁 **目标文件:** {', '.join(target_files) if target_files else '无'}"
     plan_message = AIMessage(content=display_content, name="Planner")

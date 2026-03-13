@@ -4,7 +4,7 @@ from src.tools.file_tools import tools
 # 初始化本地大语言模型 (接入你部署好的 Ollama)
 llm = ChatOllama(
     base_url="http://10.160.108.2:11434",
-    model="qwen3-vl:8b",
+    model="qwen3-coder:30b",
     reasoning=False,
 )
 

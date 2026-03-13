@@ -1,3 +1,4 @@
+import difflib
 import os
 from langchain_core.tools import tool
 from src.core.config import WORKSPACE_DIR
@@ -89,7 +90,7 @@ def write_file(filename: str, content: str) -> str:
 def edit_file(filename: str, search_block: str, replace_block: str) -> str:
     """
     通过替换指定的代码块来精准修改现有的文件。
-    【关键规则】：search_block 必须与原文件中的连续代码段完全匹配（包含严格的换行符和空格缩进）。
+    系统支持智能容错，但请尽量保证 search_block 与原文件内容一致。
 
     参数 (Args):
         filename (str): 要修改的现有文件的相对路径 (例如: "src/utils.py")。
@@ -111,22 +112,60 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
 
-        if search_block not in content:
-            if search_block.strip() in content:
-                search_block = search_block.strip()
+        new_content = None
+        match_strategy = ""
+
+        # 策略 1: 完美精确匹配 (最快，最安全)
+        if search_block in content:
+            new_content = content.replace(search_block, replace_block)
+            match_strategy = "精确匹配 (Exact Match)"
+
+        # 策略 2: 忽略首尾空白与换行符匹配
+        elif search_block.strip() in content:
+            new_content = content.replace(search_block.strip(), replace_block.strip())
+            match_strategy = "首尾去空匹配 (Stripped Match)"
+
+        # 策略 3: 基于 difflib 的模糊匹配 (解决大模型缩进/换行幻觉)
+        else:
+            content_lines = content.splitlines()
+            search_lines = search_block.splitlines()
+
+            # 过滤掉空行，寻找最高相似度的代码块
+            best_ratio = 0
+            best_start = -1
+            best_end = -1
+            search_len = len(search_lines)
+
+            # 滑动窗口计算文本块相似度
+            for i in range(len(content_lines) - search_len + 1):
+                window = content_lines[i:i + search_len]
+                # 将块拼起来计算相似度
+                ratio = difflib.SequenceMatcher(None, '\n'.join(window), '\n'.join(search_lines)).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_start = i
+                    best_end = i + search_len
+
+            # 设定相似度阈值 (比如 80% 以上才认为是 LLM 想要修改的块)
+            if best_ratio > 0.9:
+                # 执行块替换
+                before_block = '\n'.join(content_lines[:best_start])
+                after_block = '\n'.join(content_lines[best_end:])
+                # 重新拼接文件内容
+                new_content = f"{before_block}\n{replace_block}\n{after_block}".strip() + "\n"
+                match_strategy = f"模糊匹配 (Fuzzy Match, 相似度 {best_ratio:.1%})"
             else:
                 return (
                     f"修改失败：未能在 {filename} 中找到指定的 `search_block`。\n"
-                    f"请确保你完全复制了文件中的原始内容（包括所有前置缩进和空白符）。\n"
-                    f"建议先调用 read_file 重新确认文件内容。"
+                    f"最佳匹配相似度仅为 {best_ratio:.1%}，低于安全阈值(80%)。\n"
+                    f"可能原因：你产生了文本幻觉，或者遗漏了重要注释。请先调用 read_file 重新确认文件内容。"
                 )
 
-        new_content = content.replace(search_block, replace_block)
-
+        # 写入新内容
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        return f"成功修改 {filename}。指定的代码块已替换完毕。"
+        return f"成功修改 {filename}。使用策略: [{match_strategy}]。"
     except Exception as e:
         return f"修改文件 {filename} 时发生错误: {str(e)}"
 
