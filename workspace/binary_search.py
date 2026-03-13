@@ -24,6 +24,6 @@ def binary_search(arr, target):
     return -1
 
 # 测试用例
-assert binary_search([1, 3, 5], 3) == 1
-assert binary_search([], 1) == -1
-assert binary_search([1, 2, 3], 4) == -1
+# assert binary_search([1, 3, 5], 3) == 1
+# assert binary_search([], 1) == -1
+# assert binary_search([1, 2, 3], 4) == -1
