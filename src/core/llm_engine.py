@@ -1,11 +1,20 @@
+import os
+from dotenv import load_dotenv
 from langchain_ollama import ChatOllama
 from src.tools.file_tools import tools
 
-# 初始化本地大语言模型 (接入你部署好的 Ollama)
+# 加载 .env 文件中的变量
+load_dotenv()
+
+# 从环境变量中获取配置，如果获取不到则使用默认值
+base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+model_name = os.getenv("OLLAMA_MODEL", "qwen3")
+
+# 初始化 LLM
 llm = ChatOllama(
-    base_url="http://10.160.108.2:11434",
-    model="qwen3-coder:30b",
+    base_url=base_url,
+    model=model_name,
     reasoning=False,
 )
 
-llm = llm.bind_tools(tools)  # 将工具绑定到 LLM 上，使其能够调用工具完成任务
+llm = llm.bind_tools(tools)
