@@ -1,4 +1,6 @@
 from langchain_core.messages import SystemMessage, AIMessage
+
+from src.core.repo_map import generate_repo_map
 from src.core.state import AgentState
 from src.core.llm_engine import llm
 
@@ -11,12 +13,26 @@ def reviewer_node(state: AgentState):
 
     error_trace = state.get("error_trace", "")
     plan = state.get("current_plan", "")
+    workspace_map = generate_repo_map()
+
+    # 同样动态提取出改动记录
+    change_log = []
+    for msg in state["messages"]:
+        if msg.type == "tool" and msg.name in ["edit_file", "write_file"]:
+            change_log.append(f"- {msg.content}")
+    change_log_str = "\n".join(change_log) if change_log else "无"
 
     system_prompt = f"""你是一个资深的代码审查员 (Reviewer)。
     刚才 Coder 按照计划编写了代码，但在沙盒运行中报错了。
     
     【原始执行计划】
     {plan}
+    
+    【当前工作区概览】
+    {workspace_map}
+    
+    【Coder 刚才执行的修改操作】
+    {change_log_str}
     
     【沙盒报错信息】
     {error_trace}

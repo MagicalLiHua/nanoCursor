@@ -1,4 +1,6 @@
 from langchain_core.messages import SystemMessage
+
+from src.core.repo_map import generate_repo_map
 from src.core.state import AgentState
 from src.core.llm_engine import llm
 from src.core.config import WINDOW_SIZE
@@ -11,12 +13,29 @@ def coder_node(state: AgentState):
     active_files = state.get("active_files", [])
     error_trace = state.get("error_trace", "")
 
+    workspace_map = generate_repo_map()
+
+    change_log = []
+    for msg in state["messages"]:
+        # ToolMessage 且是修改文件的工具
+        if msg.type == "tool" and msg.name in ["edit_file", "write_file"]:
+            change_log.append(f"- {msg.content}")
+
+    change_log_str = "\n".join(change_log) if change_log else "暂无文件修改记录。"
+
     # 1. 构造 System Prompt (这部分保持不变)
     system_prompt = f"""你是一位精通软件工程的专家 (Coder)。
     你的目标是执行 Planner 的计划，或修复 Reviewer 发现的 Bug。
+    
+    【当前工作区概览 (Repo Map)】
+    作为你编写代码的上下文参考（函数签名/类名）：
+    {workspace_map}
 
     【当前执行计划】
     {plan}
+    
+    【本轮对话中，你已经完成的改动记录 (Change Log)】
+    {change_log_str}
 
     【目标文件】
     {', '.join(active_files) if active_files else '未指定'}

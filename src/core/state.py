@@ -30,3 +30,6 @@ class AgentState(TypedDict):
     error_trace: str  # Sandbox 节点捕获的最新的报错信息 (stdout/stderr)
     retry_count: int  # 当前 Bug 修复的重试次数
     max_retries: int  # 允许的最大重试次数 (比如设为 3)
+
+    # === 新增字段 ===
+    modification_log: list  # 记录 Coder 改了哪些文件的哪些内容

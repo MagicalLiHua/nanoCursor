@@ -2,6 +2,8 @@ from typing import List
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from langchain_core.messages import SystemMessage, AIMessage
+
+from src.core.repo_map import generate_repo_map
 from src.core.state import AgentState
 from src.core.llm_engine import llm
 
@@ -15,22 +17,28 @@ parser = PydanticOutputParser(pydantic_object=PlanOutput)
 
 
 def planner_node(state: AgentState):
+    # 动态获取最新的仓库地图
+    current_repo_map = generate_repo_map()
     print("[Planner] 正在进行架构思考与探索...")
 
-    system_prompt = """你是一个资深的软件架构师 (Planner)。
+    system_prompt = f"""你是一个资深的软件架构师 (Planner)。
     你的任务是理解用户的需求，制定分步的代码开发/修改计划，并圈定需要涉及的本地文件。
     
+    【当前工作区概览】
+    以下是当前项目的文件结构以及关键的函数/类摘要：
+    {current_repo_map}
+    
     【关键能力：探索工作区】
-    你不必仅凭猜想！你可以随时调用 `list_directory` 查看项目目录结构，或使用 `read_file` 查看某个文件的具体内容。
-    请充分探索工作区，直到你完全明确需要修改哪些文件。
+    如果上述摘要不足以让你做出决定，你可以使用 `read_file` 工具查看某个文件的具体完整内容。
+    当然，有时候也出出现用户给你的任务是在一个空白的工作区内开始的，这是被允许的。
     
     【输出规范：交付计划】
     当你完成了探索，确定了最终的执行计划后，请停止调用工具，并在你的回复中包含一个严格的 Markdown JSON 块，格式如下：
     ```json
-    {
+    {{
         "plan": "1. 详细的执行计划，必须包含具体的测试用例和边界情况检查...",
-        "files": ["src/main.py", "tests/test_main.py"]
-    }
+        "files": ["main.py", "test_main.py"]
+    }}
     """
 
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
