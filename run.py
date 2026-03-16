@@ -7,7 +7,7 @@ from src.agents.Planner import planner_node
 from src.agents.Coder import coder_node
 from src.agents.Sandbox import sandbox_node
 from src.agents.Reviewer import reviewer_node
-from src.tools.file_tools import tools
+from src.tools.file_tools import tools,read_file
 
 # ==========================================
 # 1. 初始化图构建器
@@ -21,7 +21,7 @@ workflow.add_node("planner", planner_node)
 workflow.add_node("coder", coder_node)
 
 # 给 Planner 和 Coder 分别配备独立的工具执行节点
-workflow.add_node("planner_tools", ToolNode(tools))
+workflow.add_node("planner_tools", ToolNode([read_file]))
 workflow.add_node("coder_tools", ToolNode(tools))
 
 workflow.add_node("sandbox", sandbox_node)

@@ -1,7 +1,6 @@
 import os
 from dotenv import load_dotenv
 from langchain_ollama import ChatOllama
-from src.tools.file_tools import tools
 
 # 加载 .env 文件中的变量
 load_dotenv()
@@ -17,4 +16,4 @@ llm = ChatOllama(
     reasoning=False,
 )
 
-llm = llm.bind_tools(tools)
+# llm = llm.bind_tools(tools)

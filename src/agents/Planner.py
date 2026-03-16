@@ -6,6 +6,7 @@ from langchain_core.messages import SystemMessage, AIMessage
 from src.core.repo_map import generate_repo_map
 from src.core.state import AgentState
 from src.core.llm_engine import llm
+from src.tools.file_tools import read_file
 
 
 class PlanOutput(BaseModel):
@@ -19,6 +20,7 @@ parser = PydanticOutputParser(pydantic_object=PlanOutput)
 def planner_node(state: AgentState):
     # 动态获取最新的仓库地图
     current_repo_map = generate_repo_map()
+    planner_llm = llm.bind_tools([read_file])
     print("[Planner] 正在进行架构思考与探索...")
 
     system_prompt = f"""你是一个资深的软件架构师 (Planner)。
@@ -44,7 +46,7 @@ def planner_node(state: AgentState):
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
     # 正常调用 LLM (它已经绑定了 tools)
-    response = llm.invoke(messages)
+    response = planner_llm.invoke(messages)
 
     # 1. 如果大模型调用了工具（比如去偷看目录了），就直接返回消息，进入图的 Tool 循环
     if getattr(response, 'tool_calls', []):

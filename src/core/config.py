@@ -22,5 +22,5 @@ os.makedirs(WORKSPACE_DIR, exist_ok=True)
 # 打印一下，方便你启动时核对路径是否正确（可自行注释掉）
 print(f"[Config] 当前工作区路径已锁定为: {WORKSPACE_DIR}")
 
-WINDOW_SIZE = 6  # 上下文窗口大小，Coder 节点会使用这个值来裁剪消息历史
+WINDOW_SIZE = 10  # 上下文窗口大小，Coder 节点会使用这个值来裁剪消息历史
 print(f"[Config] 上下文窗口大小设置为: {WINDOW_SIZE} 条消息")
