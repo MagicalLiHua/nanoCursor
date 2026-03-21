@@ -6,7 +6,7 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.redis import RedisSaver
 from redis import Redis
 
-# 初始化 Redis 作为 LangGraph 的 Checkpointer (实现时间回溯和 HITL 的基础)
+# 初始化 Redis 作为 LangGraph 的 Checkpointer
 # redis_client = Redis(host="", port=6379, db=0, decode_responses=False)
 checkpointer = InMemorySaver()
 
@@ -29,7 +29,6 @@ class AgentState(TypedDict):
     # 3. 沙盒与重试控制 (防止大模型陷入死循环)
     error_trace: str  # Sandbox 节点捕获的最新的报错信息 (stdout/stderr)
     retry_count: int  # 当前 Bug 修复的重试次数
-    max_retries: int  # 允许的最大重试次数 (比如设为 3)
+    max_retries: int  # 允许的最大重试次数
 
-    # === 新增字段 ===
     modification_log: list  # 记录 Coder 改了哪些文件的哪些内容

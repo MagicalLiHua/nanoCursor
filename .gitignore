@@ -3,6 +3,10 @@
 **/.idea/
 *.iml
 
+
+.vscode/
+**/.vscode/
+
 # 忽略所有层级的 .env 文件
 .env
 **/.env
