@@ -39,3 +39,7 @@ class AgentState(TypedDict):
     memory_summary: MemorySummary  # 结构化记忆摘要
     context_version: int  # 上下文版本号，每次压缩后递增
     file_signatures: dict[str, str]  # 文件签名缓存 {filepath: "函数A, 函数B | 上次修改时间"}
+
+    # 5. 🌟 新增：Coder 步数控制
+    coder_step_count: int  # Coder 工具调用步数计数器（每次微循环重置）
+    max_coder_steps: int  # Coder 最大工具调用步数限制（默认 15）

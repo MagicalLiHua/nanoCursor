@@ -1,4 +1,12 @@
+"""
+全局配置模块
+定义项目路径和上下文管理配置
+"""
+
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # 环境沙盒
@@ -20,7 +28,7 @@ WORKSPACE_DIR = os.path.join(PROJECT_ROOT, "workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 # 打印一下，方便你启动时核对路径是否正确（可自行注释掉）
-print(f"[Config] 当前工作区路径已锁定为: {WORKSPACE_DIR}")
+logger.info(f"当前工作区路径已锁定为: {WORKSPACE_DIR}")
 
 # ==========================================
 # 🌟 上下文管理配置 (v2.0)
@@ -33,4 +41,4 @@ print(f"[Config] 当前工作区路径已锁定为: {WORKSPACE_DIR}")
 #   - reviewer_keep_turns: Reviewer 保留的对话轮数 (默认 2)
 #
 # Token 计数使用 tiktoken (cl100k_base encoding)，如果 tiktoken 不可用则回退到估算模式
-print("[Config] 上下文管理器 v2.0 已启用 (tiktoken 精确计数 + LLM 智能摘要 + 动态窗口)")
+logger.info("上下文管理器 v2.0 已启用 (tiktoken 精确计数 + LLM 智能摘要 + 动态窗口)")

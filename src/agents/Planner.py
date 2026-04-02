@@ -1,3 +1,4 @@
+import logging
 from typing import List
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
@@ -13,6 +14,8 @@ from src.core.context_manager import (
 )
 from src.tools.file_tools import read_file
 
+logger = logging.getLogger(__name__)
+
 
 class PlanOutput(BaseModel):
     plan: str = Field(description="详细的分步执行计划，必须包含具体的测试用例和边界情况检查")
@@ -26,7 +29,7 @@ def planner_node(state: AgentState):
     # 动态获取最新的仓库地图
     current_repo_map = generate_repo_map()
     planner_llm = llm.bind_tools([read_file])
-    print("[Planner] 正在进行架构思考与探索...")
+    logger.info("正在进行架构思考与探索...")
     format_instructions = parser.get_format_instructions()
 
     # 🌟 使用上下文管理器构建优化上下文 (传递 LLM 实例支持智能摘要)
@@ -34,18 +37,18 @@ def planner_node(state: AgentState):
 
     # 🌟 Token 监控 (使用 tiktoken 精确计数)
     token_count = estimate_messages_tokens(filtered_messages)
-    print(f"[Planner] 上下文 Token 估算: ~{token_count} tokens")
+    logger.debug(f"上下文 Token 估算: ~{token_count} tokens")
 
     # 正常调用 LLM (它已经绑定了 tools)
     response = planner_llm.invoke(filtered_messages)
 
     # 如果大模型调用了工具，就直接返回消息，进入图的 Tool 循环
     if getattr(response, 'tool_calls', []):
-        print("[Planner] 决定调用工具探索项目...")
+        logger.info("决定调用工具探索项目...")
         return {"messages": [response]}
 
     # 使用 Pydantic 解析器替代脆弱的正则
-    print("[Planner] 探索完毕，生成最终计划！")
+    logger.info("探索完毕，生成最终计划！")
 
     try:
         # parser.invoke 会自动处理各种边界情况（剥离 markdown、处理转义符）
@@ -53,7 +56,7 @@ def planner_node(state: AgentState):
         new_plan = parsed_result.plan
         target_files = parsed_result.files
     except Exception as e:
-        print(f"[Planner] 结构化解析失败，触发兜底机制。错误: {e}")
+        logger.warning(f"结构化解析失败，触发兜底机制。错误: {e}")
         new_plan = response.content
         target_files = []
 
@@ -71,5 +74,6 @@ def planner_node(state: AgentState):
         "active_files": target_files,
         "retry_count": 0,
         "error_trace": "",
+        "coder_step_count": 0,  # 重置 Coder 步数计数器
         "memory_summary": updated_summary,
     }

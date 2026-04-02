@@ -1,3 +1,9 @@
+"""
+Reviewer Agent - 代码审查员节点
+负责分析沙盒测试中的报错信息，提供诊断报告
+"""
+
+import logging
 from langchain_core.messages import SystemMessage, AIMessage
 
 from src.core.repo_map import generate_repo_map
@@ -8,12 +14,17 @@ from src.core.context_manager import (
     estimate_messages_tokens,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def reviewer_node(state: AgentState):
     """
     Reviewer 节点 (Critic)：不写代码，只看报错，负责提供"诊断报告"。
+    
+    Returns:
+        dict: 更新的状态，包含诊断报告消息
     """
-    print("[Reviewer] 正在分析报错原因，生成诊断报告...")
+    logger.info("正在分析报错原因，生成诊断报告...")
 
     # 🌟 使用上下文管理器构建优化上下文 (传递 LLM 实例支持智能摘要)
     workspace_map = generate_repo_map()
@@ -21,7 +32,7 @@ def reviewer_node(state: AgentState):
 
     # 🌟 Token 监控 (使用 tiktoken 精确计数)
     token_count = estimate_messages_tokens(filtered_messages)
-    print(f"[Reviewer] 上下文 Token 估算: ~{token_count} tokens")
+    logger.debug(f"上下文 Token 估算: ~{token_count} tokens")
 
     # Reviewer 不需要调用工具，直接输出诊断意见
     response = llm.invoke(filtered_messages)
