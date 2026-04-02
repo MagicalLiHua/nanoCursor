@@ -82,7 +82,7 @@ def _create_deepseek_llm(
     """创建 DeepSeek LLM 实例（使用 OpenAI 兼容接口）"""
     return _create_openai_llm(
         api_key=api_key,
-        base_url="https://api.deepseek.com/v1",
+        base_url="https://api.deepseek.com",
         model=model or "deepseek-chat",
         temperature=temperature,
         max_tokens=max_tokens,
