@@ -109,10 +109,10 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
 
-        new_content = None
-        match_strategy = ""
+        # new_content = None
+        # match_strategy = ""
 
-        # 策略 1: 完美精确匹配 (最快，最安全)
+        # 策略 1: 完美精确匹配
         if search_block in content:
             new_content = content.replace(search_block, replace_block)
             match_strategy = "精确匹配 (Exact Match)"
@@ -154,7 +154,7 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
             else:
                 return (
                     f"修改失败：未能在 {filename} 中找到指定的 `search_block`。\n"
-                    f"最佳匹配相似度仅为 {best_ratio:.1%}，低于安全阈值(80%)。\n"
+                    f"最佳匹配相似度仅为 {best_ratio:.1%}，低于安全阈值(90%)。\n"
                     f"可能原因：你产生了文本幻觉，或者遗漏了重要注释。请先调用 read_file 重新确认文件内容。"
                 )
 

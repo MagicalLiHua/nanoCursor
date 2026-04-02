@@ -22,5 +22,15 @@ os.makedirs(WORKSPACE_DIR, exist_ok=True)
 # 打印一下，方便你启动时核对路径是否正确（可自行注释掉）
 print(f"[Config] 当前工作区路径已锁定为: {WORKSPACE_DIR}")
 
-WINDOW_SIZE = 10  # 上下文窗口大小，Coder 节点会使用这个值来裁剪消息历史
-print(f"[Config] 上下文窗口大小设置为: {WINDOW_SIZE} 条消息")
+# ==========================================
+# 🌟 上下文管理配置 (v2.0)
+# ==========================================
+# 采用分层上下文管理策略，配置项已迁移到 context_manager.py 的 DEFAULT_CONFIG
+# 主要配置项：
+#   - max_context_tokens: 上下文最大 Token 数 (默认 8000)
+#   - coder_keep_turns: Coder 保留的对话轮数 (默认 4)
+#   - planner_keep_turns: Planner 保留的对话轮数 (默认 3)
+#   - reviewer_keep_turns: Reviewer 保留的对话轮数 (默认 2)
+#
+# Token 计数使用 tiktoken (cl100k_base encoding)，如果 tiktoken 不可用则回退到估算模式
+print("[Config] 上下文管理器 v2.0 已启用 (tiktoken 精确计数 + LLM 智能摘要 + 动态窗口)")

@@ -1,16 +1,18 @@
-import operator
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, Optional
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.redis import RedisSaver
-from redis import Redis
 
-# 初始化 Redis 作为 LangGraph 的 Checkpointer
-# redis_client = Redis(host="", port=6379, db=0, decode_responses=False)
+# 初始化 LangGraph 的 Checkpointer
 checkpointer = InMemorySaver()
 
-# 2. 全局状态机定义 (AgentState)
+
+class MemorySummary(TypedDict, total=False):
+    """结构化的记忆摘要，用于替代冗长的原始对话"""
+    original_request: str  # 用户原始需求 (永久保留)
+    completed_steps: list[str]  # 已完成的步骤摘要
+    key_decisions: list[str]  # 关键决策点
+    file_operations: list[str]  # 文件操作摘要
 
 
 class AgentState(TypedDict):
@@ -32,3 +34,8 @@ class AgentState(TypedDict):
     max_retries: int  # 允许的最大重试次数
 
     modification_log: list  # 记录 Coder 改了哪些文件的哪些内容
+
+    # 4. 🌟 新增：分层上下文管理字段
+    memory_summary: MemorySummary  # 结构化记忆摘要
+    context_version: int  # 上下文版本号，每次压缩后递增
+    file_signatures: dict[str, str]  # 文件签名缓存 {filepath: "函数A, 函数B | 上次修改时间"}
