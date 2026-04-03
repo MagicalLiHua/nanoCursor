@@ -150,13 +150,16 @@ def extract_file_signatures(messages: List[BaseMessage]) -> dict[str, str]:
 # 上下文压缩 (v2.0: LLM 驱动的智能压缩)
 # ==========================================
 
-def compress_tool_messages(messages: List[BaseMessage], max_content_length: int = 1500) -> List[BaseMessage]:
+def compress_tool_messages(messages: List[BaseMessage], max_content_length: int = 10000) -> List[BaseMessage]:
     """
     压缩工具消息，保留头尾内容，避免超长文件内容挤占上下文。
     
+    注意：由于 read_file 工具已对大文件返回 AST 结构大纲而非完整内容，
+    实际的工具消息一般不会超过此阈值。此函数主要作为安全保护机制。
+    
     Args:
         messages: 原始消息列表
-        max_content_length: 单条消息内容的最大长度
+        max_content_length: 单条消息内容的最大长度（默认 10000，相比之前的 1500 大幅提升）
     
     Returns:
         压缩后的消息列表
@@ -486,8 +489,20 @@ def build_coder_context(
 
 【文件操作的强制性规范】
 1. 创建：使用 `write_file` 创建全新文件。
-2. 修改：你**必须先使用** `read_file` 工具读取文件的最新内容，然后再使用 `edit_file` 工具进行精准替换。
-3. 参考文件签名索引可以减少不必要的 read_file 调用。
+2. 修改：你**必须先读取文件内容**，然后再使用 `edit_file` 工具进行精准替换。
+
+【读取文件的策略（重要）】
+- 对于小文件（< 5000 字符）：直接调用 `read_file(filename)` 获取完整内容
+- 对于大文件（>= 5000 字符）：`read_file` 会返回 AST 结构大纲，列出所有函数/类的名称和行号范围
+  - 使用 `read_function(filename, function_name)` 精确提取指定函数的完整源码
+  - 使用 `read_class(filename, class_name)` 精确提取指定类的完整源码
+  - 使用 `read_file_range(filename, start_line, end_line)` 读取指定行范围的代码
+
+【推荐的读取流程】
+1. 调用 `read_file(filename)` 查看文件结构
+2. 如果是大文件，从 AST 大纲中确定你需要修改的函数/类名称
+3. 调用 `read_function(filename, function_name)` 获取该函数的完整代码
+4. 从返回的代码中提取精确的 search_block，调用 `edit_file` 进行替换
 """
     
     if error_trace:

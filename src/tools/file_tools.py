@@ -1,14 +1,16 @@
 """
 文件操作工具模块
 支持文件读取、写入、编辑，以及文件备份和回滚功能。
+新增 AST 感知的智能读取能力，避免大文件内容被压缩丢失。
 """
 
+import ast
 import difflib
 import os
 import shutil
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from langchain_core.tools import tool
 from src.core.config import WORKSPACE_DIR
 from src.core.logger import logger
@@ -18,6 +20,9 @@ BACKUP_DIR = os.path.join(WORKSPACE_DIR, ".backups")
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
+
+# 文件读取阈值：超过此字符数的文件将被视为大文件
+LARGE_FILE_THRESHOLD: int = 5000
 
 
 def _get_safe_filepath(filename: str) -> str:
@@ -147,20 +152,127 @@ def list_backups(filename: Optional[str] = None) -> str:
 
 
 # ==========================================
+# AST 辅助函数
+# ==========================================
+
+def _extract_ast_outline(filepath: str) -> str:
+    """
+    使用 ast 提取文件的函数/类大纲，返回结构化摘要。
+    包含：函数名、参数名、起始行号、结束行号。
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=filepath)
+    except Exception as e:
+        return f"(AST 解析失败: {e})"
+
+    lines = source.splitlines()
+    total_lines = len(lines)
+
+    parts: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            methods_info = []
+            for child in ast.walk(node):
+                if isinstance(child, ast.FunctionDef) and child != node:
+                    methods_info.append(_format_function(child))
+            class_info = f"class {node.name} (line {node.lineno}-{getattr(node, 'end_lineno', node.lineno)})"
+            if methods_info:
+                parts.append(f"{class_info}:\n    " + "\n    ".join(methods_info))
+            else:
+                parts.append(f"{class_info}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parts.append(_format_function(node))
+
+    if not parts:
+        return "(无函数或类定义)"
+
+    summary = f"[文件结构大纲] 共 {total_lines} 行\n"
+    summary += "\n".join(parts)
+    summary += "\n\n提示：使用 read_function 工具读取特定函数的完整代码，或使用 read_file_range 读取指定行范围。"
+    return summary
+
+
+def _format_function(node) -> str:
+    """格式化一个函数定义为简短摘要"""
+    args = []
+    for arg in node.args.args:
+        arg_name = arg.arg
+        if arg_name == "self":
+            continue
+        args.append(arg_name)
+    args_str = ", ".join(args)
+    start = node.lineno
+    end = getattr(node, "end_lineno", start)
+    return f"def {node.name}({args_str}) (line {start}-{end})"
+
+
+def _extract_function_source(filepath: str, function_name: str) -> str:
+    """
+    使用 ast 定位指定函数，返回其完整源码（带行号前缀）。
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=filepath)
+    except Exception as e:
+        return f"(AST 解析失败: {e})"
+
+    lines = source.splitlines()
+    
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            start = node.lineno
+            end = getattr(node, "end_lineno", start)
+            func_lines = lines[start - 1:end]
+            numbered = "\n".join(f"  {i + start - 1} | {line}" for i, line in enumerate(func_lines))
+            return f"[函数 {function_name} 源码] (line {start}-{end})\n\n{numbered}"
+    
+    return f"未找到函数 '{function_name}'。请检查函数名是否正确，或使用 read_file 查看文件完整内容。"
+
+
+def _extract_class_source(filepath: str, class_name: str) -> str:
+    """
+    使用 ast 定位指定类，返回其完整源码（带行号前缀）。
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=filepath)
+    except Exception as e:
+        return f"(AST 解析失败: {e})"
+
+    lines = source.splitlines()
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            start = node.lineno
+            end = getattr(node, "end_lineno", start)
+            class_lines = lines[start - 1:end]
+            numbered = "\n".join(f"  {i + start - 1} | {line}" for i, line in enumerate(class_lines))
+            return f"[类 {class_name} 源码] (line {start}-{end})\n\n{numbered}"
+    
+    return f"未找到类 '{class_name}'。请检查类名是否正确，或使用 read_file 查看文件完整内容。"
+
+
+# ==========================================
 # 工具定义 (Tools)
 # ==========================================
 
 @tool
 def read_file(filename: str) -> str:
     """
-    读取现有文件的完整内容。
-    【重要提醒】：在调用 edit_file 修改任何文件之前，你必须先使用此工具读取该文件！这能确保你后续提供的 search_block 与文件中的实际内容完全一致。
+    读取现有文件的内容。
+    - 对于小文件（< 5000 字符），返回完整内容
+    - 对于大文件，返回 AST 解析的结构大纲，包含所有函数/类的名称和行号范围
+      然后你可以使用 read_function 或 read_file_range 工具获取需要的具体代码段
 
     参数 (Args):
         filename (str): 要读取的目标文件的相对路径 (例如: "src/main.py")。
 
     返回 (Returns):
-        str: 包含该文件所有完整内容的字符串。如果文件不存在则返回错误提示。
+        str: 文件完整内容（小文件）或结构大纲（大文件）。
     """
     try:
         filepath = _get_safe_filepath(filename)
@@ -174,9 +286,105 @@ def read_file(filename: str) -> str:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
         logger.debug(f"读取文件: {filename} ({len(content)} 字符)")
-        return f"--- Content of {filename} ---\n{content}\n--- End of {filename} ---"
+        
+        # 小文件直接返回完整内容
+        if len(content) <= LARGE_FILE_THRESHOLD:
+            return f"--- Content of {filename} ---\n{content}\n--- End of {filename} ---"
+        
+        # 大文件返回 AST 结构大纲
+        outline = _extract_ast_outline(filepath)
+        return f"--- Structure of {filename} ({len(content)} 字符, 大文件) ---\n{outline}\n--- End of {filename} ---"
     except Exception as e:
         return f"Error reading file {filename}: {str(e)}"
+
+
+@tool
+def read_function(filename: str, function_name: str) -> str:
+    """
+    使用 AST 解析，精确提取指定函数的完整源码。
+    这是读取大文件特定函数内容的推荐方式。
+
+    参数 (Args):
+        filename (str): 目标文件的相对路径。
+        function_name (str): 要提取的函数名称。
+
+    返回 (Returns):
+        str: 函数的完整源码，带行号前缀。
+    """
+    try:
+        filepath = _get_safe_filepath(filename)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.exists(filepath):
+        return f"Error: File '{filename}' does not exist."
+
+    return _extract_function_source(filepath, function_name)
+
+
+@tool
+def read_class(filename: str, class_name: str) -> str:
+    """
+    使用 AST 解析，精确提取指定类的完整源码。
+    这是读取大文件特定类内容的推荐方式。
+
+    参数 (Args):
+        filename (str): 目标文件的相对路径。
+        class_name (str): 要提取的类名称。
+
+    返回 (Returns):
+        str: 类的完整源码，带行号前缀。
+    """
+    try:
+        filepath = _get_safe_filepath(filename)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.exists(filepath):
+        return f"Error: File '{filename}' does not exist."
+
+    return _extract_class_source(filepath, class_name)
+
+
+@tool
+def read_file_range(filename: str, start_line: int, end_line: int) -> str:
+    """
+    读取文件的指定行范围内容。
+
+    参数 (Args):
+        filename (str): 目标文件的相对路径。
+        start_line (int): 起始行号（1-based，包含）。
+        end_line (int): 结束行号（1-based，包含）。
+
+    返回 (Returns):
+        str: 指定行范围的代码，带行号前缀。
+    """
+    try:
+        filepath = _get_safe_filepath(filename)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.exists(filepath):
+        return f"Error: File '{filename}' does not exist."
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        total_lines = len(lines)
+        # 校验行号范围
+        if start_line < 1:
+            return f"Error: start_line 必须 >= 1，当前值: {start_line}"
+        if end_line > total_lines:
+            return f"Error: end_line 超出文件范围。文件共 {total_lines} 行，请求结束行: {end_line}"
+        if start_line > end_line:
+            return f"Error: start_line ({start_line}) 不能大于 end_line ({end_line})"
+        
+        selected = lines[start_line - 1:end_line]
+        numbered = "".join(f"  {i + start_line} | {line}" for i, line in enumerate(selected))
+        return f"--- Lines {start_line}-{end_line} of {filename} ---\n{numbered}\n--- End ---"
+    except Exception as e:
+        return f"Error reading file range {filename}: {str(e)}"
 
 
 @tool
@@ -333,8 +541,8 @@ def list_backups_tool(filename: str = None) -> str:
     return list_backups(filename)
 
 
-# 基础工具列表（用于 Agent 绑定）
-tools = [write_file, edit_file, read_file]
+# 基础工具列表（用于 Agent 绑定）- 包含新的 AST 感知读取工具
+tools = [write_file, edit_file, read_file, read_function, read_class, read_file_range]
 
 # 扩展工具列表（包含备份管理工具）
 extended_tools = tools + [rollback_file_tool, list_backups_tool]
