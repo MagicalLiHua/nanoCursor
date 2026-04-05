@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from src.core.logger import logger
 
-# 加载 .env 文件
-load_dotenv()
+# 加载 .env 文件（位于 src/core/ 目录下）
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=_env_path)
 
 
 def _create_openai_llm(
@@ -186,6 +187,25 @@ class LLMWithRetry:
         self._llm = llm
         self._max_retries = max_retries
     
+    async def ainvoke(self, messages, *args, **kwargs):
+        """异步调用，带指数退避重试"""
+        last_exception = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return await self._llm.ainvoke(messages, *args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"LLM 异步调用失败 (尝试 {attempt}/{self._max_retries}): {e}")
+                if attempt < self._max_retries:
+                    # 指数退避重试
+                    wait_time = 2 ** (attempt - 1)
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    import asyncio
+                    await asyncio.sleep(wait_time)
+
+        logger.error(f"LLM 异步调用失败，已达到最大重试次数 ({self._max_retries})")
+        raise last_exception
+
     def invoke(self, messages, *args, **kwargs):
         last_exception = None
         for attempt in range(1, self._max_retries + 1):
@@ -200,7 +220,7 @@ class LLMWithRetry:
                     logger.info(f"等待 {wait_time} 秒后重试...")
                     import time
                     time.sleep(wait_time)
-        
+
         logger.error(f"LLM 调用失败，已达到最大重试次数 ({self._max_retries})")
         raise last_exception
     
@@ -267,5 +287,12 @@ def get_llm(
     return _llm_instance
 
 
-# 保持向后兼容的默认导出
-llm = get_llm()
+# 保持向后兼容的默认导出 -- 懒加载，首次被访问时才初始化
+class _LazyLLM:
+    """懒加载 LLM 代理，避免在模块 import 时就执行网络请求。"""
+    def _get(self):
+        return get_llm()
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+llm = _LazyLLM()

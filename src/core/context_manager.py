@@ -487,6 +487,21 @@ def build_coder_context(
 3. 不要在回答中设想代码运行的结果。
 4. 交付：当你认为代码（包括功能和测试文件）已经编写完成，请直接回复文本"DONE"。
 
+【测试文件编写规范（重要！）】
+沙箱系统会自动扫描工作区中所有 `test_*.py` 和 `*_test.py` 文件并用 pytest / unittest 运行。
+因此你在创建测试时必须遵循以下规范：
+1. 测试文件命名：必须使用 `test_功能名.py` 或 `功能名_test.py` 格式。
+2. 测试类格式：使用 `unittest.TestCase` 风格（推荐）或 `pytest` 风格均可。
+   - `unittest` 风格：`class Test功能名(unittest.TestCase):` + `def test_具体用例(self):`
+   - `pytest` 风格：`def test_具体用例():` 或使用 `assert` 的普通函数
+3. 测试覆盖要求：
+   - 正常输入（典型用例）
+   - 边界情况（空值、单元素、极值、负数等）
+   - 异常输入（预期抛出 TypeError、ValueError 等，使用 `self.assertRaises` 或 `pytest.raises`）
+   - 重复元素、混合类型等特殊情况（视需求而定）
+4. 如果项目有外部依赖（如 numpy、requests 等），请同时创建 `requirements.txt` 文件，沙箱会自动 `pip install -r requirements.txt`。
+5. 测试文件应该包含 `class` / `def test_xxx` 这样清晰的结构，不要用 `if __name__ == '__main__': unittest.main()` 作为唯一入口——沙箱会自动发现所有 `Test*` 类和 `test_*` 函数，不需要手动入口。
+
 【文件操作的强制性规范】
 1. 创建：使用 `write_file` 创建全新文件。
 2. 修改：你**必须先读取文件内容**，然后再使用 `edit_file` 工具进行精准替换。
@@ -610,7 +625,7 @@ def build_planner_context(
     system_content += """
 
 【关键能力：探索工作区】
-如果上述摘要不足以让你做出决定，你可以使用 `read_file` 工具查看某个文件的具体完整内容。
+如果上述摘要不足以让你做出决定，你可以使用 `list_directory` 工具查看目录结构，或使用 `read_file` 工具查看某个文件的具体完整内容。
 当然，有时候也出出现用户给你的任务是在一个空白的工作区内开始的，这是被允许的, 如果当前工作目录为空的话你直接按照用户需求指定计划就可以了，不需要探索工作区。
 
 【输出规范：交付计划】

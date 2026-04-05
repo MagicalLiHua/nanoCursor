@@ -12,7 +12,8 @@ from src.core.context_manager import (
     estimate_messages_tokens,
     update_memory_summary,
 )
-from src.tools.file_tools import read_file
+from src.core.metrics import metrics
+from src.tools.file_tools import read_file, list_directory
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,10 @@ class PlanOutput(BaseModel):
 parser = PydanticOutputParser(pydantic_object=PlanOutput)
 
 
-def planner_node(state: AgentState):
+async def planner_node(state: AgentState):
     # 动态获取最新的仓库地图
     current_repo_map = generate_repo_map()
-    planner_llm = llm.bind_tools([read_file])
+    planner_llm = llm.bind_tools([read_file, list_directory])
     logger.info("正在进行架构思考与探索...")
     format_instructions = parser.get_format_instructions()
 
@@ -40,7 +41,9 @@ def planner_node(state: AgentState):
     logger.debug(f"上下文 Token 估算: ~{token_count} tokens")
 
     # 正常调用 LLM (它已经绑定了 tools)
-    response = planner_llm.invoke(filtered_messages)
+    start = metrics.record_llm_call_start()
+    response = await planner_llm.ainvoke(filtered_messages)
+    metrics.record_llm_call_end(start, tokens_used=token_count, node_name="Planner")
 
     # 如果大模型调用了工具，就直接返回消息，进入图的 Tool 循环
     if getattr(response, 'tool_calls', []):

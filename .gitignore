@@ -6,6 +6,8 @@
 
 .vscode/
 **/.vscode/
+.claude/
+.pytest_cache/
 
 # 忽略所有层级的 .env 文件
 .env

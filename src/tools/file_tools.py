@@ -12,7 +12,9 @@ import logging
 from datetime import datetime
 from typing import Optional, List
 from langchain_core.tools import tool
-from src.core.config import WORKSPACE_DIR
+from src.core.config import (
+    WORKSPACE_DIR, LARGE_FILE_THRESHOLD, FUZZY_MATCH_THRESHOLD, MAX_FUZZY_MATCH_LINES
+)
 from src.core.logger import logger
 
 # 备份目录
@@ -20,9 +22,6 @@ BACKUP_DIR = os.path.join(WORKSPACE_DIR, ".backups")
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
-
-# 文件读取阈值：超过此字符数的文件将被视为大文件
-LARGE_FILE_THRESHOLD: int = 5000
 
 
 def _get_safe_filepath(filename: str) -> str:
@@ -171,11 +170,16 @@ def _extract_ast_outline(filepath: str) -> str:
     total_lines = len(lines)
 
     parts: List[str] = []
-    for node in ast.walk(tree):
+    _claimed_funcs: set = set()  # Track (func_name, lineno) claimed by classes
+
+    # Handle only module-level nodes to avoid double-counting methods inside classes
+    for node in tree.body:
         if isinstance(node, ast.ClassDef):
             methods_info = []
             for child in ast.walk(node):
-                if isinstance(child, ast.FunctionDef) and child != node:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is not node:
+                    key = (child.name, child.lineno)
+                    _claimed_funcs.add(key)
                     methods_info.append(_format_function(child))
             class_info = f"class {node.name} (line {node.lineno}-{getattr(node, 'end_lineno', node.lineno)})"
             if methods_info:
@@ -183,7 +187,9 @@ def _extract_ast_outline(filepath: str) -> str:
             else:
                 parts.append(f"{class_info}")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            parts.append(_format_function(node))
+            key = (node.name, node.lineno)
+            if key not in _claimed_funcs:
+                parts.append(_format_function(node))
 
     if not parts:
         return "(无函数或类定义)"
@@ -259,6 +265,42 @@ def _extract_class_source(filepath: str, class_name: str) -> str:
 # ==========================================
 # 工具定义 (Tools)
 # ==========================================
+
+@tool
+def list_directory(path: str = ".") -> str:
+    """
+    列出指定目录中的文件和子目录。
+
+    参数 (Args):
+        path (str): 目录的相对路径，默认为工作区根目录 "."。
+
+    返回 (Returns):
+        str: 目录内容列表，包含文件/文件夹类型和名称。
+    """
+    try:
+        filepath = _get_safe_filepath(path)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.isdir(filepath):
+        return f"Error: '{path}' 不是一个存在的目录。"
+
+    entries = []
+    try:
+        for entry in sorted(os.listdir(filepath)):
+            full_path = os.path.join(filepath, entry)
+            is_dir = os.path.isdir(full_path)
+            if not entry.startswith((".backups", ".snapshots")):
+                prefix = "[DIR]  " if is_dir else "[FILE] "
+                entries.append(f"  {prefix}{entry}")
+
+        if not entries:
+            return f"目录 '{path}' 为空。"
+
+        return f"目录 '{path}' 的内容:\n" + "\n".join(entries)
+    except Exception as e:
+        return f"Error listing directory {path}: {str(e)}"
+
 
 @tool
 def read_file(filename: str) -> str:
@@ -468,6 +510,14 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         # 策略 3: 基于 difflib 的模糊匹配 (解决大模型缩进/换行幻觉)
         else:
             content_lines = content.splitlines()
+            # 性能保护：超过 MAX_FUZZY_MATCH_LINES 行的文件跳过模糊匹配
+            if len(content_lines) > MAX_FUZZY_MATCH_LINES:
+                return (
+                    f"修改失败：{filename} 行数过多 ({len(content_lines)})，无法执行模糊匹配。\n"
+                    f"请先使用 read_file_range 读取目标区域，再使用精确匹配的 search_block 重试。"
+                )
+
+            content_lines = content.splitlines()
             search_lines = search_block.splitlines()
 
             # 过滤掉空行，寻找最高相似度的代码块
@@ -487,12 +537,16 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
                     best_end = i + search_len
 
             # 设定相似度阈值
-            if best_ratio > 0.9:
-                # 执行块替换
+            if best_ratio > FUZZY_MATCH_THRESHOLD:
+                # 执行块替换，保留文件首尾空白不被 strip 破坏
                 before_block = '\n'.join(content_lines[:best_start])
                 after_block = '\n'.join(content_lines[best_end:])
-                # 重新拼接文件内容
-                new_content = f"{before_block}\n{replace_block}\n{after_block}".strip() + "\n"
+                new_content = before_block + '\n' + replace_block + '\n' + after_block
+                # 规范化连续多余空行 (4+ blank lines → 2)
+                import re as _re
+                new_content = _re.sub(r'\n{4,}', '\n\n\n', new_content)
+                if not new_content.endswith('\n'):
+                    new_content += '\n'
                 match_strategy = f"模糊匹配 (Fuzzy Match, 相似度 {best_ratio:.1%})"
             else:
                 return (
@@ -543,6 +597,9 @@ def list_backups_tool(filename: str = None) -> str:
 
 # 基础工具列表（用于 Agent 绑定）- 包含新的 AST 感知读取工具
 tools = [write_file, edit_file, read_file, read_function, read_class, read_file_range]
+
+# Planner 专属工具列表：只有读取类工具 + 目录浏览
+planner_tools = [read_file, list_directory]
 
 # 扩展工具列表（包含备份管理工具）
 extended_tools = tools + [rollback_file_tool, list_backups_tool]
