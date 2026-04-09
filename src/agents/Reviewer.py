@@ -219,4 +219,7 @@ async def reviewer_node(state: AgentState):
         name="Reviewer",
     )
 
-    return {"messages": [review_msg]}
+    return {
+        "messages": [review_msg],
+        "coder_step_count": 0,  # Reset so Coder gets a fresh budget in the repair cycle
+    }

@@ -150,6 +150,27 @@ def extract_file_signatures(messages: List[BaseMessage]) -> dict[str, str]:
 # 上下文压缩 (v2.0: LLM 驱动的智能压缩)
 # ==========================================
 
+def filter_orphan_tool_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """
+    移除孤立的 ToolMessage。
+
+    OpenAI 兼容的 API 要求：每条 ToolMessage 前面必须紧跟着一个包含 tool_calls 的
+    Assistant 消息。如果消息序列的开头是 ToolMessage，或者 ToolMessage 前面不是
+    tool_calls 消息，API 会返回 400 错误。
+    """
+    filtered = []
+    for i, msg in enumerate(messages):
+        if isinstance(msg, ToolMessage):
+            # 检查前一条消息是否是包含 tool_calls 的 AIMessage
+            if not filtered:
+                continue  # 第一条消息就是 ToolMessage，跳过
+            prev = filtered[-1]
+            if not (isinstance(prev, AIMessage) and getattr(prev, 'tool_calls', [])):
+                continue  # 前一条不是 tool_calls 消息，跳过
+        filtered.append(msg)
+    return filtered
+
+
 def compress_tool_messages(messages: List[BaseMessage], max_content_length: int = 10000) -> List[BaseMessage]:
     """
     压缩工具消息，保留头尾内容，避免超长文件内容挤占上下文。
@@ -481,11 +502,16 @@ def build_coder_context(
 【目标文件】
 {', '.join(active_files) if active_files else '未指定'}
 
+【任务完成的判断标准（极其重要！）】
+1. 当计划中要求创建/修改的所有文件都已经被 write_file 或 edit_file 工具成功操作后，你的任务就结束了。
+2. 一旦某个工具调用返回了"Successfully created"/"成功"等确认信息，**该文件的操作即视为已完成**，你不需要、也不应该再次操作同一个文件。
+3. 所有目标文件都处理完毕后，**直接回复空字符串或 "DONE"**，不要再调用任何工具。如果你继续调用工具，会导致 API 错误和工作流崩溃。
+4. 判断你"做完了"的具体标准是：【目标文件】列表中的每一个路径都至少对应一次已经成功的 write_file / edit_file 调用。
+
 【Coder 的职责边界】
 1. 你只是一个"代码手术刀"。你没有执行、运行、测试或验证代码的环境与工具。
 2. 如果计划中要求"测试"，你的任务仅仅是把测试逻辑**写到测试文件里**。
 3. 不要在回答中设想代码运行的结果。
-4. 交付：当你认为代码（包括功能和测试文件）已经编写完成，请直接回复文本"DONE"。
 
 【测试文件编写规范（重要！）】
 沙箱系统会自动扫描工作区中所有 `test_*.py` 和 `*_test.py` 文件并用 pytest / unittest 运行。
@@ -559,6 +585,8 @@ def build_coder_context(
         recent_messages = messages
         summary_slot = ContextSlot("history_summary", [], priority=3)
     
+    # 移除孤立的 ToolMessage（避免 API 400 错误）
+    recent_messages = filter_orphan_tool_messages(recent_messages)
     # 压缩工具消息中的长文本
     recent_messages = compress_tool_messages(recent_messages)
     history_slot = ContextSlot("recent_history", recent_messages, priority=2)
@@ -626,10 +654,11 @@ def build_planner_context(
 
 【关键能力：探索工作区】
 如果上述摘要不足以让你做出决定，你可以使用 `list_directory` 工具查看目录结构，或使用 `read_file` 工具查看某个文件的具体完整内容。
-当然，有时候也出出现用户给你的任务是在一个空白的工作区内开始的，这是被允许的, 如果当前工作目录为空的话你直接按照用户需求指定计划就可以了，不需要探索工作区。
+当然，有时候也会出现用户给你的任务是在一个空白的工作区内开始的，这是被允许的。如果当前工作目录为空的话，你直接按照用户需求制定计划就可以了，不需要探索工作区。
 
 【输出规范：交付计划】
-当你完成了探索，确定了最终的执行计划后，请停止调用工具，并在你的回复中包含一个严格的 Markdown JSON 块。
+当你完成了探索，确定了最终的执行计划后，请停止调用工具，以清晰的自然语言格式输出计划，包含分步说明和涉及的文件路径。
+在计划末尾用【目标文件】标记列出所有涉及的文件路径，每行一个。
 """
     
     # 构建上下文槽位

@@ -28,9 +28,10 @@ def _get_safe_filepath(filename: str) -> str:
     """
     将用户提供的相对路径转换为绝对路径，并严格校验其是否在 WORKSPACE_DIR 内部。
     如果发生目录穿越 (如 ../../)，将抛出 ValueError。
+    使用 os.path.realpath 解析符号链接，防止通过软链接逃逸工作区。
     """
-    workspace_abs = os.path.abspath(WORKSPACE_DIR)
-    target_abs = os.path.abspath(os.path.join(workspace_abs, filename))
+    workspace_abs = os.path.realpath(WORKSPACE_DIR)
+    target_abs = os.path.realpath(os.path.join(workspace_abs, filename))
 
     if not target_abs.startswith(workspace_abs):
         raise ValueError(f"安全拦截：禁止访问工作区之外的路径 -> {filename}")
@@ -447,11 +448,9 @@ def write_file(filename: str, content: str) -> str:
     except ValueError as e:
         return str(e)
 
-    # 如果文件已存在，先备份
+    # 如果文件已存在，拒绝覆盖（应使用 edit_file 修改已有文件）
     if os.path.exists(filepath):
-        backup_path = backup_file(filename)
-        if backup_path:
-            logger.warning(f"write_file 覆盖了已存在的文件 {filename}，原文件已备份到 {backup_path}")
+        return f"错误：文件 {filename} 已存在。write_file 仅用于创建新文件，请使用 edit_file 工具修改已有文件。"
 
     # 增强功能：如果大模型想在不存在的子目录创建文件，自动帮它创建目录
     os.makedirs(os.path.dirname(filepath), exist_ok=True)

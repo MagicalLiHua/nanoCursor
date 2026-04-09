@@ -38,6 +38,11 @@ def _discover_test_files(workspace_dir: str) -> list[str]:
 # Docker 运行器
 # ---------------------------------------------------------------
 
+def _sanitize_shell_arg(s: str) -> str:
+    """Escape single quotes in a string so it is safe inside bash -c '...'."""
+    return s.replace("'", "'\\''")
+
+
 def _run_in_container(
     run_command: str,
     image: str = SANDBOX_IMAGE,
@@ -58,7 +63,9 @@ def _run_in_container(
         install_cmd = "pip install -r requirements.txt && "
 
     try:
-        full_command = f"bash -c '{install_cmd}{run_command}'"
+        safe_install = _sanitize_shell_arg(install_cmd)
+        safe_run = _sanitize_shell_arg(run_command)
+        full_command = f"bash -c '{safe_install}{safe_run}'"
         container_timeout = int(os.environ.get("SANDBOX_TIMEOUT_SECONDS", "60"))
 
         # 使用 detach + wait(timeout) 模式，防止死循环容器永久挂起

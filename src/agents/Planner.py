@@ -1,8 +1,6 @@
 import logging
-from typing import List
-from langchain_core.output_parsers import PydanticOutputParser
-from pydantic import BaseModel, Field
-from langchain_core.messages import SystemMessage, AIMessage
+import re
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.core.repo_map import generate_repo_map
 from src.core.state import AgentState
@@ -18,20 +16,11 @@ from src.tools.file_tools import read_file, list_directory
 logger = logging.getLogger(__name__)
 
 
-class PlanOutput(BaseModel):
-    plan: str = Field(description="详细的分步执行计划，必须包含具体的测试用例和边界情况检查")
-    files: List[str] = Field(description="需要修改或查看的本地目标文件路径列表", default_factory=list)
-
-# 实例化 Pydantic 解析器
-parser = PydanticOutputParser(pydantic_object=PlanOutput)
-
-
-async def planner_node(state: AgentState):
+def planner_node(state: AgentState):
     # 动态获取最新的仓库地图
     current_repo_map = generate_repo_map()
     planner_llm = llm.bind_tools([read_file, list_directory])
     logger.info("正在进行架构思考与探索...")
-    format_instructions = parser.get_format_instructions()
 
     # 🌟 使用上下文管理器构建优化上下文 (传递 LLM 实例支持智能摘要)
     filtered_messages = build_planner_context(state, current_repo_map, llm=llm)
@@ -40,9 +29,18 @@ async def planner_node(state: AgentState):
     token_count = estimate_messages_tokens(filtered_messages)
     logger.debug(f"上下文 Token 估算: ~{token_count} tokens")
 
+    # 追加自然语言表达指令
+    instruction_msg = HumanMessage(
+        content=(
+            "请根据上述需求制定分步的开发计划，以清晰的自然语言回复。"
+            "最后用【目标文件】标记列出涉及或需要查看的所有本地文件路径。"
+        )
+    )
+    filtered_messages.append(instruction_msg)
+
     # 正常调用 LLM (它已经绑定了 tools)
     start = metrics.record_llm_call_start()
-    response = await planner_llm.ainvoke(filtered_messages)
+    response = planner_llm.invoke(filtered_messages)
     metrics.record_llm_call_end(start, tokens_used=token_count, node_name="Planner")
 
     # 如果大模型调用了工具，就直接返回消息，进入图的 Tool 循环
@@ -50,21 +48,25 @@ async def planner_node(state: AgentState):
         logger.info("决定调用工具探索项目...")
         return {"messages": [response]}
 
-    # 使用 Pydantic 解析器替代脆弱的正则
+    # 从自然语言回复中提取计划和目标文件
     logger.info("探索完毕，生成最终计划！")
 
-    try:
-        # parser.invoke 会自动处理各种边界情况（剥离 markdown、处理转义符）
-        parsed_result = parser.invoke(response.content)
-        new_plan = parsed_result.plan
-        target_files = parsed_result.files
-    except Exception as e:
-        logger.warning(f"结构化解析失败，触发兜底机制。错误: {e}")
-        new_plan = response.content
-        target_files = []
+    raw_text = response.content.strip()
+    # 清理 markdown 代码块
+    fence = re.match(r'^```(?:md|markdown)?\s*\n?(.*?)```$', raw_text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        raw_text = fence.group(1).strip()
 
-    display_content = f"**架构师最终计划:**\n{new_plan}\n\n **目标文件:** {', '.join(target_files) if target_files else '无'}"
-    plan_message = AIMessage(content=display_content, name="Planner")
+    # 提取目标文件
+    target_files = []
+    files_section_match = re.search(r'【目标文件】\s*(.*?)(?:$|【)', raw_text, re.DOTALL)
+    if files_section_match:
+        files_text = files_section_match.group(1).strip()
+        target_files = [f.strip().strip('`,-*') for f in re.split(r'[\n,，\s]+', files_text) if f.strip()]
+        # 移除 "【目标文件】" 本身混入的情况
+        target_files = [f for f in target_files if not f.startswith('【')]
+
+    plan_message = AIMessage(content=raw_text, name="Planner")
 
     # 🌟 更新记忆摘要
     current_summary = state.get("memory_summary")
@@ -73,7 +75,7 @@ async def planner_node(state: AgentState):
 
     return {
         "messages": [plan_message],
-        "current_plan": new_plan,
+        "current_plan": raw_text,
         "active_files": target_files,
         "retry_count": 0,
         "error_trace": "",

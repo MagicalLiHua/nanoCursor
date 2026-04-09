@@ -1,9 +1,0 @@
-{
-  "snapshot_id": "20260405_104447",
-  "timestamp": "2026-04-05T10:44:47.942045",
-  "reason": "max_retries_reached",
-  "active_files": [],
-  "error_trace": "Traceback: TypeError",
-  "retry_count": 3,
-  "max_retries": 3
-}
