@@ -12,6 +12,8 @@
 .env
 **/.env
 
+workspace/
+
 # Python 相关
 __pycache__/
 venv/

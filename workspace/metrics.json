@@ -1,0 +1,35 @@
+{
+  "llm": {
+    "total_calls": 0,
+    "total_tokens": 0,
+    "avg_tokens_per_call": 0,
+    "avg_latency_ms": 0,
+    "max_latency_ms": 0,
+    "min_latency_ms": 0
+  },
+  "tool_calls": {
+    "total": 0,
+    "successes": 0,
+    "failures": 0,
+    "success_rate": 0,
+    "failure_reasons": []
+  },
+  "repair_cycles": {
+    "total": 0,
+    "outcomes": [
+      {
+        "outcome": "fixed",
+        "error": ""
+      },
+      {
+        "outcome": "still_failing",
+        "error": "Traceback: TypeError"
+      },
+      {
+        "outcome": "still_failing",
+        "error": "Traceback: TypeError"
+      }
+    ]
+  },
+  "recent_llm_records": []
+}
