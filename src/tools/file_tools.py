@@ -6,14 +6,18 @@
 
 import ast
 import difflib
+import logging
 import os
 import shutil
-import logging
 from datetime import datetime
-from typing import Optional, List
+
 from langchain_core.tools import tool
+
 from src.core.config import (
-    WORKSPACE_DIR, LARGE_FILE_THRESHOLD, FUZZY_MATCH_THRESHOLD, MAX_FUZZY_MATCH_LINES
+    FUZZY_MATCH_THRESHOLD,
+    LARGE_FILE_THRESHOLD,
+    MAX_FUZZY_MATCH_LINES,
+    WORKSPACE_DIR,
 )
 from src.core.logger import logger
 
@@ -49,7 +53,7 @@ def _get_backup_filepath(filename: str) -> str:
     return os.path.join(BACKUP_DIR, f"{safe_name}.bak.{timestamp}")
 
 
-def backup_file(filename: str) -> Optional[str]:
+def backup_file(filename: str) -> str | None:
     """
     备份指定文件到 .backups 目录。
     
@@ -90,36 +94,36 @@ def rollback_file(filename: str, backup_index: int = -1) -> str:
     """
     safe_name = filename.replace(os.sep, "_")
     backup_pattern = f"{safe_name}.bak."
-    
+
     try:
         # 获取所有备份文件
         backups = [
-            f for f in os.listdir(BACKUP_DIR) 
+            f for f in os.listdir(BACKUP_DIR)
             if f.startswith(backup_pattern)
         ]
-        
+
         if not backups:
             return f"未找到文件 {filename} 的备份。"
-        
+
         # 按备份时间排序
         backups.sort()
         selected_backup = backups[backup_index]
         backup_path = os.path.join(BACKUP_DIR, selected_backup)
-        
+
         # 恢复文件
         filepath = _get_safe_filepath(filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         shutil.copy2(backup_path, filepath)
-        
+
         logger.info(f"已回滚文件 {filename} 到备份 {selected_backup}")
         return f"成功回滚文件 {filename}，使用备份: {selected_backup}"
-    
+
     except Exception as e:
         logger.error(f"回滚文件 {filename} 失败: {e}")
-        return f"回滚失败: {str(e)}"
+        return f"回滚失败: {e!s}"
 
 
-def list_backups(filename: Optional[str] = None) -> str:
+def list_backups(filename: str | None = None) -> str:
     """
     列出所有备份文件。
     
@@ -131,21 +135,21 @@ def list_backups(filename: Optional[str] = None) -> str:
     """
     try:
         backups = os.listdir(BACKUP_DIR)
-        
+
         if filename:
             safe_name = filename.replace(os.sep, "_")
             backups = [b for b in backups if b.startswith(safe_name)]
-        
+
         if not backups:
             return "没有备份文件。"
-        
+
         backups.sort()
         result = f"找到的 {len(backups)} 个备份:\n"
         for i, b in enumerate(backups):
             backup_path = os.path.join(BACKUP_DIR, b)
             size = os.path.getsize(backup_path)
             result += f"  {i}: {b} ({size} bytes)\n"
-        
+
         return result
     except Exception as e:
         return f"获取备份列表失败: {e}"
@@ -161,7 +165,7 @@ def _extract_ast_outline(filepath: str) -> str:
     包含：函数名、参数名、起始行号、结束行号。
     """
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=filepath)
     except Exception as e:
@@ -170,7 +174,7 @@ def _extract_ast_outline(filepath: str) -> str:
     lines = source.splitlines()
     total_lines = len(lines)
 
-    parts: List[str] = []
+    parts: list[str] = []
     _claimed_funcs: set = set()  # Track (func_name, lineno) claimed by classes
 
     # Handle only module-level nodes to avoid double-counting methods inside classes
@@ -220,14 +224,14 @@ def _extract_function_source(filepath: str, function_name: str) -> str:
     使用 ast 定位指定函数，返回其完整源码（带行号前缀）。
     """
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=filepath)
     except Exception as e:
         return f"(AST 解析失败: {e})"
 
     lines = source.splitlines()
-    
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
             start = node.lineno
@@ -235,7 +239,7 @@ def _extract_function_source(filepath: str, function_name: str) -> str:
             func_lines = lines[start - 1:end]
             numbered = "\n".join(f"  {i + start - 1} | {line}" for i, line in enumerate(func_lines))
             return f"[函数 {function_name} 源码] (line {start}-{end})\n\n{numbered}"
-    
+
     return f"未找到函数 '{function_name}'。请检查函数名是否正确，或使用 read_file 查看文件完整内容。"
 
 
@@ -244,14 +248,14 @@ def _extract_class_source(filepath: str, class_name: str) -> str:
     使用 ast 定位指定类，返回其完整源码（带行号前缀）。
     """
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=filepath)
     except Exception as e:
         return f"(AST 解析失败: {e})"
 
     lines = source.splitlines()
-    
+
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             start = node.lineno
@@ -259,7 +263,7 @@ def _extract_class_source(filepath: str, class_name: str) -> str:
             class_lines = lines[start - 1:end]
             numbered = "\n".join(f"  {i + start - 1} | {line}" for i, line in enumerate(class_lines))
             return f"[类 {class_name} 源码] (line {start}-{end})\n\n{numbered}"
-    
+
     return f"未找到类 '{class_name}'。请检查类名是否正确，或使用 read_file 查看文件完整内容。"
 
 
@@ -300,7 +304,7 @@ def list_directory(path: str = ".") -> str:
 
         return f"目录 '{path}' 的内容:\n" + "\n".join(entries)
     except Exception as e:
-        return f"Error listing directory {path}: {str(e)}"
+        return f"Error listing directory {path}: {e!s}"
 
 
 @tool
@@ -326,19 +330,19 @@ def read_file(filename: str) -> str:
         return f"Error: File '{filename}' does not exist. Cannot read."
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
         logger.debug(f"读取文件: {filename} ({len(content)} 字符)")
-        
+
         # 小文件直接返回完整内容
         if len(content) <= LARGE_FILE_THRESHOLD:
             return f"--- Content of {filename} ---\n{content}\n--- End of {filename} ---"
-        
+
         # 大文件返回 AST 结构大纲
         outline = _extract_ast_outline(filepath)
         return f"--- Structure of {filename} ({len(content)} 字符, 大文件) ---\n{outline}\n--- End of {filename} ---"
     except Exception as e:
-        return f"Error reading file {filename}: {str(e)}"
+        return f"Error reading file {filename}: {e!s}"
 
 
 @tool
@@ -411,9 +415,9 @@ def read_file_range(filename: str, start_line: int, end_line: int) -> str:
         return f"Error: File '{filename}' does not exist."
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             lines = f.readlines()
-        
+
         total_lines = len(lines)
         # 校验行号范围
         if start_line < 1:
@@ -422,12 +426,12 @@ def read_file_range(filename: str, start_line: int, end_line: int) -> str:
             return f"Error: end_line 超出文件范围。文件共 {total_lines} 行，请求结束行: {end_line}"
         if start_line > end_line:
             return f"Error: start_line ({start_line}) 不能大于 end_line ({end_line})"
-        
+
         selected = lines[start_line - 1:end_line]
         numbered = "".join(f"  {i + start_line} | {line}" for i, line in enumerate(selected))
         return f"--- Lines {start_line}-{end_line} of {filename} ---\n{numbered}\n--- End ---"
     except Exception as e:
-        return f"Error reading file range {filename}: {str(e)}"
+        return f"Error reading file range {filename}: {e!s}"
 
 
 @tool
@@ -453,7 +457,9 @@ def write_file(filename: str, content: str) -> str:
         return f"错误：文件 {filename} 已存在。write_file 仅用于创建新文件，请使用 edit_file 工具修改已有文件。"
 
     # 增强功能：如果大模型想在不存在的子目录创建文件，自动帮它创建目录
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    dir_name = os.path.dirname(filepath)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
 
     try:
         with open(filepath, "w", encoding="utf-8") as f:
@@ -461,7 +467,7 @@ def write_file(filename: str, content: str) -> str:
         logger.info(f"写入文件: {filename} ({len(content)} 字符)")
         return f"Successfully created/updated file: {filename}"
     except Exception as e:
-        return f"Error writing file {filename}: {str(e)}"
+        return f"Error writing file {filename}: {e!s}"
 
 
 @tool
@@ -487,7 +493,7 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         return f"错误：文件 {filename} 不存在。请先使用 write_file 创建它。"
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
 
         # 在修改前备份文件
@@ -562,7 +568,7 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         logger.info(f"修改文件: {filename} [{match_strategy}]{backup_info}")
         return f"成功修改 {filename}。使用策略: [{match_strategy}]。{backup_info}"
     except Exception as e:
-        return f"修改文件 {filename} 时发生错误: {str(e)}"
+        return f"修改文件 {filename} 时发生错误: {e!s}"
 
 
 @tool

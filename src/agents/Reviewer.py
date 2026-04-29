@@ -8,17 +8,18 @@ import difflib
 import logging
 import os
 import re
-from langchain_core.messages import SystemMessage, AIMessage
 
-from src.core.repo_map import generate_repo_map
-from src.core.state import AgentState
-from src.core.llm_engine import llm
+from langchain_core.messages import AIMessage, SystemMessage
+
 from src.core.config import WORKSPACE_DIR
 from src.core.context_manager import (
     build_reviewer_context,
     estimate_messages_tokens,
 )
+from src.core.llm_engine import llm
 from src.core.metrics import metrics
+from src.core.repo_map import generate_repo_map
+from src.core.state import AgentState, check_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +106,13 @@ def get_changed_files_diff(state: AgentState) -> str:
 
         latest_backup = os.path.join(BACKUP_DIR, backups[-1])
         try:
-            with open(latest_backup, "r", encoding="utf-8") as f:
+            with open(latest_backup, encoding="utf-8") as f:
                 backup_lines = f.read().splitlines(keepends=True)
         except Exception:
             backup_lines = []
 
         try:
-            with open(current_path, "r", encoding="utf-8") as f:
+            with open(current_path, encoding="utf-8") as f:
                 current_lines = f.read().splitlines(keepends=True)
         except Exception:
             current_lines = []
@@ -153,6 +154,7 @@ async def reviewer_node(state: AgentState):
     Returns:
         dict: 更新的状态，包含诊断报告消息
     """
+    check_cancelled(state)
     logger.info("正在分析报错原因，生成诊断报告...")
 
     # -- Build diff & syntax hints before LLM call --

@@ -1,22 +1,24 @@
 import logging
 import re
+
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.core.repo_map import generate_repo_map
-from src.core.state import AgentState
-from src.core.llm_engine import llm
 from src.core.context_manager import (
     build_planner_context,
     estimate_messages_tokens,
     update_memory_summary,
 )
+from src.core.llm_engine import llm
 from src.core.metrics import metrics
-from src.tools.file_tools import read_file, list_directory
+from src.core.repo_map import generate_repo_map
+from src.core.state import AgentState, check_cancelled
+from src.tools.file_tools import list_directory, read_file
 
 logger = logging.getLogger(__name__)
 
 
 def planner_node(state: AgentState):
+    check_cancelled(state)
     # 动态获取最新的仓库地图
     current_repo_map = generate_repo_map()
     planner_llm = llm.bind_tools([read_file, list_directory])

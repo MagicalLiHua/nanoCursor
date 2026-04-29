@@ -9,21 +9,19 @@ Covers:
 - extract_original_request, extract_file_signatures
 """
 
-import pytest
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.core.context_manager import (
-    estimate_token_count,
-    estimate_messages_tokens,
-    calculate_dynamic_window,
     ContextSlot,
     build_context_with_priority,
-    compress_tool_messages,
-    extract_original_request,
-    extract_file_signatures,
     build_edit_summary,
+    calculate_dynamic_window,
+    compress_tool_messages,
+    estimate_messages_tokens,
+    estimate_token_count,
+    extract_file_signatures,
+    extract_original_request,
 )
-
 
 # ---------------------------------------------------------------------------
 # Token estimation

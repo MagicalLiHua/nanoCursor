@@ -88,15 +88,17 @@ function WorkspaceFilesTab() {
   const [fileContent, setFileContent] = useState<FileData | null>(null);
   // 读取文件内容的加载状态
   const [fileLoading, setFileLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   /** 加载文件列表 */
   async function loadFiles() {
     try {
       setLoading(true);
+      setLoadError('');
       const result = await listFiles();
       setFiles(result.files);
-    } catch (e) {
-      // 加载失败，设为空
+    } catch (e: any) {
+      setLoadError(e.message || '加载文件列表失败');
       setFiles([]);
     } finally {
       setLoading(false);
@@ -155,7 +157,13 @@ function WorkspaceFilesTab() {
           </div>
         )}
 
-        {!loading && files.length === 0 && (
+        {!loading && loadError && (
+          <div className="empty-state">
+            <p style={{ color: '#ef4444' }}>{loadError}</p>
+          </div>
+        )}
+
+        {!loading && !loadError && files.length === 0 && (
           <div className="empty-state">
             <div className="placeholder-icon">~</div>
             <p>工作区暂无文件</p>
@@ -229,14 +237,17 @@ function BackupsTab() {
   const [loading, setLoading] = useState(true);
   const [selectedBackup, setSelectedBackup] = useState('');
   const [backupContent, setBackupContent] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   /** 加载备份列表 */
   async function loadBackups() {
     try {
       setLoading(true);
+      setLoadError('');
       const result = await listBackups();
       setBackups(result.backups);
-    } catch {
+    } catch (e: any) {
+      setLoadError(e.message || '加载备份列表失败');
       setBackups([]);
     } finally {
       setLoading(false);
@@ -281,7 +292,13 @@ function BackupsTab() {
           </div>
         )}
 
-        {!loading && backups.length === 0 && (
+        {!loading && loadError && (
+          <div className="empty-state">
+            <p style={{ color: '#ef4444' }}>{loadError}</p>
+          </div>
+        )}
+
+        {!loading && !loadError && backups.length === 0 && (
           <div className="empty-state">
             <div className="placeholder-icon">~</div>
             <p>暂无备份文件</p>
@@ -344,14 +361,17 @@ function SnapshotsTab() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<SnapshotDetail | null>(null);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
   const [selectedCodeFile, setSelectedCodeFile] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   /** 加载快照列表 */
   async function loadSnapshots() {
     try {
       setLoading(true);
+      setLoadError('');
       const result = await listSnapshots();
       setSnapshots(result.snapshots);
-    } catch {
+    } catch (e: any) {
+      setLoadError(e.message || '加载快照列表失败');
       setSnapshots([]);
     } finally {
       setLoading(false);
@@ -387,7 +407,13 @@ function SnapshotsTab() {
           </div>
         )}
 
-        {!loading && snapshots.length === 0 && (
+        {!loading && loadError && (
+          <div className="empty-state">
+            <p style={{ color: '#ef4444' }}>{loadError}</p>
+          </div>
+        )}
+
+        {!loading && !loadError && snapshots.length === 0 && (
           <div className="empty-state">
             <div className="placeholder-icon">~</div>
             <p>暂无恢复快照</p>
@@ -411,12 +437,12 @@ function SnapshotsTab() {
             <div className="file-viewer-header">
               <span className="file-name">快照详情</span>
               <span className="file-meta">
-                创建原因: {(selectedSnapshot.metadata as any).reason || '-'}
+                创建原因: {(selectedSnapshot.metadata as any)?.reason ?? '-'}
               </span>
             </div>
             <div className="file-viewer-content" style={{ padding: '1rem' }}>
               {/* 活跃文件列表 */}
-              {selectedSnapshot.codeFiles.length > 0 && (
+              {selectedSnapshot.codeFiles && selectedSnapshot.codeFiles.length > 0 && (
                 <>
                   <div style={{ marginBottom: '1rem' }}>
                     <strong style={{ fontSize: '0.85rem' }}>包含文件：</strong>
@@ -450,7 +476,7 @@ function SnapshotsTab() {
                         overflowX: 'auto',
                         fontSize: '0.8rem',
                       }}>
-                        {selectedSnapshot.codeFiles.find((f: any) => f.path === selectedCodeFile)?.content || ''}
+                        {selectedSnapshot.codeFiles?.find((f: any) => f.path === selectedCodeFile)?.content ?? ''}
                       </pre>
                     </div>
                   )}

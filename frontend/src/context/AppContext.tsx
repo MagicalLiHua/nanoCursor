@@ -15,6 +15,7 @@ type AppAction =
   | { type: 'SET_RUNNING'; payload: boolean }
   | { type: 'ADD_STREAM_EVENT'; payload: StreamEvent }
   | { type: 'ADD_CHAT_MESSAGE'; payload: ChatMessage }
+  | { type: 'UPDATE_CHAT_MESSAGE'; payload: { index: number; content: string } }
   | { type: 'SET_CHAT_MESSAGES'; payload: ChatMessage[] }
   | { type: 'SET_CURRENT_PLAN'; payload: string }
   | { type: 'SET_ACTIVE_FILES'; payload: string[] }
@@ -61,6 +62,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'ADD_CHAT_MESSAGE':
       return { ...state, chatMessages: [...state.chatMessages, action.payload] };
+
+    case 'UPDATE_CHAT_MESSAGE': {
+      const messages = [...state.chatMessages];
+      if (action.payload.index >= 0 && action.payload.index < messages.length) {
+        messages[action.payload.index] = { ...messages[action.payload.index], content: action.payload.content };
+      }
+      return { ...state, chatMessages: messages };
+    }
 
     case 'SET_CHAT_MESSAGES':
       return { ...state, chatMessages: action.payload };
@@ -147,6 +156,9 @@ export function useApp() {
 
 /** 辅助函数：生成 UUID v4 */
 function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === 'x' ? r : (r & 0x3) | 0x8;

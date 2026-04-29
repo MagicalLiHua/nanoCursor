@@ -1,11 +1,17 @@
-import os
 import json
+import os
+
 import docker
 from langgraph.prebuilt import ToolNode
 
+from src.core.config import (
+    SANDBOX_CONTAINER_STARTUP_TIMEOUT,
+    SANDBOX_IMAGE,
+    SANDBOX_MEM_LIMIT,
+    WORKSPACE_DIR,
+)
+from src.core.state import AgentState, check_cancelled
 from src.tools.file_tools import tools
-from src.core.config import WORKSPACE_DIR, SANDBOX_IMAGE, SANDBOX_MEM_LIMIT, SANDBOX_CONTAINER_STARTUP_TIMEOUT, FUZZY_MATCH_THRESHOLD
-from src.core.state import AgentState
 
 tool_node = ToolNode(tools)
 
@@ -21,15 +27,13 @@ except Exception as e:
 # ---------------------------------------------------------------
 
 def _discover_test_files(workspace_dir: str) -> list[str]:
-    """扫描工作区中所有测试文件（test_*.py 和 *_test.py）。"""
+    """扫描工作区中所有测试文件（支持多种命名约定）。"""
     test_files = []
     for root, dirs, files in os.walk(workspace_dir):
         # 跳过隐藏目录和备份/快照目录
-        dirs[:] = [d for d in dirs if not d.startswith((".backups", ".snapshots"))]
+        dirs[:] = [d for d in dirs if not d.startswith((".backups", ".snapshots", ".checkpoints"))]
         for f in files:
-            if f.startswith("test_") and f.endswith(".py"):
-                test_files.append(os.path.join(root, f))
-            elif f.endswith("_test.py"):
+            if f.endswith("_test.py") or f.endswith("_tests.py") or (f.startswith("test_") and (f.endswith(".py") or f.endswith("_test.py"))):
                 test_files.append(os.path.join(root, f))
     return test_files
 
@@ -49,6 +53,9 @@ def _run_in_container(
 ) -> tuple[bool, str]:
     """在 Docker 容器中执行命令。
 
+    容器在创建后始终被清理（无论成功或失败），
+    即使在 start() 和 wait() 之间发生异常也会正确停止。
+
     Returns:
         (success, output_or_error)
     """
@@ -62,10 +69,11 @@ def _run_in_container(
     if os.path.exists(os.path.join(WORKSPACE_DIR, "requirements.txt")):
         install_cmd = "pip install -r requirements.txt && "
 
+    container = None
     try:
         safe_install = _sanitize_shell_arg(install_cmd)
         safe_run = _sanitize_shell_arg(run_command)
-        full_command = f"bash -c '{safe_install}{safe_run}'"
+        full_command = f"sh -c '{safe_install}{safe_run}'"
         container_timeout = int(os.environ.get("SANDBOX_TIMEOUT_SECONDS", "60"))
 
         # 使用 detach + wait(timeout) 模式，防止死循环容器永久挂起
@@ -80,40 +88,50 @@ def _run_in_container(
             network_disabled=True,
             auto_remove=True,
         )
+        container_id = container.id
+        print(f"[Sandbox] 容器已创建: {container_id[:12]}")
 
         container.start()
-
-        try:
-            result = container.wait(timeout=container_timeout)
-            exit_code = result.get("StatusCode", 1)
-            logs = container.logs(stdout=True, stderr=True)
-
-            if exit_code == 0:
-                print(f"[Sandbox] 运行成功！(Docker 隔离环境)")
-                return True, (logs.decode("utf-8") if logs else "")
-            else:
-                print(f"[Sandbox] 运行失败 (Exit Code: {exit_code})")
-                error_output = logs.decode('utf-8') if logs else ""
-                if len(error_output) > 1500:
-                    error_output = "...[前序报错已截断]...\n" + error_output[-1500:]
-                return False, error_output.strip()
-
-        except Exception as wait_error:
-            # 超时或其他等待异常：停止并清理容器
-            print(f"[Sandbox] 执行超时或异常 ({container_timeout}s): {wait_error}")
-            try:
-                container.stop(timeout=SANDBOX_CONTAINER_STARTUP_TIMEOUT)
-            except Exception:
-                pass
-            return False, f"沙盒执行超时 ({container_timeout}s)，可能存在死循环或长时间等待的代码。"
+        print(f"[Sandbox] 容器已启动: {container_id[:12]}")
 
     except docker.errors.ImageNotFound:
-        print("[Sandbox] 首次运行正在拉取 python:3.10-slim 镜像，请稍候...")
+        print("[Sandbox] Docker 镜像不存在，正在拉取...")
         return False, "系统正在初始化 Docker 镜像，请重试。"
 
-    except Exception as e:
-        print(f"[Sandbox] Docker 底层执行异常: {e}")
-        return False, f"沙盒底层执行错误: {str(e)}"
+    except Exception as create_error:
+        # 容器创建或启动失败，尝试清理可能残留的容器
+        print(f"[Sandbox] 容器创建/启动失败: {create_error}")
+        if container:
+            try:
+                container.stop(timeout=5)
+            except Exception:
+                pass
+        return False, f"沙盒容器启动失败: {create_error!s}"
+
+    # 执行命令并确保容器被清理
+    try:
+        result = container.wait(timeout=container_timeout)
+        exit_code = result.get("StatusCode", 1)
+        logs = container.logs(stdout=True, stderr=True)
+
+        if exit_code == 0:
+            print(f"[Sandbox] 运行成功！(容器 {container_id[:12]})")
+            return True, (logs.decode("utf-8") if logs else "")
+        else:
+            print(f"[Sandbox] 运行失败 (容器 {container_id[:12]}, Exit Code: {exit_code})")
+            error_output = logs.decode('utf-8') if logs else ""
+            if len(error_output) > 1500:
+                error_output = "...[前序报错已截断]...\n" + error_output[-1500:]
+            return False, error_output.strip()
+
+    except Exception as wait_error:
+        # 超时或其他等待异常：强制停止并清理容器
+        print(f"[Sandbox] 执行超时或异常 ({container_timeout}s)，正在停止容器 {container_id[:12]}: {wait_error}")
+        try:
+            container.stop(timeout=SANDBOX_CONTAINER_STARTUP_TIMEOUT)
+        except Exception as stop_err:
+            print(f"[Sandbox] 容器停止失败（已自动移除）: {stop_err}")
+        return False, f"沙盒执行超时 ({container_timeout}s)，可能存在死循环或长时间等待的代码。"
 
 
 # ---------------------------------------------------------------
@@ -133,7 +151,7 @@ def _run_test_files_with_unittest(test_files: list[str]) -> tuple[bool, str]:
     needs_pytest = False
     for f in test_files:
         try:
-            with open(f, "r", encoding="utf-8") as fh:
+            with open(f, encoding="utf-8") as fh:
                 if "import pytest" in fh.read():
                     needs_pytest = True
                     break
@@ -216,6 +234,7 @@ def sandbox_node(state: AgentState):
     Sandbox 节点：负责在 Docker 隔离环境中执行代码，智能发现测试文件，
     自动选择 pytest / unittest 运行测试，并输出结构化测试报告。
     """
+    check_cancelled(state)
     from src.core.metrics import metrics
 
     # 标记一次修复循环开始（在此记录而非路由函数中，避免重复计数）

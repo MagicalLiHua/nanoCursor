@@ -1,20 +1,21 @@
-import uuid
+import asyncio
 import json
 import os
-import asyncio
-from langgraph.graph import StateGraph, START, END
+import uuid
+
+from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from src.core.state import AgentState, checkpointer
-from src.core.routing import route_after_planner, route_after_coder
-from src.agents.Planner import planner_node
 from src.agents.Coder import coder_node
-from src.agents.Sandbox import sandbox_node
+from src.agents.Planner import planner_node
 from src.agents.Reviewer import reviewer_node
-from src.tools.file_tools import tools, read_file, list_directory, planner_tools
+from src.agents.Sandbox import sandbox_node
 from src.core.logger import setup_logger
 from src.core.metrics import metrics
 from src.core.recovery import create_workspace_snapshot
+from src.core.routing import route_after_coder, route_after_planner
+from src.core.state import AgentState, checkpointer
+from src.tools.file_tools import planner_tools, tools
 
 # 初始化日志系统
 logger = setup_logger("nanoCursor.run")
@@ -81,7 +82,7 @@ def route_after_sandbox(state: AgentState):
             print(f"[Recovery] 工作区已保存至快照目录: {snapshot_dir}")
             metadata_path = os.path.join(snapshot_dir, "metadata.json")
             if os.path.exists(metadata_path):
-                with open(metadata_path, "r", encoding="utf-8") as f:
+                with open(metadata_path, encoding="utf-8") as f:
                     meta = json.load(f)
                     print(f"[Recovery] 已修复的文件 ({len(meta.get('active_files', []))} 个): {', '.join(meta.get('active_files', []))}")
         _print_metrics_summary()
@@ -145,6 +146,7 @@ async def main():
         "max_retries": 3,
         "retry_count": 0,
         "max_coder_steps": 15,
+        "cancelled": False,
     }
 
     # 开始异步流式运行我们的图

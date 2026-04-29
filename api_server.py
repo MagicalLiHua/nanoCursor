@@ -7,23 +7,50 @@ nanoCursor API Server - FastAPI 后端
 - 提供文件浏览、指标、配置等数据接口
 """
 
-import os
-import sys
-import json
-import uuid
-import time
 import asyncio
-import threading
+import json
+import os
 import queue
-from pathlib import Path
-from typing import Dict, Optional, Any
+import sys
+import threading
+import uuid
+from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
-from dotenv import load_dotenv
+
+# 导入 Pydantic API 模型
+from src.api.models import (
+    AgentStateResponse,
+    BackupContentResponse,
+    BackupEntry,
+    BackupListResponse,
+    CancelResponse,
+    CodeFile,
+    ConfigResponse,
+    EnvVar,
+    FileContentResponse,
+    FileEntry,
+    FileListResponse,
+    LLMProviderStatus,
+    Message,
+    MetricsCurrentResponse,
+    MetricsLLMData,
+    MetricsRepairData,
+    MetricsResponse,
+    MetricsToolData,
+    RunRequest,
+    RunResponse,
+    SnapshotDetailResponse,
+    SnapshotEntry,
+    SnapshotListResponse,
+    SnapshotMetadata,
+    SystemConfig,
+)
 
 # ============================================================
 # 导入项目模块
@@ -39,8 +66,9 @@ load_dotenv(os.path.join(ROOT, "src", "core", ".env"))
 
 # 导入 LangGraph 应用、指标收集器、配置等
 from run import app as graph_app
-from src.core.metrics import metrics as metrics_collector
 from src.core.config import WORKSPACE_DIR
+from src.core.metrics import metrics as metrics_collector
+from src.core.state import WorkflowCancelledError
 
 # ============================================================
 # 创建 FastAPI 应用
@@ -67,9 +95,51 @@ app.add_middleware(
 
 # 存储每个线程的运行状态和事件队列
 # 结构: { thread_id: { "queue": Queue, "status": str, "thread": Thread } }
-active_runs: Dict[str, Dict[str, Any]] = {}
+active_runs: dict[str, dict[str, Any]] = {}
 # 线程锁，保护 active_runs 的并发访问
 runs_lock = threading.Lock()
+
+# ============================================================
+# API 限流管理
+# ============================================================
+
+import time as _time
+
+# 每个线程最近一次启动工作流的时间（用于频率限制）
+_workflow_start_times: dict[str, list[float]] = {}
+
+# 同一线程最小启动间隔（秒），防止频繁启动
+_WORKFLOW_MIN_INTERVAL_SECONDS = 10
+
+
+def _check_rate_limit(thread_id: str) -> tuple[bool, str]:
+    """
+    检查是否可以启动新工作流。
+
+    返回 (允许, 错误消息)。若返回 (False, msg)，调用方应拒绝启动。
+    """
+    now = _time.time()
+
+    # 1. 检查该线程是否已有运行中的工作流
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+    if run_info and run_info.get("status") == "running":
+        return False, f"线程 {thread_id} 已有一个工作流在运行中，请等待完成后再试"
+
+    # 2. 频率限制：同线程两次启动间隔不得少于 WORKFLOW_MIN_INTERVAL_SECONDS
+    last_times = _workflow_start_times.get(thread_id, [])
+    recent = [t for t in last_times if now - t < _WORKFLOW_MIN_INTERVAL_SECONDS]
+    if recent:
+        wait_time = int(_WORKFLOW_MIN_INTERVAL_SECONDS - (now - max(recent)))
+        return False, f"工作流启动过于频繁，请等待 {wait_time} 秒后再试"
+
+    # 记录本次启动时间
+    _workflow_start_times.setdefault(thread_id, []).append(now)
+    # 只保留最近 10 条记录
+    if len(_workflow_start_times[thread_id]) > 10:
+        _workflow_start_times[thread_id] = _workflow_start_times[thread_id][-10:]
+
+    return True, ""
 
 
 def _run_workflow(thread_id: str, initial_messages: list, max_retries: int = 3, max_coder_steps: int = 15):
@@ -92,11 +162,12 @@ def _run_workflow(thread_id: str, initial_messages: list, max_retries: int = 3, 
 
 async def _run_workflow_async(thread_id: str, initial_messages: list, max_retries: int, max_coder_steps: int):
     """_run_workflow 的异步内部实现。"""
-    run_info = active_runs.get(thread_id)
-    if not run_info:
-        return
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        if not run_info:
+            return
+        q = run_info["queue"]
 
-    q = run_info["queue"]
     config = {"configurable": {"thread_id": thread_id}}
 
     # 构建初始状态，包含用户消息和配置参数
@@ -105,6 +176,7 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         "max_retries": max_retries,
         "retry_count": 0,
         "max_coder_steps": max_coder_steps,
+        "cancelled": False,
     }
 
     try:
@@ -118,6 +190,8 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         # 工作流正常结束
         q.put(json.dumps({"type": "done", "status": "completed"}, ensure_ascii=False))
 
+    except WorkflowCancelledError:
+        q.put(json.dumps({"type": "done", "status": "cancelled"}, ensure_ascii=False))
     except Exception as e:
         # 工作流执行出错，发送错误事件
         q.put(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
@@ -149,7 +223,7 @@ def _extract_node_event(node_name: str, node_state: dict) -> dict:
 
     elif node_name == "coder":
         # Coder 节点返回最新消息内容
-        if "messages" in node_state and node_state["messages"]:
+        if node_state.get("messages"):
             last_msg = node_state["messages"][-1]
             content = last_msg.content
             # 处理流式格式（list of content blocks）和空内容
@@ -176,7 +250,7 @@ def _extract_node_event(node_name: str, node_state: dict) -> dict:
 
     elif node_name == "reviewer":
         # Reviewer 节点返回诊断内容
-        if "messages" in node_state and node_state["messages"]:
+        if node_state.get("messages"):
             last_msg = node_state["messages"][-1]
             content = last_msg.content
             if isinstance(content, list):
@@ -199,7 +273,7 @@ def _extract_node_event(node_name: str, node_state: dict) -> dict:
 # ============================================================
 
 @app.post("/api/run")
-async def start_run(request: dict):
+async def start_run(request: RunRequest):
     """
     启动一个新的工作流运行。
 
@@ -217,18 +291,20 @@ async def start_run(request: dict):
             "status": "started"
         }
     """
-    prompt = request.get("prompt", "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt 不能为空")
-
+    prompt = request.prompt
     # 使用已有的 thread_id 或创建新的
-    thread_id = request.get("thread_id") or str(uuid.uuid4())
+    thread_id = request.thread_id or str(uuid.uuid4())
+
+    # 限流检查：防止频繁启动或并发启动
+    allowed, rate_limit_msg = _check_rate_limit(thread_id)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=rate_limit_msg)
 
     # 构建初始消息
     initial_messages = [prompt]
 
     # 如果继续使用已完成的会话，将新 prompt 追加到历史消息末尾以续跑
-    if request.get("thread_id"):
+    if request.thread_id:
         config = {"configurable": {"thread_id": thread_id}}
         try:
             saved_state = graph_app.get_state(config)
@@ -259,7 +335,7 @@ async def start_run(request: dict):
     active_runs[thread_id]["thread"] = t
     t.start()
 
-    return {"thread_id": thread_id, "status": "started"}
+    return RunResponse(thread_id=thread_id, status="started")
 
 
 @app.get("/api/run/{thread_id}/events")
@@ -330,6 +406,39 @@ async def stream_events(thread_id: str):
     )
 
 
+@app.post("/api/run/{thread_id}/cancel")
+async def cancel_run(thread_id: str):
+    """
+    取消指定线程的运行中的工作流。
+
+    通过向 checkpointer 写入 cancelled=True 标志实现。
+    各节点在执行前会检查此标志，发现后立即抛出 WorkflowCancelledError。
+
+    参数:
+        thread_id: 会话线程 ID
+
+    返回:
+        {"cancelled": true} 或错误信息
+    """
+    # 检查是否在运行中
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+
+    if not run_info:
+        raise HTTPException(status_code=404, detail="未找到该线程的运行记录")
+
+    if run_info.get("status") != "running":
+        raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
+
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        graph_app.update_state(config, {"cancelled": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"取消失败: {e!s}")
+
+    return CancelResponse(cancelled=True, thread_id=thread_id)
+
+
 @app.get("/api/run/{thread_id}/state")
 async def get_run_state(thread_id: str):
     """
@@ -349,21 +458,33 @@ async def get_run_state(thread_id: str):
         state = graph_app.get_state(config).values
 
         # 将 LangChain 消息对象转换为可序列化的字典
-        result = {}
+        messages = []
+        extra = {}
         for key, value in state.items():
             if key == "messages" and value:
-                # 将消息对象转换为 {"role": ..., "content": ...} 格式
-                result[key] = [
-                    {"role": m.type, "content": m.content}
+                # 将消息对象转换为 Message 格式
+                messages = [
+                    Message(role=m.type, content=m.content)
                     for m in value
                 ]
+            elif key == "current_plan" or key == "error_trace" or key == "coder_step_count" or key == "retry_count" or key == "max_retries" or key == "cancelled":
+                extra[key] = value
             else:
-                result[key] = value
+                extra[key] = value
 
-        return result
+        return AgentStateResponse(
+            messages=messages,
+            current_plan=extra.pop("current_plan", None),
+            error_trace=extra.pop("error_trace", None),
+            coder_step_count=extra.pop("coder_step_count", 0),
+            retry_count=extra.pop("retry_count", 0),
+            max_retries=extra.pop("max_retries", 3),
+            cancelled=extra.pop("cancelled", False),
+            extra=extra,
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"获取状态失败: {str(e)}")
+        raise HTTPException(status_code=404, detail=f"获取状态失败: {e!s}")
 
 
 @app.get("/api/files")
@@ -414,12 +535,15 @@ async def list_files():
                 })
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取工作区失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取工作区失败: {e!s}")
 
     # 按路径排序，方便前端展示
     files.sort(key=lambda f: f["path"])
 
-    return {"files": files}
+    return FileListResponse(files=[
+        FileEntry(path=f["path"], is_dir=f["is_dir"], size=f["size"], mtime=f.get("mtime"))
+        for f in files
+    ])
 
 
 @app.get("/api/files/{file_path:path}")
@@ -459,7 +583,7 @@ async def read_file(file_path: str):
 
         # 尝试读取文件内容
         try:
-            with open(full_path, "r", encoding="utf-8") as f:
+            with open(full_path, encoding="utf-8") as f:
                 content = f.read()
         except UnicodeDecodeError:
             # 如果是二进制文件，返回提示
@@ -489,16 +613,16 @@ async def read_file(file_path: str):
         }
         lang = lang_map.get(ext, "text")
 
-        return {
-            "content": content,
-            "size": stat.st_size,
-            "lines": content.count("\n") + 1,
-            "mtime": stat.st_mtime,
-            "lang": lang,
-        }
+        return FileContentResponse(
+            content=content,
+            size=stat.st_size,
+            lines=content.count("\n") + 1,
+            mtime=stat.st_mtime,
+            lang=lang,
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取文件失败: {e!s}")
 
 
 @app.get("/api/metrics")
@@ -517,21 +641,60 @@ async def get_metrics():
     """
     # 获取当前指标
     summary = metrics_collector.dump_summary()
+    llm_data = summary.get("llm", {})
+    tool_data = summary.get("tool_calls", {})
+    repair_data = summary.get("repair_cycles", {})
+
+    current = MetricsCurrentResponse(
+        total_llm_calls=llm_data.get("total_calls", 0),
+        total_tokens=llm_data.get("total_tokens", 0),
+        llm_latency_avg=llm_data.get("avg_latency_ms", 0.0),
+        tool_calls=tool_data.get("total", 0),
+        tool_successes=tool_data.get("successes", 0),
+        tool_failures=tool_data.get("failures", 0),
+        tool_success_rate=tool_data.get("success_rate", 0.0),
+        repair_cycles=repair_data.get("total", 0),
+        repair_cycles_recovered=sum(1 for o in repair_data.get("outcomes", []) if o.get("outcome") == "fixed"),
+        last_updated=None,
+        # 旧嵌套字段
+        llm=MetricsLLMData(
+            total_calls=llm_data.get("total_calls", 0),
+            total_tokens=llm_data.get("total_tokens", 0),
+            avg_tokens_per_call=llm_data.get("avg_tokens_per_call", 0.0),
+            avg_latency_ms=llm_data.get("avg_latency_ms", 0.0),
+            max_latency_ms=llm_data.get("max_latency_ms", 0.0),
+            min_latency_ms=llm_data.get("min_latency_ms", 0.0),
+        ),
+        tool_calls_detail=MetricsToolData(
+            total=tool_data.get("total", 0),
+            successes=tool_data.get("successes", 0),
+            failures=tool_data.get("failures", 0),
+            success_rate=tool_data.get("success_rate", 0.0),
+            failure_reasons=tool_data.get("failure_reasons", []),
+        ),
+        repair_cycles_detail=MetricsRepairData(
+            total=repair_data.get("total", 0),
+            outcomes=repair_data.get("outcomes", []),
+        ),
+    )
 
     # 尝试读取历史数据
     historical = []
     metrics_file = os.path.join(WORKSPACE_DIR, "metrics.json")
     if os.path.exists(metrics_file):
         try:
-            with open(metrics_file, "r", encoding="utf-8") as f:
-                historical = json.load(f)
+            with open(metrics_file, encoding="utf-8") as f:
+                data = json.load(f)
+            # 确保是列表格式（可能是单个 dict 或 list）
+            if isinstance(data, list):
+                historical = data
+            elif isinstance(data, dict):
+                # 旧格式是单个对象，转为单元素列表
+                historical = [data]
         except Exception:
             pass
 
-    return {
-        "current": summary,
-        "historical": historical,
-    }
+    return MetricsResponse(current=current, historical=historical)
 
 
 @app.get("/api/config")
@@ -550,37 +713,37 @@ async def get_config():
     """
     # LLM 提供商状态
     llm_providers = {
-        "openai": {
-            "has_key": bool(os.getenv("OPENAI_API_KEY")),
-            "model": os.getenv("OPENAI_MODEL", "gpt-4o"),
-            "base_url": os.getenv("OPENAI_API_BASE", os.getenv("OPENAI_BASE_URL", "")),
-        },
-        "anthropic": {
-            "has_key": bool(os.getenv("ANTHROPIC_API_KEY")),
-            "model": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
-        },
-        "ollama": {
-            "has_key": True,  # Ollama 不需要 API key
-            "model": os.getenv("OLLAMA_MODEL", "qwen2.5-coder"),
-            "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        },
-        "deepseek": {
-            "has_key": bool(os.getenv("DEEPSEEK_API_KEY")),
-            "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        },
+        "openai": LLMProviderStatus(
+            has_key=bool(os.getenv("OPENAI_API_KEY")),
+            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            base_url=os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL"),
+        ),
+        "anthropic": LLMProviderStatus(
+            has_key=bool(os.getenv("ANTHROPIC_API_KEY")),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
+        ),
+        "ollama": LLMProviderStatus(
+            has_key=True,  # Ollama 不需要 API key
+            model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ),
+        "deepseek": LLMProviderStatus(
+            has_key=bool(os.getenv("DEEPSEEK_API_KEY")),
+            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        ),
     }
 
     # 系统配置
-    system_config = {
-        "workspace_dir": str(WORKSPACE_DIR),
-        "sandbox_image": os.getenv("SANDBOX_IMAGE", "python:3.10-slim"),
-        "sandbox_mem_limit": os.getenv("SANDBOX_MEM_LIMIT", "256m"),
-        "sandbox_timeout": int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")),
-        "max_coder_steps": int(os.getenv("MAX_CODER_STEPS", "15")),
-        "max_planner_steps": int(os.getenv("MAX_PLANNER_STEPS", "10")),
-        "context_max_tokens": int(os.getenv("CONTEXT_MAX_TOKENS", "8000")),
-    }
+    system_config = SystemConfig(
+        workspace_dir=str(WORKSPACE_DIR),
+        sandbox_image=os.getenv("SANDBOX_IMAGE", "python:3.10-slim"),
+        sandbox_mem_limit=os.getenv("SANDBOX_MEM_LIMIT", "256m"),
+        sandbox_timeout=int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")),
+        max_coder_steps=int(os.getenv("MAX_CODER_STEPS", "15")),
+        max_planner_steps=int(os.getenv("MAX_PLANNER_STEPS", "10")),
+        context_max_tokens=int(os.getenv("CONTEXT_MAX_TOKENS", "8000")),
+    )
 
     # 环境变量列表（敏感信息脱敏）
     env_vars = []
@@ -588,18 +751,18 @@ async def get_config():
 
     for key, value in sorted(os.environ.items()):
         is_sensitive = any(s in key.lower() for s in sensitive_keys)
-        env_vars.append({
-            "name": key,
-            "value": "****" if is_sensitive and value else value,
-            "is_sensitive": is_sensitive,
-            "is_set": True,
-        })
+        env_vars.append(EnvVar(
+            name=key,
+            value="****" if is_sensitive and value else value,
+            is_sensitive=is_sensitive,
+            is_set=True,
+        ))
 
-    return {
-        "llm_providers": llm_providers,
-        "system": system_config,
-        "env_vars": env_vars,
-    }
+    return ConfigResponse(
+        llm_providers=llm_providers,
+        system=system_config,
+        env_vars=env_vars,
+    )
 
 
 @app.get("/api/snapshots")
@@ -626,7 +789,7 @@ async def list_snapshots():
     snapshots = []
 
     if not os.path.exists(snapshots_dir):
-        return {"snapshots": []}
+        return SnapshotListResponse(snapshots=[])
 
     try:
         for entry in sorted(os.listdir(snapshots_dir), reverse=True):
@@ -641,23 +804,23 @@ async def list_snapshots():
 
             if os.path.exists(metadata_path):
                 try:
-                    with open(metadata_path, "r", encoding="utf-8") as f:
+                    with open(metadata_path, encoding="utf-8") as f:
                         metadata = json.load(f)
                 except Exception:
                     pass
 
-            snapshots.append({
-                "id": entry,
-                "timestamp": metadata.get("timestamp", ""),
-                "reason": metadata.get("reason", ""),
-                "active_files": metadata.get("active_files", []),
-                "active_files_count": len(metadata.get("active_files", [])),
-            })
+            snapshots.append(SnapshotEntry(
+                id=entry,
+                timestamp=metadata.get("timestamp", ""),
+                reason=metadata.get("reason", ""),
+                active_files=metadata.get("active_files", []),
+                active_files_count=len(metadata.get("active_files", [])),
+            ))
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取快照失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取快照失败: {e!s}")
 
-    return {"snapshots": snapshots}
+    return SnapshotListResponse(snapshots=snapshots)
 
 
 @app.get("/api/snapshots/{snapshot_id}")
@@ -686,14 +849,19 @@ async def get_snapshot(snapshot_id: str):
     if not os.path.exists(snapshot_path):
         raise HTTPException(status_code=404, detail="快照不存在")
 
-    result = {"metadata": {}, "conversation_summary": "", "code_files": []}
+    result = SnapshotDetailResponse(metadata=SnapshotMetadata(timestamp="", reason="", active_files=[]), conversation_summary="", code_files=[])
 
     # 读取元数据
     metadata_path = os.path.join(snapshot_path, "metadata.json")
     if os.path.exists(metadata_path):
         try:
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                result["metadata"] = json.load(f)
+            with open(metadata_path, encoding="utf-8") as f:
+                metadata = json.load(f)
+                result.metadata = SnapshotMetadata(
+                    timestamp=metadata.get("timestamp", ""),
+                    reason=metadata.get("reason", ""),
+                    active_files=metadata.get("active_files", []),
+                )
         except Exception:
             pass
 
@@ -701,8 +869,8 @@ async def get_snapshot(snapshot_id: str):
     summary_path = os.path.join(snapshot_path, "conversation_summary.json")
     if os.path.exists(summary_path):
         try:
-            with open(summary_path, "r", encoding="utf-8") as f:
-                result["conversation_summary"] = json.load(f)
+            with open(summary_path, encoding="utf-8") as f:
+                result.conversation_summary = json.load(f)
         except Exception:
             pass
 
@@ -715,12 +883,9 @@ async def get_snapshot(snapshot_id: str):
                 relpath = os.path.relpath(filepath, code_dir)
 
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(filepath, encoding="utf-8") as f:
                         content = f.read()
-                    result["code_files"].append({
-                        "path": relpath,
-                        "content": content,
-                    })
+                    result.code_files.append(CodeFile(path=relpath, content=content))
                 except Exception:
                     pass
 
@@ -746,7 +911,7 @@ async def list_backups():
     backups = []
 
     if not os.path.exists(backups_dir):
-        return {"backups": []}
+        return BackupListResponse(backups=[])
 
     try:
         for entry in os.listdir(backups_dir):
@@ -756,19 +921,19 @@ async def list_backups():
                 continue
 
             stat = os.stat(filepath)
-            backups.append({
-                "name": entry,
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-            })
+            backups.append(BackupEntry(
+                name=entry,
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+            ))
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取备份失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取备份失败: {e!s}")
 
     # 按修改时间倒序排列
-    backups.sort(key=lambda b: b["mtime"], reverse=True)
+    backups.sort(key=lambda b: b.mtime, reverse=True)
 
-    return {"backups": backups}
+    return BackupListResponse(backups=backups)
 
 
 @app.get("/api/backups/{backup_name}")
@@ -801,17 +966,17 @@ async def read_backup(backup_name: str):
     try:
         stat = os.stat(filepath)
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
 
-        return {
-            "content": content,
-            "size": stat.st_size,
-            "mtime": stat.st_mtime,
-        }
+        return BackupContentResponse(
+            content=content,
+            size=stat.st_size,
+            mtime=stat.st_mtime,
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取备份失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取备份失败: {e!s}")
 
 
 # ============================================================
@@ -857,8 +1022,8 @@ if __name__ == "__main__":
     print("  nanoCursor API Server")
     print("=" * 60)
     print(f"  工作区: {WORKSPACE_DIR}")
-    print(f"  开发模式: 运行 'cd frontend && npm run dev'")
-    print(f"  生产模式: 先 'npm run build'，再运行此脚本")
+    print("  开发模式: 运行 'cd frontend && npm run dev'")
+    print("  生产模式: 先 'npm run build'，再运行此脚本")
     print("=" * 60)
     print()
 

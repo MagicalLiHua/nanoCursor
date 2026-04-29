@@ -3,10 +3,9 @@
 记录 LLM 调用的 token 消耗、延迟、修复轮数、工具成功率等指标。
 """
 
-import time
 import json
 import logging
-from typing import Optional
+import time
 from threading import Lock
 
 logger = logging.getLogger(__name__)
@@ -178,5 +177,7 @@ class MetricsCollector:
 
 # 全局单例（使用绝对路径，避免 CWD 变化导致写入位置错误）
 import os as _os
+
 from src.core.config import WORKSPACE_DIR as _WORKSPACE_DIR
+
 metrics = MetricsCollector(output_file=_os.path.join(_WORKSPACE_DIR, "metrics.json"))

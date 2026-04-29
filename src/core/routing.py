@@ -9,7 +9,10 @@ from src.core.state import AgentState
 
 def route_after_planner(state: AgentState):
     """判断 Planner 是在探索工具，还是做好了计划"""
-    last_message = state["messages"][-1]
+    messages = state.get("messages", [])
+    if not messages:
+        return "coder"
+    last_message = messages[-1]
     has_tool_calls = getattr(last_message, 'tool_calls', [])
     if not has_tool_calls:
         return "coder"
@@ -28,7 +31,10 @@ def route_after_coder(state: AgentState):
 
     coder_step_count = state.get("coder_step_count", 0)
     max_coder_steps = state.get("max_coder_steps", MAX_CODER_STEPS)
-    last_message = state["messages"][-1]
+    messages = state.get("messages", [])
+    if not messages:
+        return "sandbox"
+    last_message = messages[-1]
 
     # 检查是否达到最大步数
     if coder_step_count >= max_coder_steps:

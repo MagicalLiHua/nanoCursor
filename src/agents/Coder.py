@@ -4,17 +4,18 @@ Coder Agent - 工程师节点
 """
 
 import logging
+
 from langchain_core.messages import SystemMessage, ToolMessage
 
-from src.core.repo_map import generate_repo_map
-from src.core.state import AgentState
-from src.core.llm_engine import llm
 from src.core.context_manager import (
     build_coder_context,
     estimate_messages_tokens,
     update_memory_summary,
 )
+from src.core.llm_engine import llm
 from src.core.metrics import metrics
+from src.core.repo_map import generate_repo_map
+from src.core.state import AgentState, check_cancelled
 from src.tools.file_tools import tools
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ async def coder_node(state: AgentState):
     Returns:
         dict: 更新的状态，包含 LLM 响应和记忆摘要
     """
+    check_cancelled(state)
     logger.info("正在执行代码编写与修改...")
     coder_llm = llm.bind_tools(tools)
 

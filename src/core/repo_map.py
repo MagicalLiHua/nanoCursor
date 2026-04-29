@@ -1,5 +1,6 @@
-import os
 import ast
+import os
+
 from src.core.config import WORKSPACE_DIR
 
 
@@ -27,7 +28,7 @@ def generate_repo_map(directory=WORKSPACE_DIR):
 
             # 使用 AST 提取摘要
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
+                with open(filepath, encoding='utf-8') as f:
                     tree = ast.parse(f.read())
                     for node in tree.body:
                         if isinstance(node, ast.FunctionDef):

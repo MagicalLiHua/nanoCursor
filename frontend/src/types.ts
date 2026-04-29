@@ -114,8 +114,8 @@ export interface MetricsData {
     };
     tool_calls: {
       total: number;
-      success: number;
-      failure: number;
+      successes: number;
+      failures: number;
       success_rate: number;
     };
     repair_cycles: {

@@ -173,15 +173,18 @@ export function MetricsPage() {
     );
   }
 
-  // 提取指标值（处理可能为 undefined 的情况）
-  const llm: MetricsData['current']['llm'] = metrics.current?.llm ?? {
+  // 提取指标值（处理可能为 undefined 或空对象的情况）
+  const rawLlm = metrics.current?.llm;
+  const llm: MetricsData['current']['llm'] = rawLlm && Object.keys(rawLlm).length > 0 ? rawLlm : {
     total_calls: 0, total_tokens: 0, avg_tokens_per_call: 0,
     avg_latency_ms: 0, max_latency_ms: 0, min_latency_ms: 0, total_latency_ms: 0,
   };
-  const tools: MetricsData['current']['tool_calls'] = metrics.current?.tool_calls ?? {
-    total: 0, success: 0, failure: 0, success_rate: 0,
+  const rawTools = metrics.current?.tool_calls;
+  const tools: MetricsData['current']['tool_calls'] = rawTools && Object.keys(rawTools).length > 0 ? rawTools : {
+    total: 0, successes: 0, failures: 0, success_rate: 0,
   };
-  const repair: MetricsData['current']['repair_cycles'] = metrics.current?.repair_cycles ?? {
+  const rawRepair = metrics.current?.repair_cycles;
+  const repair: MetricsData['current']['repair_cycles'] = rawRepair && Object.keys(rawRepair).length > 0 ? rawRepair : {
     total: 0, outcomes: [],
   };
 
@@ -227,7 +230,7 @@ export function MetricsPage() {
           <MetricCard
             label="工具成功率"
             value={`${Math.round((tools.success_rate ?? 0) * 100)}%`}
-            sub={`${tools.success ?? 0} / ${tools.total ?? 0} 次`}
+            sub={`${tools.successes ?? 0} / ${tools.total ?? 0} 次`}
           />
           <MetricCard
             label="修复循环数"
@@ -245,11 +248,11 @@ export function MetricsPage() {
           </div>
           <div className="config-row">
             <span className="config-key">成功</span>
-            <span className="config-val" style={{ color: '#16a34a' }}>{tools.success ?? 0}</span>
+            <span className="config-val" style={{ color: '#16a34a' }}>{tools.successes ?? 0}</span>
           </div>
           <div className="config-row">
             <span className="config-key">失败</span>
-            <span className="config-val" style={{ color: '#dc2626' }}>{tools.failure ?? 0}</span>
+            <span className="config-val" style={{ color: '#dc2626' }}>{tools.failures ?? 0}</span>
           </div>
           <div className="progress-bar-container" style={{ marginTop: '0.75rem' }}>
             <div className="progress-bar" style={{ width: `${(tools.success_rate ?? 0) * 100}%` }} />

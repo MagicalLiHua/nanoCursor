@@ -75,7 +75,7 @@ function WorkflowDiagram({ executedNodes }: { executedNodes: Set<string> }) {
     <div className="workflow-panel">
       <h3>工作流图</h3>
       {WORKFLOW_NODES.map((node) => {
-        const isExecuted = [...executedNodes].some(n => n.toLowerCase().includes(node.id.toLowerCase()));
+        const isExecuted = executedNodes.has(node.id.toLowerCase());
         return (
           <div key={node.id} className={`workflow-node-item ${isExecuted ? 'executed' : 'pending'}`}>
             <div className="workflow-node-dot" />
@@ -103,6 +103,12 @@ export function ChatPage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   // 防止双击提交
   const isSubmittingRef = useRef(false);
+  // 避免 stale closure 的 running 状态 ref
+  const isRunningRef = useRef(false);
+  // 用于取消 finishRunAndFetchState
+  const finishedRef = useRef(false);
+  // 追踪最后一个 coder 消息的索引，用于更新而非创建新消息
+  const lastCoderMsgIndexRef = useRef<number | null>(null);
 
   /** 每次添加新消息时滚动到底部 */
   useEffect(() => {
@@ -171,14 +177,25 @@ export function ChatPage() {
           type: 'ADD_LOG_ENTRY',
           payload: { node: 'Coder', status: 'completed', detail: '代码/工具调用' },
         });
-        // 如果 Coder 有输出文本内容，作为助手消息添加到聊天中
+        // 如果 Coder 有输出文本内容，更新到同一条助手消息中，避免消息泛滥
         if (data?.content) {
           const content = data.content as string;
           if (content.length > 10) {
-            dispatch({
-              type: 'ADD_CHAT_MESSAGE',
-              payload: { role: 'assistant', content: content.slice(0, 500) },
-            });
+            if (lastCoderMsgIndexRef.current !== null && state.chatMessages[lastCoderMsgIndexRef.current]) {
+              // 更新已有 coder 消息，追加内容
+              const existing = state.chatMessages[lastCoderMsgIndexRef.current];
+              dispatch({
+                type: 'UPDATE_CHAT_MESSAGE',
+                payload: { index: lastCoderMsgIndexRef.current, content: existing.content + '\n' + content.slice(0, 500) },
+              });
+            } else {
+              // 创建新的 coder 消息
+              dispatch({
+                type: 'ADD_CHAT_MESSAGE',
+                payload: { role: 'assistant', content: content.slice(0, 500) },
+              });
+              lastCoderMsgIndexRef.current = state.chatMessages.length;
+            }
           }
         }
         break;
@@ -270,6 +287,9 @@ export function ChatPage() {
     hasFetchedFinalState.current = false;
 
     // 设置运行状态
+    isRunningRef.current = true;
+    finishedRef.current = false;
+    lastCoderMsgIndexRef.current = null;
     dispatch({ type: 'SET_RUNNING', payload: true });
 
     try {
@@ -300,6 +320,10 @@ export function ChatPage() {
           processEvent(data);
         } catch (err) {
           console.warn('Failed to parse node_update event:', msg.data, err);
+          dispatch({
+            type: 'ADD_CHAT_MESSAGE',
+            payload: { role: 'assistant', content: `[数据解析错误] ${msg.data.slice(0, 100)}` },
+          });
         }
       });
 
@@ -312,36 +336,15 @@ export function ChatPage() {
         finishRunAndFetchState(result.thread_id);
       });
 
-      // 处理服务端发来的自定义 error 事件
-      eventSource.addEventListener('error', (e: Event) => {
-        clearTimeout(connectionTimeout);
-        eventSource.close();
-        if (eventSourceRef.current === eventSource) {
-          eventSourceRef.current = null;
-        }
-        dispatch({ type: 'SET_RUNNING', payload: false });
-        try {
-          const msg = e as MessageEvent;
-          if (msg.data) {
-            const data = JSON.parse(msg.data) as { message?: string };
-            dispatch({
-              type: 'ADD_CHAT_MESSAGE',
-              payload: { role: 'assistant', content: `工作流执行失败: ${data?.message ?? '未知错误'}` },
-            });
-          }
-        } catch {
-          dispatch({ type: 'ADD_CHAT_MESSAGE', payload: { role: 'assistant', content: '工作流执行出错' } });
-        }
-      });
-
-      // 处理浏览器网络级连接错误（后端未启动、连接断开等）
+      // 处理所有错误（网络级 + 服务端 error 事件），统一用 onerror
       eventSource.onerror = () => {
         clearTimeout(connectionTimeout);
         eventSource.close();
         if (eventSourceRef.current === eventSource) {
           eventSourceRef.current = null;
         }
-        if (state.isRunning) {
+        if (isRunningRef.current) {
+          isRunningRef.current = false;
           dispatch({ type: 'SET_RUNNING', payload: false });
           dispatch({
             type: 'ADD_CHAT_MESSAGE',
@@ -373,6 +376,7 @@ export function ChatPage() {
   async function finishRunAndFetchState(threadId: string) {
     if (hasFetchedFinalState.current) return;
     hasFetchedFinalState.current = true;
+    finishedRef.current = true;
 
     try {
       // 短暂等待后端 checkpointer 完成持久化
@@ -440,6 +444,7 @@ export function ChatPage() {
       });
     } finally {
       // 无论如何都重置运行状态
+      isRunningRef.current = false;
       dispatch({ type: 'SET_RUNNING', payload: false });
     }
   }

@@ -3,13 +3,12 @@
 **/.idea/
 *.iml
 
-
 .vscode/
 **/.vscode/
 .claude/
 .pytest_cache/
 
-# 忽略所有层级的 .env 文件
+# 环境变量
 .env
 **/.env
 
@@ -20,3 +19,19 @@ venv/
 
 # 日志
 *.log
+
+# LangGraph checkpointer 数据库
+.checkpoints/
+
+# 测试覆盖率报告
+htmlcov/
+.coverage
+*.coverage
+
+# 前端依赖和构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE 配置
+.ruff_cache/

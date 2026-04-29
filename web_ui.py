@@ -7,10 +7,10 @@ nanoCursor Web UI - 增强版 Streamlit 应用
 
 import os
 import sys
-import time
 import uuid
+
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 # 确保项目根目录在 sys.path 中
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -18,8 +18,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from run import app as graph_app
-from src.core.metrics import metrics as metrics_collector
 from src.core.config import WORKSPACE_DIR
+from src.core.metrics import metrics as metrics_collector
 
 st.set_page_config(
     page_title="nanoCursor 工作台",
@@ -180,7 +180,7 @@ with chat_col:
                                 exec_log.append(("🛠️ Planner Tools", "info", "读取文件/列出目录"))
 
                             elif node_name == "coder":
-                                if "messages" in node_state and node_state["messages"]:
+                                if node_state.get("messages"):
                                     content = node_state["messages"][-1].content
                                     st.caption(f"💻 **Coder:** {content[:200]}...")
                                 exec_log.append(("💻 Coder", "completed", "代码/工具调用"))
@@ -208,7 +208,7 @@ with chat_col:
                                 st.session_state.retry_info["max"] = node_state.get("max_retries", 3)
 
                             elif node_name == "reviewer":
-                                if "messages" in node_state and node_state["messages"]:
+                                if node_state.get("messages"):
                                     content = node_state["messages"][-1].content
                                     st.warning(f"**Reviewer 诊断:**\n{content[:300]}...")
                                 exec_log.append(("🧐 Reviewer", "warning", "分析错误并给出修复建议"))

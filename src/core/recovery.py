@@ -4,12 +4,10 @@
 确保用户仍能看到"尽力而为"的成果。
 """
 
+import json
 import os
 import shutil
-import json
-import logging
 from datetime import datetime
-from typing import Optional
 
 from src.core.config import WORKSPACE_DIR
 from src.core.logger import logger
@@ -21,7 +19,7 @@ os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 def create_workspace_snapshot(
     state: dict,
     reason: str = "max_retries_reached",
-) -> Optional[str]:
+) -> str | None:
     """
     在达到最大重试次数前，将当前工作区的代码和修改日志打包为快照。
 
@@ -51,7 +49,7 @@ def create_workspace_snapshot(
         for rel_path in active_files:
             abs_path = os.path.join(WORKSPACE_DIR, rel_path)
             if os.path.exists(abs_path):
-                with open(abs_path, "r", encoding="utf-8") as f:
+                with open(abs_path, encoding="utf-8") as f:
                     active_info[rel_path] = f.read()
             else:
                 active_info[rel_path] = None  # 文件不存在
@@ -104,7 +102,7 @@ def create_workspace_snapshot(
         return None
 
 
-def get_latest_snapshots_dir() -> Optional[str]:
+def get_latest_snapshots_dir() -> str | None:
     """获取最新的快照目录。"""
     if not os.path.exists(SNAPSHOTS_DIR):
         return None

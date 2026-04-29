@@ -5,9 +5,10 @@ LLM 引擎初始化模块
 """
 
 import os
-from typing import Optional
+
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
+
 from src.core.logger import logger
 
 # 加载 .env 文件（位于 src/core/ 目录下）
@@ -17,7 +18,7 @@ load_dotenv(dotenv_path=_env_path)
 
 def _create_openai_llm(
     api_key: str,
-    base_url: Optional[str],
+    base_url: str | None,
     model: str,
     temperature: float,
     max_tokens: int
@@ -114,9 +115,9 @@ def _detect_provider() -> str:
 
 
 def create_llm(
-    provider: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
+    provider: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> BaseChatModel:
     """
     创建 LLM 实例，支持多模型提供商。
@@ -133,15 +134,15 @@ def create_llm(
     # 自动检测提供商
     if provider is None:
         provider = _detect_provider()
-    
+
     provider = provider.lower()
-    
+
     # 获取默认配置
     default_temp = temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.2"))
     default_max_tokens = max_tokens if max_tokens is not None else int(os.getenv("LLM_MAX_TOKENS", "4096"))
-    
+
     logger.info(f"初始化 LLM: provider={provider}, model={os.getenv(f'{provider.upper()}_MODEL', 'default')}, temperature={default_temp}")
-    
+
     try:
         if provider == "openai":
             return _create_openai_llm(
@@ -186,7 +187,7 @@ class LLMWithRetry:
     def __init__(self, llm: BaseChatModel, max_retries: int = 3):
         self._llm = llm
         self._max_retries = max_retries
-    
+
     async def ainvoke(self, messages, *args, **kwargs):
         """异步调用，带指数退避重试"""
         last_exception = None
@@ -223,11 +224,12 @@ class LLMWithRetry:
 
         logger.error(f"LLM 调用失败，已达到最大重试次数 ({self._max_retries})")
         raise last_exception
-    
+
     def bind_tools(self, *args, **kwargs):
-        """代理 bind_tools 调用到内部 LLM"""
-        return self._llm.bind_tools(*args, **kwargs)
-    
+        """代理 bind_tools 调用到内部 LLM，并保留重试机制"""
+        bound_llm = self._llm.bind_tools(*args, **kwargs)
+        return LLMWithRetry(bound_llm, self._max_retries)
+
     def __getattr__(self, name):
         """代理其他属性访问到内部 LLM"""
         return getattr(self._llm, name)
@@ -257,9 +259,9 @@ _llm_instance = None
 
 
 def get_llm(
-    provider: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
+    provider: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
     use_retry: bool = True,
     max_retries: int = 3,
 ) -> BaseChatModel:
@@ -277,13 +279,13 @@ def get_llm(
         LangChain ChatModel 实例
     """
     global _llm_instance
-    
+
     if _llm_instance is None:
         _llm_instance = create_llm(provider, temperature, max_tokens)
-        
+
         if use_retry:
             _llm_instance = create_llm_with_retry(_llm_instance, max_retries)
-    
+
     return _llm_instance
 
 
