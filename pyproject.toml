@@ -135,6 +135,7 @@ ignore_missing_imports = true
 no_error_summary = true
 show_error_codes = true
 pretty = true
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = ["tiktoken.*", "docker.*"]
