@@ -72,6 +72,10 @@ export interface AppState {
   modificationLog: string[];
   // 侧边栏快速指标（从 SSE 事件中实时推送）
   sidebarMetrics: SidebarMetrics | null;
+  // 工作目录
+  workspaceDir: string;
+  // 可选工作目录列表
+  workspaceList: string[];
 }
 
 /** 工作区文件信息 */

@@ -4,12 +4,15 @@
  * 核心功能页面：用户输入需求，智能体规划、编码、测试的完整流程。
  * 通过 SSE (Server-Sent Events) 实时接收后端 LangGraph 工作流的执行事件，
  * 并流式展示到界面上。
+ *
+ * Gemini 风格：初始居中显示欢迎页（带聊天输入框），
+ * 用户选择工作目录并输入需求后，点击发送进入完整聊天界面。
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import type { StreamEvent, LogEntry, MetricsData } from '../types';
-import { startRun, getRunState } from '../api/client';
+import { startRun, getRunState, setWorkspace } from '../api/client';
 
 /**
  * 工作流节点定义
@@ -94,7 +97,7 @@ function WorkflowDiagram({ executedNodes }: { executedNodes: Set<string> }) {
  * SSE 事件驱动状态更新。
  */
 export function ChatPage() {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, setWorkspaceDir } = useApp();
   // 用于自动滚动到最新消息
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // 标记是否正在获取最终状态，防止重复请求
@@ -109,6 +112,11 @@ export function ChatPage() {
   const finishedRef = useRef(false);
   // 追踪最后一个 coder 消息的索引，用于更新而非创建新消息
   const lastCoderMsgIndexRef = useRef<number | null>(null);
+
+  // 欢迎页状态
+  const [workspacePath, setWorkspacePath] = useState('');
+  const [welcomePrompt, setWelcomePrompt] = useState('');
+  const [isEntering, setIsEntering] = useState(false);
 
   /** 每次添加新消息时滚动到底部 */
   useEffect(() => {
@@ -253,7 +261,7 @@ export function ChatPage() {
         break;
       }
     }
-  }, [dispatch]);
+  }, [dispatch, state.chatMessages]);
 
   /**
    * 处理发送消息
@@ -263,7 +271,7 @@ export function ChatPage() {
    * 3. 通过 EventSource 连接 SSE 端点，流式接收事件
    * 4. 工作流完成后获取最终状态
    */
-  async function handleSendPrompt(prompt: string) {
+  const handleSendPrompt = useCallback(async (prompt: string, workspaceDir?: string) => {
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
 
@@ -294,7 +302,7 @@ export function ChatPage() {
 
     try {
       // 调用后端启动工作流
-      const result = await startRun(prompt, state.threadId);
+      const result = await startRun(prompt, state.threadId, workspaceDir || state.workspaceDir);
 
       // 连接 SSE 端点，流式接收事件
       const eventSource = new EventSource(`/api/run/${result.thread_id}/events`);
@@ -362,7 +370,7 @@ export function ChatPage() {
     } finally {
       isSubmittingRef.current = false;
     }
-  }
+  }, [dispatch, state.chatMessages]);
 
   /**
    * 工作流完成后获取最终状态
@@ -456,6 +464,114 @@ export function ChatPage() {
   const modificationLogText = state.modificationLog.length > 0
     ? state.modificationLog.map((entry, i) => `${i + 1}. ${entry}`).join('\n')
     : '';
+
+  // 未选择工作区时，显示欢迎页（带聊天输入框）
+  if (!state.workspaceDir && !isEntering) {
+    return (
+      <div className="welcome-screen">
+        {/* 背景装饰 */}
+        <div className="welcome-bg-orb welcome-bg-orb-1" />
+        <div className="welcome-bg-orb welcome-bg-orb-2" />
+        <div className="welcome-bg-orb welcome-bg-orb-3" />
+
+        <div className="welcome-content">
+          {/* Logo */}
+          <div className="welcome-logo-wrap">
+            <div className="welcome-logo">
+              <svg viewBox="0 0 24 24" fill="none" width="36" height="36">
+                <circle cx="12" cy="12" r="4" fill="white" opacity="0.95"/>
+                <circle cx="12" cy="12" r="9" stroke="white" strokeWidth="1.5" opacity="0.5"/>
+                <circle cx="12" cy="12" r="2" fill="white"/>
+              </svg>
+            </div>
+            <div className="welcome-logo-pulse" />
+          </div>
+
+          {/* 标题区块 */}
+          <div className="welcome-header">
+            <h1>nanoCursor</h1>
+            <p>多智能体自动编程框架，让 AI 帮你写代码</p>
+          </div>
+
+          {/* 功能卡片 */}
+          <div className="welcome-features">
+            <div className="welcome-feature-card">
+              <div className="feature-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>
+                </svg>
+              </div>
+              <span>智能规划</span>
+            </div>
+            <div className="welcome-feature-card">
+              <div className="feature-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <polyline points="16 18 22 12 16 6"/>
+                  <polyline points="8 6 2 12 8 18"/>
+                </svg>
+              </div>
+              <span>自动编码</span>
+            </div>
+            <div className="welcome-feature-card">
+              <div className="feature-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+              </div>
+              <span>沙盒测试</span>
+            </div>
+          </div>
+
+          {/* 表单区块 */}
+          <div className="welcome-form-wrap">
+            <div className="welcome-form-label">设置工作目录</div>
+            <input
+              type="text"
+              className="workspace-path-input"
+              placeholder="输入工作目录路径，如 D:\projects\myapp"
+              value={workspacePath}
+              onChange={(e) => setWorkspacePath(e.target.value)}
+            />
+
+            <form
+              className="welcome-chat-form"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!workspacePath.trim() || !welcomePrompt.trim()) return;
+                try {
+                  await setWorkspace(workspacePath.trim());
+                } catch {
+                  // 忽略错误
+                }
+                setWorkspaceDir(workspacePath.trim());
+                setIsEntering(true);
+                handleSendPrompt(welcomePrompt.trim(), workspacePath.trim());
+              }}
+            >
+              <input
+                type="text"
+                className="welcome-chat-input"
+                placeholder="输入你的需求，例如：用 Python 写一个快排"
+                value={welcomePrompt}
+                onChange={(e) => setWelcomePrompt(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="welcome-send-btn"
+                disabled={!workspacePath.trim() || !welcomePrompt.trim()}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </form>
+            <p className="workspace-hint">智能体将在指定目录下读写文件</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>

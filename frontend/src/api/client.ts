@@ -18,12 +18,16 @@ const api = axios.create({
  *
  * @param prompt 用户输入的需求描述
  * @param threadId 可选的已有线程 ID，用于继续对话
+ * @param workspaceDir 工作目录路径
  * @returns 包含 threadId 和状态的响应
  */
-export async function startRun(prompt: string, threadId?: string) {
-  const body: { prompt: string; thread_id?: string } = { prompt };
+export async function startRun(prompt: string, threadId?: string, workspaceDir?: string) {
+  const body: { prompt: string; thread_id?: string; workspace_dir?: string } = { prompt };
   if (threadId) {
     body.thread_id = threadId;
+  }
+  if (workspaceDir) {
+    body.workspace_dir = workspaceDir;
   }
   const { data } = await api.post<{ thread_id: string; status: string }>('/api/run', body);
   return data;
@@ -181,5 +185,15 @@ export async function listBackups() {
  */
 export async function readBackupContent(backupName: string) {
   const { data } = await api.get(`/api/backups/${encodeURIComponent(backupName)}`);
+  return data;
+}
+
+/**
+ * 设置当前工作区目录
+ *
+ * @param dir 工作区目录路径
+ */
+export async function setWorkspace(dir: string) {
+  const { data } = await api.post('/api/workspaces', { dir });
   return data;
 }

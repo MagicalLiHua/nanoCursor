@@ -86,6 +86,7 @@ class RunRequest(BaseModel):
     """启动工作流的请求"""
     prompt: str = Field(..., min_length=1, description="用户输入的需求描述")
     thread_id: str | None = Field(default=None, description="可选的已有线程 ID，用于继续对话")
+    workspace_dir: str | None = Field(default=None, description="工作目录路径")
 
 
 class RunResponse(BaseModel):

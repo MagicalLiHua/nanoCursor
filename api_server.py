@@ -173,8 +173,13 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
     # 构建初始状态，包含用户消息和配置参数
     initial_state = {
         "messages": [HumanMessage(content=msg) for msg in initial_messages],
-        "max_retries": max_retries,
+        "current_plan": "",
+        "active_files": [],
+        "error_trace": "",
         "retry_count": 0,
+        "max_retries": max_retries,
+        "file_signatures": {},
+        "coder_step_count": 0,
         "max_coder_steps": max_coder_steps,
         "cancelled": False,
     }
@@ -193,6 +198,9 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
     except WorkflowCancelledError:
         q.put(json.dumps({"type": "done", "status": "cancelled"}, ensure_ascii=False))
     except Exception as e:
+        import traceback
+        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        print(f"[_run_workflow_async] 工作流异常: {error_detail}")
         # 工作流执行出错，发送错误事件
         q.put(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
     finally:
@@ -294,6 +302,14 @@ async def start_run(request: RunRequest):
     prompt = request.prompt
     # 使用已有的 thread_id 或创建新的
     thread_id = request.thread_id or str(uuid.uuid4())
+
+    # 如果请求中包含工作目录，则更新 WORKSPACE_DIR
+    if request.workspace_dir:
+        global WORKSPACE_DIR
+        abs_path = os.path.abspath(request.workspace_dir)
+        os.makedirs(abs_path, exist_ok=True)
+        WORKSPACE_DIR = abs_path
+        print(f"[API] 设置工作区: {WORKSPACE_DIR}")
 
     # 限流检查：防止频繁启动或并发启动
     allowed, rate_limit_msg = _check_rate_limit(thread_id)
@@ -404,6 +420,64 @@ async def stream_events(thread_id: str):
             "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
         },
     )
+
+
+@app.get("/api/workspaces")
+async def list_workspaces():
+    """
+    列出可用的工作区目录。
+    返回项目根目录下的 workspace* 目录列表。
+
+    返回:
+        {"workspaces": ["workspace", "workspace2", ...]}
+    """
+    root = PROJECT_ROOT
+    workspaces = []
+    try:
+        for entry in os.listdir(root):
+            path = os.path.join(root, entry)
+            if os.path.isdir(path) and entry.startswith("workspace"):
+                workspaces.append(entry)
+        workspaces.sort()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取工作区失败: {e!s}")
+
+    return {"workspaces": workspaces}
+
+
+@app.post("/api/workspaces")
+async def set_workspace(request: dict):
+    """
+    设置当前工作区目录。
+
+    请求体:
+        {"dir": "D:\\projects\\myapp"}
+
+    返回:
+        {"success": true, "workspace_dir": "..."}
+    """
+    dir_path = request.get("dir", "")
+    if not dir_path:
+        raise HTTPException(status_code=400, detail="工作目录路径不能为空")
+
+    # 安全检查：确保路径是绝对路径
+    if not os.path.isabs(dir_path):
+        raise HTTPException(status_code=400, detail="请输入绝对路径")
+
+    full_path = os.path.abspath(dir_path)
+
+    # 确保目录存在
+    if not os.path.isdir(full_path):
+        try:
+            os.makedirs(full_path, exist_ok=True)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"无法创建目录: {e!s}")
+
+    # 更新 WORKSPACE_DIR（注意：这只会影响当前进程）
+    global WORKSPACE_DIR
+    WORKSPACE_DIR = full_path
+
+    return {"success": True, "workspace_dir": WORKSPACE_DIR}
 
 
 @app.post("/api/run/{thread_id}/cancel")

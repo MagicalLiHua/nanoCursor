@@ -1,78 +1,17 @@
 /* ============================================
-   nanoCursor 全局样式
+   nanoCursor base styles
+   (Design system lives in index.css — this file is kept minimal)
    ============================================ */
 
-/* 全局重置和基础样式 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  color: #1a1a2e;
-  background-color: #f5f5f5;
-  line-height: 1.6;
-}
-
-/* 按钮基础样式 */
 button {
   cursor: pointer;
   font-family: inherit;
-  font-size: 0.875rem;
-  border: none;
-  border-radius: 6px;
   transition: all 0.15s ease;
-}
-
-button.primary {
-  background-color: #4f46e5;
-  color: white;
-  padding: 0.5rem 1rem;
-}
-
-button.primary:hover {
-  background-color: #4338ca;
-}
-
-button.secondary {
-  background-color: #e5e7eb;
-  color: #374151;
-  padding: 0.5rem 1rem;
-}
-
-button.secondary:hover {
-  background-color: #d1d5db;
-}
-
-button.danger {
-  background-color: #ef4444;
-  color: white;
-  padding: 0.5rem 1rem;
-}
-
-button.danger:hover {
-  background-color: #dc2626;
 }
 
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-/* 输入框基础样式 */
-input, textarea, select {
-  font-family: inherit;
-  font-size: 0.875rem;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  padding: 0.5rem 0.75rem;
-  outline: none;
-  transition: border-color 0.15s ease;
-}
-
-input:focus, textarea:focus, select:focus {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
 }

@@ -16,18 +16,9 @@ from src.core.config import WORKSPACE_DIR
 _checkpoint_dir = _os.path.join(WORKSPACE_DIR, ".checkpoints")
 _os.makedirs(_checkpoint_dir, exist_ok=True)
 
-try:
-    import sqlite3
-
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    _db_path = _os.path.join(_checkpoint_dir, "checkpoints.db")
-    _conn = sqlite3.connect(_db_path, check_same_thread=False)
-    _checkpointer = SqliteSaver(_conn)
-    print("[Checkpointer] 使用 SqliteSaver（持久化已启用）")
-except ImportError:
-    from langgraph.checkpoint.memory import InMemorySaver
-    _checkpointer = InMemorySaver()
-    print("[Checkpointer] 使用 InMemorySaver（仅进程内有效，生产环境建议安装 langgraph-checkpoint-sqlite）")
+from langgraph.checkpoint.memory import InMemorySaver
+_checkpointer = InMemorySaver()
+print("[Checkpointer] 使用 InMemorySaver（仅进程内有效，生产环境建议安装 langgraph-checkpoint-sqlite + aiosqlite）")
 
 checkpointer = _checkpointer
 

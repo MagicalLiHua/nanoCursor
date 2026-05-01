@@ -1,11 +1,11 @@
 {
   "llm": {
-    "total_calls": 0,
-    "total_tokens": 0,
-    "avg_tokens_per_call": 0,
-    "avg_latency_ms": 0,
-    "max_latency_ms": 0,
-    "min_latency_ms": 0
+    "total_calls": 9,
+    "total_tokens": 36166,
+    "avg_tokens_per_call": 4018.4,
+    "avg_latency_ms": 6866.0,
+    "max_latency_ms": 22604.7,
+    "min_latency_ms": 847.6
   },
   "tool_calls": {
     "total": 0,
@@ -15,21 +15,63 @@
     "failure_reasons": []
   },
   "repair_cycles": {
-    "total": 0,
+    "total": 2,
     "outcomes": [
+      {
+        "outcome": "still_failing",
+        "error": "【沙盒报错】\n沙盒执行超时 (60s)，可能存在死循环或长时间等待的代码。"
+      },
       {
         "outcome": "fixed",
         "error": ""
-      },
-      {
-        "outcome": "still_failing",
-        "error": "Traceback: TypeError"
-      },
-      {
-        "outcome": "still_failing",
-        "error": "Traceback: TypeError"
       }
     ]
   },
-  "recent_llm_records": []
+  "recent_llm_records": [
+    {
+      "node": "Planner",
+      "tokens": 373,
+      "latency_ms": 1507.6
+    },
+    {
+      "node": "Planner",
+      "tokens": 500,
+      "latency_ms": 5208.2
+    },
+    {
+      "node": "Coder",
+      "tokens": 2263,
+      "latency_ms": 11858.9
+    },
+    {
+      "node": "Coder",
+      "tokens": 3508,
+      "latency_ms": 1218.5
+    },
+    {
+      "node": "Coder",
+      "tokens": 4596,
+      "latency_ms": 847.6
+    },
+    {
+      "node": "Reviewer",
+      "tokens": 3688,
+      "latency_ms": 13855.5
+    },
+    {
+      "node": "Coder",
+      "tokens": 6074,
+      "latency_ms": 1951.5
+    },
+    {
+      "node": "Coder",
+      "tokens": 7174,
+      "latency_ms": 22604.7
+    },
+    {
+      "node": "Coder",
+      "tokens": 7990,
+      "latency_ms": 2741.3
+    }
+  ]
 }

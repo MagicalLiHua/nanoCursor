@@ -5,7 +5,7 @@
  * 状态包括：会话线程 ID、运行状态、聊天消息、执行日志等。
  */
 
-import { createContext, useContext, useReducer } from 'react';
+import { createContext, useContext, useReducer, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import type { AppState, ChatMessage, StreamEvent, LogEntry, RetryInfo, SidebarMetrics } from '../types';
 
@@ -25,10 +25,24 @@ type AppAction =
   | { type: 'SET_EXECUTION_LOG'; payload: LogEntry[] }
   | { type: 'SET_MODIFICATION_LOG'; payload: string[] }
   | { type: 'SET_SIDEBAR_METRICS'; payload: SidebarMetrics }
-  | { type: 'CLEAR_CHAT' };
+  | { type: 'CLEAR_CHAT' }
+  | { type: 'SET_THEME'; payload: 'light' | 'dark' }
+  | { type: 'TOGGLE_THEME' }
+  | { type: 'SET_WORKSPACE_DIR'; payload: string }
+  | { type: 'SET_WORKSPACE_LIST'; payload: string[] };
+
+/** 主题类型 */
+export type Theme = 'light' | 'dark';
+
+/** App 状态接口（含 theme） */
+interface AppContextState extends AppState {
+  theme: Theme;
+  workspaceDir: string;
+  workspaceList: string[];
+}
 
 /** 初始状态 */
-const initialState: AppState = {
+const initialState: AppContextState = {
   threadId: generateUUID(),
   isRunning: false,
   streamEvents: [],
@@ -40,16 +54,15 @@ const initialState: AppState = {
   executionLog: [],
   modificationLog: [],
   sidebarMetrics: null,
+  theme: (localStorage.getItem('nanoCursor-theme') as Theme) || 'dark',
+  workspaceDir: '',
+  workspaceList: [],
 };
 
 /**
  * Reducer 函数，根据 action 类型更新状态
- *
- * @param state 当前状态
- * @param action 要执行的 action
- * @returns 新的状态
  */
-function appReducer(state: AppState, action: AppAction): AppState {
+function appReducer(state: AppContextState, action: AppAction): AppContextState {
   switch (action.type) {
     case 'SET_THREAD_ID':
       return { ...state, threadId: action.payload };
@@ -112,29 +125,52 @@ function appReducer(state: AppState, action: AppAction): AppState {
         sidebarMetrics: null,
       };
 
+    case 'SET_THEME':
+      return { ...state, theme: action.payload };
+
+    case 'TOGGLE_THEME':
+      return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
+
+    case 'SET_WORKSPACE_DIR':
+      localStorage.setItem('nanoCursor-workspaceDir', action.payload);
+      return { ...state, workspaceDir: action.payload };
+
+    case 'SET_WORKSPACE_LIST':
+      return { ...state, workspaceList: action.payload };
+
     default:
       return state;
   }
 }
 
-/** 创建 Context 对象，提供 state 和 dispatch */
+/** 创建 Context 对象，提供 state 和 dispatch（含 theme 便捷方法） */
 const AppContext = createContext<{
-  state: AppState;
+  state: AppContextState;
   dispatch: React.Dispatch<AppAction>;
+  theme: Theme;
+  toggleTheme: () => void;
+  setWorkspaceDir: (dir: string) => void;
+  setWorkspaceList: (list: string[]) => void;
 } | null>(null);
 
 /**
  * 全局状态 Provider 组件
- *
- * 包裹在应用根组件上，让所有子组件都能访问全局状态。
- *
- * @param children 子组件
  */
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
+  // 同步 theme 到 document root 和 localStorage
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', state.theme);
+    localStorage.setItem('nanoCursor-theme', state.theme);
+  }, [state.theme]);
+
+  const toggleTheme = () => dispatch({ type: 'TOGGLE_THEME' });
+  const setWorkspaceDir = (dir: string) => dispatch({ type: 'SET_WORKSPACE_DIR', payload: dir });
+  const setWorkspaceList = (list: string[]) => dispatch({ type: 'SET_WORKSPACE_LIST', payload: list });
+
   return (
-    <AppContext.Provider value={{ state, dispatch }}>
+    <AppContext.Provider value={{ state, dispatch, theme: state.theme, toggleTheme, setWorkspaceDir, setWorkspaceList }}>
       {children}
     </AppContext.Provider>
   );
@@ -142,9 +178,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
 /**
  * 使用全局状态的 Hook
- *
- * 在任何组件中调用 useApp() 即可获取 state 和 dispatch。
- * 如果在 AppProvider 外部使用会抛出错误。
  */
 export function useApp() {
   const context = useContext(AppContext);
