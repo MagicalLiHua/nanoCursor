@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from src.core.metrics import MetricsCollector
+from src.infra.metrics import MetricsCollector
 
 
 class TestMetricsCollector:

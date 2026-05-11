@@ -28,7 +28,9 @@ class MetricsCollector:
         self.tool_failure_reasons: list[str] = []
         # 修复循环指标
         self.repair_cycles = 0
-        self.repair_cycle_outcomes: list[str] = []  # "fixed" / "still_failing"
+        self.repair_cycle_outcomes: list[dict] = []
+        # Supervisor 决策指标
+        self.recent_supervisor_decisions: list[dict] = []
         # 原始记录（最近 N 条）
         self.recent_llm_records: list[dict] = []
         self.recent_tool_records: list[dict] = []
@@ -53,7 +55,6 @@ class MetricsCollector:
                 "tokens": tokens_used,
                 "latency_ms": round(latency_ms, 1),
             })
-            # 只保留最近 50 条
             if len(self.recent_llm_records) > 50:
                 self.recent_llm_records = self.recent_llm_records[-50:]
         logger.info(f"[Metrics] LLM 调用 | node={node_name} | tokens={tokens_used} | latency={latency_ms:.0f}ms")
@@ -93,6 +94,19 @@ class MetricsCollector:
                 "error": error_summary[:300],
             })
 
+    # ----- Supervisor 决策指标 -----
+
+    def record_supervisor_decision(self, decision: str, task_id: str | None, reasoning: str):
+        """Record a Supervisor routing decision."""
+        with self._lock:
+            self.recent_supervisor_decisions.append({
+                "decision": decision,
+                "task_id": task_id,
+                "reasoning": reasoning[:200],
+            })
+            if len(self.recent_supervisor_decisions) > 50:
+                self.recent_supervisor_decisions = self.recent_supervisor_decisions[-50:]
+
     # ----- 输出与上报 -----
 
     def dump_summary(self) -> dict:
@@ -131,11 +145,12 @@ class MetricsCollector:
                     "total": self.repair_cycles,
                     "outcomes": self.repair_cycle_outcomes,
                 },
+                "supervisor_decisions": self.recent_supervisor_decisions[-10:],
                 "recent_llm_records": self.recent_llm_records[-10:],
             }
 
     def flush_to_file(self):
-        """将指标快照写入文件。"""
+        """将指标快照写入当前文件。"""
         if not self.output_file:
             return
         summary = self.dump_summary()
@@ -145,6 +160,33 @@ class MetricsCollector:
             logger.info(f"[Metrics] 指标已写入 {self.output_file}")
         except Exception as e:
             logger.error(f"[Metrics] 写入指标文件失败: {e}")
+
+    def append_to_history(self, history_file: str, tag: str = ""):
+        """追加一条带时间戳的指标快照到历史文件（用于长期持久化）。"""
+        summary = self.dump_summary()
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "tag": tag,
+            "llm_calls": summary["llm"]["total_calls"],
+            "total_tokens": summary["llm"]["total_tokens"],
+            "avg_latency_ms": summary["llm"]["avg_latency_ms"],
+            "tool_success_rate": summary["tool_calls"]["success_rate"],
+            "tool_calls": summary["tool_calls"]["total"],
+            "repair_cycles": summary["repair_cycles"]["total"],
+        }
+        try:
+            existing = []
+            if _os.path.exists(history_file):
+                with open(history_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            existing.append(entry)
+            # Keep last 500 entries
+            if len(existing) > 500:
+                existing = existing[-500:]
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(existing, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[Metrics] 写入历史文件失败: {e}")
 
     def render_summary(self) -> str:
         """渲染指标的完整摘要为可读字符串，适合 CLI 打印或 UI 展示。"""
@@ -178,6 +220,6 @@ class MetricsCollector:
 # 全局单例（使用绝对路径，避免 CWD 变化导致写入位置错误）
 import os as _os
 
-from src.core.config import WORKSPACE_DIR as _WORKSPACE_DIR
+from src.infra.config import WORKSPACE_DIR as _WORKSPACE_DIR
 
 metrics = MetricsCollector(output_file=_os.path.join(_WORKSPACE_DIR, "metrics.json"))

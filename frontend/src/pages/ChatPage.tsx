@@ -1,635 +1,494 @@
 /**
- * 工作台（聊天）页面
+ * ChatPage — CLI-style chat interface
  *
- * 核心功能页面：用户输入需求，智能体规划、编码、测试的完整流程。
- * 通过 SSE (Server-Sent Events) 实时接收后端 LangGraph 工作流的执行事件，
- * 并流式展示到界面上。
- *
- * Gemini 风格：初始居中显示欢迎页（带聊天输入框），
- * 用户选择工作目录并输入需求后，点击发送进入完整聊天界面。
+ * Layout: fixed header + scrollable messages + fixed input at bottom.
+ * Messages are left-aligned with role-indicator left borders.
+ * Assistant messages render as Markdown with syntax-highlighted code blocks.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useApp } from '../context/AppContext';
-import type { StreamEvent, LogEntry, MetricsData } from '../types';
-import { startRun, getRunState, setWorkspace } from '../api/client';
+import { startRun, cancelRun, listFiles, getConfig, getMetrics, runBash, setWorkspace } from '../api/client';
 
-/**
- * 工作流节点定义
- * 用于在工作流图中展示节点状态（已执行/待执行）
- */
-const WORKFLOW_NODES = [
-  { id: 'planner', label: 'Planner' },
-  { id: 'planner_tools', label: 'Planner Tools' },
-  { id: 'coder', label: 'Coder' },
-  { id: 'coder_step_counter', label: 'Step Counter' },
-  { id: 'coder_tools', label: 'Coder Tools' },
-  { id: 'sandbox', label: 'Sandbox' },
-  { id: 'reviewer', label: 'Reviewer' },
-];
+/* ================================================================
+   Markdown Renderer
+   ================================================================ */
 
-/**
- * ChatInput 组件
- *
- * 聊天输入框，包含输入字段和提交按钮。
- * 工作流运行时禁用输入。
- *
- * @param onSubmit 用户提交时调用，传入提示文本
- * @param disabled 是否禁用输入
- */
-function ChatInput({ onSubmit, disabled }: { onSubmit: (prompt: string) => void; disabled: boolean }) {
-  const [prompt, setPrompt] = useState('');
-
-  /** 处理表单提交 */
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = prompt.trim();
-    if (!trimmed || disabled) return;
-    onSubmit(trimmed);
-    setPrompt('');
-  }
-
+function MarkdownRenderer({ content }: { content: string }) {
   return (
-    <form className="chat-input-form" onSubmit={handleSubmit}>
-      <input
-        type="text"
-        placeholder={disabled ? '工作流运行中...' : '输入你的需求，例如：用 Python 写一个快排'}
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        disabled={disabled}
-      />
-      <button className="primary" type="submit" disabled={disabled || !prompt.trim()}>
-        发送
-      </button>
-    </form>
-  );
-}
-
-/**
- * WorkflowDiagram 组件
- *
- * 展示工作流图的节点状态。
- * 根据执行日志中已执行的节点，高亮已完成的节点。
- *
- * @param executedNodes 已执行的节点名称集合
- */
-function WorkflowDiagram({ executedNodes }: { executedNodes: Set<string> }) {
-  return (
-    <div className="workflow-panel">
-      <h3>工作流图</h3>
-      {WORKFLOW_NODES.map((node) => {
-        const isExecuted = executedNodes.has(node.id.toLowerCase());
-        return (
-          <div key={node.id} className={`workflow-node-item ${isExecuted ? 'executed' : 'pending'}`}>
-            <div className="workflow-node-dot" />
-            <span>{node.label}</span>
-          </div>
-        );
-      })}
+    <div className="markdown-body">
+      <ReactMarkdown
+        components={{
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || '');
+            const codeStr = String(children).replace(/\n$/, '');
+            // inline code (no language class)
+            if (!match) {
+              return <code className="inline-code" {...props}>{children}</code>;
+            }
+            return (
+              <div className="code-block-wrap">
+                <div className="code-block-lang">{match[1]}</div>
+                <SyntaxHighlighter
+                  style={oneDark}
+                  language={match[1]}
+                  PreTag="div"
+                >
+                  {codeStr}
+                </SyntaxHighlighter>
+              </div>
+            );
+          },
+          // Open links in new tab
+          a({ href, children }) {
+            return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
 
-/**
- * ChatPage 主页面
- *
- * 包含聊天消息区域、输入区域、执行轨迹面板和工作流图面板。
- * SSE 事件驱动状态更新。
- */
+/* ================================================================
+   Chat Input — textarea that auto-grows
+   ================================================================ */
+
+function ChatInput({ onSubmit, disabled }: { onSubmit: (p: string) => void; disabled: boolean }) {
+  const [prompt, setPrompt] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize textarea
+  function adjustHeight() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }
+
+  useEffect(() => { adjustHeight(); }, [prompt]);
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!prompt.trim() || disabled) return;
+    onSubmit(prompt.trim());
+    setPrompt('');
+    // Reset height
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    // Enter submits, Shift+Enter inserts newline
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  }
+
+  return (
+    <form className="chat-input-form" onSubmit={handleSubmit}>
+      <textarea
+        ref={textareaRef}
+        className="chat-input-textarea"
+        rows={3}
+        placeholder={disabled ? 'Running...' : 'Send a message (Enter to send, Shift+Enter for newline)'}
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={handleKeyDown}
+        disabled={disabled}
+      />
+    </form>
+  );
+}
+
+/* ================================================================
+   Chat Page
+   ================================================================ */
+
 export function ChatPage() {
   const { state, dispatch, setWorkspaceDir } = useApp();
-  // 用于自动滚动到最新消息
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  // 标记是否正在获取最终状态，防止重复请求
-  const hasFetchedFinalState = useRef(false);
-  // 保存当前 SSE 连接，用于组件卸载时清理
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  // 防止双击提交
   const isSubmittingRef = useRef(false);
-  // 避免 stale closure 的 running 状态 ref
-  const isRunningRef = useRef(false);
-  // 用于取消 finishRunAndFetchState
-  const finishedRef = useRef(false);
-  // 追踪最后一个 coder 消息的索引，用于更新而非创建新消息
-  const lastCoderMsgIndexRef = useRef<number | null>(null);
 
-  // 欢迎页状态
-  const [workspacePath, setWorkspacePath] = useState('');
+  const [workspacePath, setWorkspacePath] = useState(
+    () => localStorage.getItem('nanoCursor-workspaceDir') || ''
+  );
   const [welcomePrompt, setWelcomePrompt] = useState('');
   const [isEntering, setIsEntering] = useState(false);
+  const [pathError, setPathError] = useState('');
+  const [toolCallCount, setToolCallCount] = useState(0);
 
-  /** 每次添加新消息时滚动到底部 */
+  // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state.chatMessages]);
 
-  /** 组件卸载时关闭 SSE 连接 */
+  // Reset isEntering when workspaceDir is cleared (e.g. "新建对话")
+  useEffect(() => {
+    if (!state.workspaceDir) {
+      setIsEntering(false);
+    }
+  }, [state.workspaceDir]);
+
+  // Cleanup SSE on unmount
   useEffect(() => {
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
+      eventSourceRef.current?.close();
     };
   }, []);
 
-  /**
-   * 处理流程 SSE 事件
-   *
-   * 根据事件类型更新全局状态：添加日志、更新计划、设置错误、更新指标等。
-   *
-   * @param event SSE 事件对象
-   */
-  const processEvent = useCallback((event: StreamEvent) => {
-    dispatch({ type: 'ADD_STREAM_EVENT', payload: event });
+  const handleCancel = useCallback(async () => {
+    if (!state.isRunning || !state.threadId) return;
+    try { await cancelRun(state.threadId); } catch { /* best effort */ }
+  }, [state.isRunning, state.threadId]);
 
-    if (event.type !== 'node_update' || !event.node) return;
+  const handleCommand = useCallback(async (cmd: string): Promise<boolean> => {
+    const args = cmd.trim().split(/\s+/);
+    const name = args[0].toLowerCase();
 
-    const node = event.node;
-    const data = event.data as Record<string, unknown> | undefined;
-
-    // 每个 node_update 附带当前指标，用于实时更新侧边栏
-    if (data?.metrics) {
-      const m = data.metrics as MetricsData['current'];
-      dispatch({
-        type: 'SET_SIDEBAR_METRICS',
-        payload: {
-          llm_calls: m.llm?.total_calls ?? 0,
-          total_tokens: m.llm?.total_tokens ?? 0,
-          tool_success_rate: m.tool_calls?.success_rate ?? 0,
-        },
-      });
+    function reply(content: string) {
+      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: { role: 'assistant', content } });
     }
 
-    // 根据节点类型，添加对应的执行日志
-    switch (node) {
-      case 'planner':
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: { node: 'Planner', status: 'completed', detail: '生成了开发计划' },
-        });
-        if (data?.current_plan) {
-          dispatch({ type: 'SET_CURRENT_PLAN', payload: data.current_plan as string });
+    switch (name) {
+      case '/help':
+        reply(
+          '**Available Commands**\n\n' +
+          '| Command | Description |\n|---------|------------|\n' +
+          '| `/help` | Show this help |\n' +
+          '| `/clear` | Clear chat history |\n' +
+          '| `/files` | List workspace files |\n' +
+          '| `/config` | Show LLM provider config |\n' +
+          '| `/metrics` | Show current metrics |\n' +
+          '| `/bash` | Run shell command in workspace |\n' +
+          '| `/cancel` | Cancel running task |\n' +
+          '| `/workspace` | Show workspace path |\n' +
+          '\nPrefix with `/` to run a command, otherwise send to agent.'
+        );
+        return true;
+
+      case '/clear':
+        dispatch({ type: 'CLEAR_CHAT' });
+        dispatch({ type: 'SET_THREAD_ID', payload: crypto.randomUUID() });
+        reply('Chat cleared. New thread started.');
+        return true;
+
+      case '/files':
+        try {
+          const d = await listFiles();
+          const lines = d.files.slice(0, 30).map((f: any) =>
+            `${f.isDir ? '  📁' : '  📄'} ${f.path}${!f.isDir ? ` (${f.size}b)` : ''}`
+          );
+          reply(`**Workspace files** (${d.files.length} total):\n\`\`\`\n${lines.join('\n')}\n\`\`\``);
+        } catch (e: any) {
+          reply(`Failed: ${e.message}`);
         }
-        break;
+        return true;
 
-      case 'planner_tools':
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: { node: 'Planner Tools', status: 'info', detail: '读取文件/列出目录' },
-        });
-        break;
-
-      case 'coder': {
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: { node: 'Coder', status: 'completed', detail: '代码/工具调用' },
-        });
-        // 如果 Coder 有输出文本内容，更新到同一条助手消息中，避免消息泛滥
-        if (data?.content) {
-          const content = data.content as string;
-          if (content.length > 10) {
-            if (lastCoderMsgIndexRef.current !== null && state.chatMessages[lastCoderMsgIndexRef.current]) {
-              // 更新已有 coder 消息，追加内容
-              const existing = state.chatMessages[lastCoderMsgIndexRef.current];
-              dispatch({
-                type: 'UPDATE_CHAT_MESSAGE',
-                payload: { index: lastCoderMsgIndexRef.current, content: existing.content + '\n' + content.slice(0, 500) },
-              });
-            } else {
-              // 创建新的 coder 消息
-              dispatch({
-                type: 'ADD_CHAT_MESSAGE',
-                payload: { role: 'assistant', content: content.slice(0, 500) },
-              });
-              lastCoderMsgIndexRef.current = state.chatMessages.length;
-            }
-          }
+      case '/config':
+        try {
+          const cfg = await getConfig();
+          const provs = Object.entries(cfg.llmProviders as Record<string, { hasKey: boolean; model: string; baseUrl?: string }>)
+            .map(([k, v]) => `${k}: ${v.hasKey ? '✅ ' + v.model : '❌ no key'}`)
+            .join('\n');
+          reply(`**LLM Providers**\n\n${provs}\n\nWorkspace: \`${cfg.system.workspace_dir || '?'}\``);
+        } catch (e: any) {
+          reply(`Failed: ${e.message}`);
         }
-        break;
-      }
+        return true;
 
-      case 'coder_step_counter':
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: {
-            node: 'Coder Step',
-            status: 'info',
-            detail: `步数: ${data?.coder_step_count ?? 0}`,
-          },
-        });
-        break;
+      case '/metrics':
+        try {
+          const m = await getMetrics();
+          const c = (m as any).current || {};
+          const llm = c.llm || {};
+          const tc = c.tool_calls_detail || c.tool_calls || {};
+          reply(
+            `**Current Metrics**\n\n` +
+            `| Metric | Value |\n|--------|------|\n` +
+            `| LLM Calls | ${llm.total_calls || 0} |\n` +
+            `| Total Tokens | ${(llm.total_tokens || 0).toLocaleString()} |\n` +
+            `| Avg Latency | ${(llm.avg_latency_ms || 0).toFixed(0)}ms |\n` +
+            `| Tool Calls | ${tc.total || 0} |\n` +
+            `| Tool Success | ${((tc.success_rate || 0) * 100).toFixed(0)}% |`
+          );
+        } catch (e: any) {
+          reply(`Failed: ${e.message}`);
+        }
+        return true;
 
-      case 'coder_tools':
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: { node: 'Coder Tools', status: 'info', detail: '读写文件' },
-        });
-        break;
-
-      case 'sandbox': {
-        const errorTrace = (data?.error_trace ?? '') as string;
-        const retryCount = (data?.retry_count ?? 0) as number;
-        const maxRetries = (data?.max_retries ?? 3) as number;
-
-        if (errorTrace) {
-          // 沙盒测试失败
-          dispatch({ type: 'SET_ERROR_TRACE', payload: errorTrace });
-          dispatch({
-            type: 'ADD_LOG_ENTRY',
-            payload: { node: 'Sandbox', status: 'failed', detail: '测试未通过' },
-          });
+      case '/cancel':
+        if (!state.isRunning) {
+          reply('No task is running.');
         } else {
-          // 沙盒测试通过
-          dispatch({ type: 'SET_ERROR_TRACE', payload: '' });
-          dispatch({
-            type: 'ADD_LOG_ENTRY',
-            payload: { node: 'Sandbox', status: 'completed', detail: '测试通过' },
-          });
+          await handleCancel();
+          reply('Cancel requested.');
         }
+        return true;
 
-        dispatch({ type: 'SET_RETRY_INFO', payload: { count: retryCount, max: maxRetries } });
-        break;
+      case '/workspace':
+        reply(`Workspace: \`${state.workspaceDir || '(not set)'}\`\nThread: \`${state.threadId.slice(0, 8)}\``);
+        return true;
+
+      case '/bash': {
+        const bashCmd = args.slice(1).join(' ');
+        if (!bashCmd) {
+          reply('Usage: `/bash <command>` — run a shell command in the workspace directory.');
+          return true;
+        }
+        reply(`\`$ ${bashCmd}\``);
+        try {
+          const result = await runBash(bashCmd, state.workspaceDir);
+          const out = result.stdout || '';
+          const err = result.stderr || '';
+          let output = '';
+          if (out && out !== '(no output)') output += out;
+          if (err) output += (output ? '\n\n**stderr:**\n```\n' : '') + err + (output ? '\n```' : '');
+          if (!output && result.success) output = '(no output)';
+          const label = result.success ? '✓' : `✗ exit: ${result.exit_code}`;
+          reply(`**${label}**\n\`\`\`\n${output.slice(0, 10000)}\n\`\`\``);
+        } catch (e: any) {
+          reply(`Bash failed: ${e.message}`);
+        }
+        return true;
       }
 
-      case 'reviewer': {
-        const content = (data?.content ?? '') as string;
-        dispatch({
-          type: 'ADD_LOG_ENTRY',
-          payload: { node: 'Review', status: 'warning', detail: '分析错误并给出修复建议' },
-        });
-        break;
-      }
+      default:
+        reply(`Unknown command: \`${name}\`. Type \`/help\` to see available commands.`);
+        return true;
     }
-  }, [dispatch, state.chatMessages]);
+  }, [dispatch, state.isRunning, state.workspaceDir, state.threadId]);
 
-  /**
-   * 处理发送消息
-   *
-   * 1. 将用户消息添加到聊天
-   * 2. 调用后端 API 启动工作流
-   * 3. 通过 EventSource 连接 SSE 端点，流式接收事件
-   * 4. 工作流完成后获取最终状态
-   */
   const handleSendPrompt = useCallback(async (prompt: string, workspaceDir?: string) => {
     if (isSubmittingRef.current) return;
+
+    // Intercept slash commands
+    if (prompt.startsWith('/')) {
+      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: { role: 'user', content: prompt } });
+      await handleCommand(prompt);
+      return;
+    }
+
     isSubmittingRef.current = true;
 
-    // 添加用户消息到聊天
     dispatch({ type: 'ADD_CHAT_MESSAGE', payload: { role: 'user', content: prompt } });
+    dispatch({ type: 'SET_SIDEBAR_METRICS' as any, payload: { llm_calls: 0, total_tokens: 0, tool_success_rate: 0 } });
 
-    // 清空旧状态，避免上一次运行的残留数据干扰
-    dispatch({ type: 'SET_EXECUTION_LOG', payload: [] });
-    dispatch({ type: 'SET_ERROR_TRACE', payload: '' });
-    dispatch({ type: 'SET_CURRENT_PLAN', payload: '' });
-    dispatch({ type: 'SET_ACTIVE_FILES', payload: [] });
-    dispatch({ type: 'SET_RETRY_INFO', payload: { count: 0, max: 3 } });
-    dispatch({ type: 'SET_MODIFICATION_LOG', payload: [] });
-    dispatch({ type: 'SET_SIDEBAR_METRICS', payload: { llm_calls: 0, total_tokens: 0, tool_success_rate: 0 } });
-
-    // 关闭上一次可能遗留的 SSE 连接
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
-    hasFetchedFinalState.current = false;
-
-    // 设置运行状态
-    isRunningRef.current = true;
-    finishedRef.current = false;
-    lastCoderMsgIndexRef.current = null;
+    setToolCallCount(0);
     dispatch({ type: 'SET_RUNNING', payload: true });
 
     try {
-      // 调用后端启动工作流
       const result = await startRun(prompt, state.threadId, workspaceDir || state.workspaceDir);
+      const threadId = result.thread_id;
 
-      // 连接 SSE 端点，流式接收事件
-      const eventSource = new EventSource(`/api/run/${result.thread_id}/events`);
+      const eventSource = new EventSource(`/api/run/${threadId}/events`);
       eventSourceRef.current = eventSource;
 
-      // 客户端超时：5 分钟无消息自动关闭
-      const connectionTimeout = setTimeout(() => {
-        if (eventSource.readyState === EventSource.OPEN) return;
-        if (eventSource.readyState === EventSource.CONNECTING) {
-          eventSource.close();
-          dispatch({ type: 'SET_RUNNING', payload: false });
+      eventSource.addEventListener('tool_call', (e: Event) => {
+        try {
+          const data = JSON.parse((e as MessageEvent).data);
+          const tool = data.tool || '';
+          const output = data.output || '';
+          const line = output.slice(0, 200);
           dispatch({
             type: 'ADD_CHAT_MESSAGE',
-            payload: { role: 'assistant', content: 'SSE 连接超时，请检查后端是否正常运行' },
+            payload: { role: 'assistant', content: `\`[${tool}]\` ${line}` },
           });
-        }
-      }, 300_000);
+          setToolCallCount((c) => c + 1);
+          // Extract real-time metrics from each tool_call event
+          const m = data.metrics;
+          if (m) {
+            const llm = m.llm || {};
+            const tc = m.tool_calls || {};
+            dispatch({
+              type: 'SET_SIDEBAR_METRICS',
+              payload: {
+                llm_calls: llm.total_calls || 0,
+                total_tokens: llm.total_tokens || 0,
+                tool_success_rate: tc.success_rate || 0,
+              },
+            });
+          }
+        } catch { /* ignore parse errors */ }
+      });
 
       eventSource.addEventListener('node_update', (e: Event) => {
-        const msg = e as MessageEvent;
         try {
-          const data = JSON.parse(msg.data) as StreamEvent;
-          processEvent(data);
-        } catch (err) {
-          console.warn('Failed to parse node_update event:', msg.data, err);
-          dispatch({
-            type: 'ADD_CHAT_MESSAGE',
-            payload: { role: 'assistant', content: `[数据解析错误] ${msg.data.slice(0, 100)}` },
-          });
-        }
+          const data = JSON.parse((e as MessageEvent).data);
+          const content = data.data?.content || '';
+          if (content) {
+            dispatch({ type: 'ADD_CHAT_MESSAGE', payload: { role: 'assistant', content } });
+          }
+          // Extract real-time metrics from SSE event
+          const metrics = data.data?.metrics;
+          if (metrics) {
+            const llm = metrics.llm || {};
+            const tc = metrics.tool_calls || {};
+            dispatch({
+              type: 'SET_SIDEBAR_METRICS',
+              payload: {
+                llm_calls: llm.total_calls || 0,
+                total_tokens: llm.total_tokens || 0,
+                tool_success_rate: tc.success_rate || 0,
+              },
+            });
+          }
+        } catch { /* ignore parse errors */ }
       });
 
       eventSource.addEventListener('done', () => {
-        clearTimeout(connectionTimeout);
         eventSource.close();
-        if (eventSourceRef.current === eventSource) {
-          eventSourceRef.current = null;
-        }
-        finishRunAndFetchState(result.thread_id);
+        if (eventSourceRef.current === eventSource) eventSourceRef.current = null;
+        dispatch({ type: 'SET_RUNNING', payload: false });
       });
 
-      // 处理所有错误（网络级 + 服务端 error 事件），统一用 onerror
       eventSource.onerror = () => {
-        clearTimeout(connectionTimeout);
         eventSource.close();
-        if (eventSourceRef.current === eventSource) {
-          eventSourceRef.current = null;
-        }
-        if (isRunningRef.current) {
-          isRunningRef.current = false;
-          dispatch({ type: 'SET_RUNNING', payload: false });
-          dispatch({
-            type: 'ADD_CHAT_MESSAGE',
-            payload: { role: 'assistant', content: 'SSE 连接中断，请检查后端状态' },
-          });
-        }
+        if (eventSourceRef.current === eventSource) eventSourceRef.current = null;
+        dispatch({ type: 'SET_RUNNING', payload: false });
+        dispatch({
+          type: 'ADD_CHAT_MESSAGE',
+          payload: { role: 'assistant', content: 'Connection interrupted. Please check backend status.' },
+        });
       };
-
     } catch (err: any) {
       dispatch({ type: 'SET_RUNNING', payload: false });
       dispatch({
         type: 'ADD_CHAT_MESSAGE',
-        payload: { role: 'assistant', content: `启动工作流失败: ${err?.message ?? '未知错误'}` },
+        payload: { role: 'assistant', content: `Start failed: ${err?.message ?? 'Unknown error'}` },
       });
     } finally {
       isSubmittingRef.current = false;
     }
-  }, [dispatch, state.chatMessages]);
+  }, [dispatch, state.threadId, state.workspaceDir]);
 
-  /**
-   * 工作流完成后获取最终状态
-   *
-   * 调用后端 /api/run/{threadId}/state 接口，
-   * 更新计划、目标文件、修改记录等信息。
-   * 同时添加一条总结性的助消息。
-   *
-   * @param threadId 线程 ID
-   */
-  async function finishRunAndFetchState(threadId: string) {
-    if (hasFetchedFinalState.current) return;
-    hasFetchedFinalState.current = true;
-    finishedRef.current = true;
-
-    try {
-      // 短暂等待后端 checkpointer 完成持久化
-      await new Promise(r => setTimeout(r, 500));
-
-      // 重试 3 次获取最终状态
-      let finalState: any = null;
-      for (let i = 0; i < 3; i++) {
-        try {
-          finalState = await getRunState(threadId);
-          if (finalState) break;
-        } catch {
-          // 第一次失败等待 1s 再重试
-          if (i < 2) await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-
-      if (!finalState) throw new Error('无法获取最终状态');
-
-      // 更新计划
-      if (finalState.current_plan) {
-        dispatch({ type: 'SET_CURRENT_PLAN', payload: finalState.current_plan });
-      }
-
-      // 更新目标文件列表
-      if (finalState.active_files && Array.isArray(finalState.active_files)) {
-        dispatch({ type: 'SET_ACTIVE_FILES', payload: finalState.active_files });
-      }
-
-      // 更新修改记录
-      if (finalState.modification_log && Array.isArray(finalState.modification_log)) {
-        dispatch({ type: 'SET_MODIFICATION_LOG', payload: finalState.modification_log });
-      }
-
-      // 添加一条完成消息
-      const hasError = finalState.error_trace;
-      const retryCount = finalState.retry_count ?? 0;
-
-      if (hasError) {
-        dispatch({
-          type: 'SET_ERROR_TRACE',
-          payload: finalState.error_trace,
-        });
-        dispatch({
-          type: 'ADD_CHAT_MESSAGE',
-          payload: {
-            role: 'assistant',
-            content: `工作流执行完成，但沙盒测试仍有错误（已重试 ${retryCount} 次）。请查看右侧错误追踪。`,
-          },
-        });
-      } else {
-        dispatch({
-          type: 'ADD_CHAT_MESSAGE',
-          payload: {
-            role: 'assistant',
-            content: '工作流执行完成，沙盒测试通过！',
-          },
-        });
-      }
-    } catch {
-      // 获取最终状态失败时，仍然添加完成消息，但提示可能不完整
-      dispatch({
-        type: 'ADD_CHAT_MESSAGE',
-        payload: { role: 'assistant', content: '工作流执行完成，但状态获取可能不完整' },
-      });
-    } finally {
-      // 无论如何都重置运行状态
-      isRunningRef.current = false;
-      dispatch({ type: 'SET_RUNNING', payload: false });
-    }
-  }
-
-  // 已执行节点的集合，用于工作流图高亮
-  const executedNodes = new Set(state.executionLog.map(e => e.node));
-
-  // 将修改记录映射为可读文本
-  const modificationLogText = state.modificationLog.length > 0
-    ? state.modificationLog.map((entry, i) => `${i + 1}. ${entry}`).join('\n')
-    : '';
-
-  // 未选择工作区时，显示欢迎页（带聊天输入框）
+  /* ---------- Welcome screen (no workspace set) ---------- */
   if (!state.workspaceDir && !isEntering) {
     return (
       <div className="welcome-screen">
-        {/* 背景装饰 */}
-        <div className="welcome-bg-orb welcome-bg-orb-1" />
-        <div className="welcome-bg-orb welcome-bg-orb-2" />
-        <div className="welcome-bg-orb welcome-bg-orb-3" />
-
         <div className="welcome-content">
-          {/* Logo */}
           <div className="welcome-logo-wrap">
             <div className="welcome-logo">
               <svg viewBox="0 0 24 24" fill="none" width="36" height="36">
-                <circle cx="12" cy="12" r="4" fill="white" opacity="0.95"/>
-                <circle cx="12" cy="12" r="9" stroke="white" strokeWidth="1.5" opacity="0.5"/>
-                <circle cx="12" cy="12" r="2" fill="white"/>
+                <circle cx="12" cy="12" r="4" fill="white" opacity="0.95" />
+                <circle cx="12" cy="12" r="9" stroke="white" strokeWidth="1.5" opacity="0.5" />
+                <circle cx="12" cy="12" r="2" fill="white" />
               </svg>
             </div>
             <div className="welcome-logo-pulse" />
           </div>
 
-          {/* 标题区块 */}
           <div className="welcome-header">
             <h1>nanoCursor</h1>
-            <p>多智能体自动编程框架，让 AI 帮你写代码</p>
+            <p>LLM Tool Calling auto-programming framework</p>
           </div>
 
-          {/* 功能卡片 */}
-          <div className="welcome-features">
-            <div className="welcome-feature-card">
-              <div className="feature-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>
-                </svg>
-              </div>
-              <span>智能规划</span>
-            </div>
-            <div className="welcome-feature-card">
-              <div className="feature-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <polyline points="16 18 22 12 16 6"/>
-                  <polyline points="8 6 2 12 8 18"/>
-                </svg>
-              </div>
-              <span>自动编码</span>
-            </div>
-            <div className="welcome-feature-card">
-              <div className="feature-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                </svg>
-              </div>
-              <span>沙盒测试</span>
-            </div>
-          </div>
-
-          {/* 表单区块 */}
           <div className="welcome-form-wrap">
-            <div className="welcome-form-label">设置工作目录</div>
+            <div className="welcome-form-label">Workspace directory (required)</div>
             <input
               type="text"
               className="workspace-path-input"
-              placeholder="输入工作目录路径，如 D:\projects\myapp"
+              placeholder="e.g. E:\projects\myapp — agent will read/write files here"
               value={workspacePath}
-              onChange={(e) => setWorkspacePath(e.target.value)}
+              onChange={(e) => { setWorkspacePath(e.target.value); setPathError(''); }}
             />
+            {pathError && <div className="welcome-error">{pathError}</div>}
 
             <form
               className="welcome-chat-form"
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (!workspacePath.trim() || !welcomePrompt.trim()) return;
-                try {
-                  await setWorkspace(workspacePath.trim());
-                } catch {
-                  // 忽略错误
-                }
+                if (!workspacePath.trim()) { setPathError('Please enter a workspace directory'); return; }
                 setWorkspaceDir(workspacePath.trim());
-                setIsEntering(true);
-                handleSendPrompt(welcomePrompt.trim(), workspacePath.trim());
+                // Sync workspace to backend so /files, /bash etc. use the right directory
+                try { await setWorkspace(workspacePath.trim()); } catch { /* best effort */ }
+                if (welcomePrompt.trim()) {
+                  setIsEntering(true);
+                  handleSendPrompt(welcomePrompt.trim(), workspacePath.trim());
+                } else {
+                  setIsEntering(true);
+                }
               }}
             >
               <input
                 type="text"
                 className="welcome-chat-input"
-                placeholder="输入你的需求，例如：用 Python 写一个快排"
+                placeholder="Enter your task (optional, can skip)"
                 value={welcomePrompt}
                 onChange={(e) => setWelcomePrompt(e.target.value)}
               />
-              <button
-                type="submit"
-                className="welcome-send-btn"
-                disabled={!workspacePath.trim() || !welcomePrompt.trim()}
-              >
+              <button type="submit" className="welcome-send-btn" disabled={!workspacePath.trim()}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"/>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
                 </svg>
               </button>
             </form>
-            <p className="workspace-hint">智能体将在指定目录下读写文件</p>
+            <p className="workspace-hint">Enter a valid workspace path to continue. The agent needs this to know where to work.</p>
           </div>
         </div>
       </div>
     );
   }
 
+  /* ---------- Chat view ---------- */
   return (
-    <>
-      <div className="page-header">
-        <h2>工作台</h2>
-        <p>输入你的需求，智能体会自动规划、编码、测试</p>
-      </div>
-
-      <div className="chat-layout">
-        {/* 中间：聊天区域 */}
-        <div className="chat-main">
-          <div className="chat-messages">
-            {/* 聊天消息列表 */}
-            {state.chatMessages.map((msg, i) => (
-              <div key={i} className={`chat-message ${msg.role}`}>
-                {msg.content}
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* 输入区域 */}
-          <div className="chat-input-area">
-            <ChatInput onSubmit={handleSendPrompt} disabled={state.isRunning} />
-            {state.isRunning && (
-              <div className="status-text">工作流运行中，请稍候...</div>
-            )}
-            {!state.isRunning && state.modificationLog.length > 0 && (
-              <div className="status-text">
-                修改记录：{modificationLogText.slice(0, 100)}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* 右侧：执行轨迹面板 */}
-        <div className="execution-panel">
-          <h3>执行轨迹</h3>
-          {state.executionLog.length === 0 && (
-            <div className="empty-state">
-              <div className="placeholder-icon">~</div>
-              <p>暂无执行记录</p>
-            </div>
+    <div className="chat-main">
+      {/* Fixed header */}
+      <div className="chat-page-header">
+        <h2>Terminal</h2>
+        <div className="chat-header-meta">
+          {state.isRunning && (
+            <span className="running-indicator">
+              <span className="running-dot" />
+              Running... {toolCallCount} tool calls
+            </span>
           )}
-          {state.executionLog.map((entry, i) => (
-            <div key={i} className="log-entry">
-              <div className={`log-icon ${entry.status}`} />
-              <div>
-                <div className="log-node">{entry.node}</div>
-                <div className="log-detail">{entry.detail}</div>
-              </div>
-            </div>
-          ))}
+          {state.isRunning && (
+            <button className="cancel-btn-inline" onClick={handleCancel}>Cancel</button>
+          )}
         </div>
-
-        {/* 最右：工作流图面板 */}
-        <WorkflowDiagram executedNodes={executedNodes} />
       </div>
-    </>
+
+      {/* Scrollable messages */}
+      <div className="chat-messages" ref={messagesContainerRef}>
+        {state.chatMessages.length === 0 && (
+          <div className="chat-empty-hint">
+            <p>Send a message to start a task.</p>
+            <p className="hint-sub">The agent can read/write files and execute commands in the workspace.</p>
+          </div>
+        )}
+        {state.chatMessages.map((msg, i) => (
+          <div key={i} className={`chat-message ${msg.role}`}>
+            <div className="message-role-label">
+              {msg.role === 'user' ? '▸' : '◉'}
+            </div>
+            <div className="message-body">
+              {msg.role === 'assistant' ? (
+                <MarkdownRenderer content={msg.content} />
+              ) : (
+                <div className="message-text">{msg.content}</div>
+              )}
+            </div>
+          </div>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Fixed input area at bottom */}
+      <div className="chat-input-area">
+        <ChatInput onSubmit={(p) => handleSendPrompt(p)} disabled={state.isRunning} />
+      </div>
+    </div>
   );
 }

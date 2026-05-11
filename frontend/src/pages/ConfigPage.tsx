@@ -85,6 +85,7 @@ export function ConfigPage() {
     anthropic: 'Anthropic',
     ollama: 'Ollama',
     deepseek: 'DeepSeek',
+    minimax: 'MiniMax',
   };
 
   return (
@@ -101,7 +102,7 @@ export function ConfigPage() {
           <div className="provider-grid">
             {Object.entries(PROVIDER_NAMES).map(([key, name]) => {
               const provider = llmProviders[key];
-              const isConnected = provider?.hasKey;
+              const isConnected = key === 'ollama' ? provider?.is_connected : provider?.hasKey;
 
               return (
                 <div key={key} className={`provider-card ${isConnected ? 'connected' : 'disconnected'}`}>

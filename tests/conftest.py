@@ -15,8 +15,8 @@ if REPO_ROOT not in sys.path:
 
 def _patch_file_tools_workspace(workspace_str, monkeypatch):
     """Patch both config and file_tools module-level WORKSPACE_DIR refs."""
-    import src.core.config
-    monkeypatch.setattr(src.core.config, "WORKSPACE_DIR", workspace_str, raising=False)
+    import src.infra.config
+    monkeypatch.setattr(src.infra.config, "WORKSPACE_DIR", workspace_str, raising=False)
 
     import src.tools.file_tools
     monkeypatch.setattr(src.tools.file_tools, "WORKSPACE_DIR", workspace_str, raising=False)

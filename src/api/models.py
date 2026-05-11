@@ -29,6 +29,7 @@ class LLMProviderStatus(BaseModel):
     has_key: bool
     model: str
     base_url: str | None = None
+    is_connected: bool = False
 
 
 class SystemConfig(BaseModel):
@@ -87,6 +88,7 @@ class RunRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="用户输入的需求描述")
     thread_id: str | None = Field(default=None, description="可选的已有线程 ID，用于继续对话")
     workspace_dir: str | None = Field(default=None, description="工作目录路径")
+    messages: list[Message] | None = Field(default=None, description="对话历史消息列表，用于连续对话")
 
 
 class RunResponse(BaseModel):

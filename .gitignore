@@ -1,39 +1,80 @@
-# 忽略所有层级的 .idea 文件夹
-.idea/
-**/.idea/
-*.iml
-
-.vscode/
-**/.vscode/
-.claude/
-.pytest_cache/
-
-# 环境变量
+# ==========================================
+# Environment & Secrets
+# ==========================================
 .env
+.env.*
+src/core/.env
 **/.env
 
-workspace/
+/src/nanocursor.db
 
-# Python 相关
+# ==========================================
+# IDE & Editor
+# ==========================================
+.idea/
+.vscode/
+**/.idea/
+**/.vscode/
+*.iml
+.claude/
+.ruff_cache/
+.mypy_cache/
+
+# ==========================================
+# Python
+# ==========================================
 __pycache__/
-venv/
 *.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+.env/
+build/
+dist/
+*.egg-info/
 
-# 日志
-*.log
-
-# LangGraph checkpointer 数据库
-.checkpoints/
-
-# 测试覆盖率报告
-htmlcov/
+# ==========================================
+# Testing
+# ==========================================
+.pytest_cache/
 .coverage
 *.coverage
+htmlcov/
 
-# 前端依赖和构建产物
+# ==========================================
+# Frontend (node_modules, build)
+# ==========================================
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
-# IDE 配置
-.ruff_cache/
+# ==========================================
+# nanoCursor Runtime Artifacts
+# (这些是 agent 运行时生成的目录，不应提交)
+# ==========================================
+workspace/
+.workspace/
+.tasks/
+.snapshots/
+.backups/
+.team/
+.worktrees/
+.transcripts/
+.task_outputs/
+skills/
+.nanocursor.db
+*.db
+metrics_history.json
+
+# LangGraph checkpointer (旧版兼容)
+.checkpoints/
+
+# 日志
+*.log
+
+# 操作系统
+.DS_Store
+Thumbs.db

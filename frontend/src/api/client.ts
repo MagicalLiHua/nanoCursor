@@ -6,6 +6,7 @@
  */
 
 import axios from 'axios';
+import type { ChatMessage } from '../types';
 
 /** 创建 axios 实例，所有请求以 /api 开头，由 Vite proxy 转发到后端 */
 const api = axios.create({
@@ -19,15 +20,19 @@ const api = axios.create({
  * @param prompt 用户输入的需求描述
  * @param threadId 可选的已有线程 ID，用于继续对话
  * @param workspaceDir 工作目录路径
+ * @param messages 可选的对话历史消息列表，用于连续对话
  * @returns 包含 threadId 和状态的响应
  */
-export async function startRun(prompt: string, threadId?: string, workspaceDir?: string) {
-  const body: { prompt: string; thread_id?: string; workspace_dir?: string } = { prompt };
+export async function startRun(prompt: string, threadId?: string, workspaceDir?: string, messages?: ChatMessage[]) {
+  const body: { prompt: string; thread_id?: string; workspace_dir?: string; messages?: ChatMessage[] } = { prompt };
   if (threadId) {
     body.thread_id = threadId;
   }
   if (workspaceDir) {
     body.workspace_dir = workspaceDir;
+  }
+  if (messages && messages.length > 0) {
+    body.messages = messages;
   }
   const { data } = await api.post<{ thread_id: string; status: string }>('/api/run', body);
   return data;
@@ -196,4 +201,81 @@ export async function readBackupContent(backupName: string) {
 export async function setWorkspace(dir: string) {
   const { data } = await api.post('/api/workspaces', { dir });
   return data;
+}
+
+/**
+ * 取消指定线程的运行中的工作流
+ *
+ * @param threadId 线程 ID
+ */
+export async function cancelRun(threadId: string) {
+  const { data } = await api.post(`/api/run/${threadId}/cancel`);
+  return data;
+}
+
+/**
+ * Todo list API
+ */
+
+/** 单个 todo 项 */
+export interface TodoItem {
+  id: string;
+  title: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  priority: number;
+  category?: string;
+  created_at: number;
+  completed_at?: number;
+}
+
+/** 获取所有 todo 项 */
+export async function listTodos() {
+  const { data } = await api.get<{ todos: TodoItem[] }>('/api/todos');
+  return data.todos;
+}
+
+/** 创建新 todo */
+export async function createTodo(title: string, priority = 0, category?: string) {
+  const { data } = await api.post<{ todo: TodoItem }>('/api/todos', null, { params: { title, priority, category } });
+  return data.todo;
+}
+
+/** 标记 todo 为完成 */
+export async function completeTodo(todoId: string) {
+  const { data } = await api.patch<{ todo: TodoItem }>(`/api/todos/${todoId}/complete`);
+  return data.todo;
+}
+
+/** 删除 todo */
+export async function removeTodo(todoId: string) {
+  await api.delete(`/api/todos/${todoId}`);
+}
+
+/**
+ * 直接执行 bash 命令（不走 agent loop）
+ *
+ * @param command 要执行的 shell 命令
+ * @param workspaceDir 可选的工作目录
+ * @param timeout 超时秒数，默认 120
+ * @returns { success, stdout, stderr, exit_code }
+ */
+export async function runBash(command: string, workspaceDir?: string, timeout = 120) {
+  const { data } = await api.post<{ success: boolean; stdout: string; stderr: string; exit_code: number }>('/api/bash', {
+    command,
+    workspace_dir: workspaceDir,
+    timeout,
+  });
+  return data;
+}
+
+/** 搜索记忆 */
+export async function searchMemories(query: string) {
+  const { data } = await api.get('/api/memories/search', { params: { q: query } });
+  return data.memories;
+}
+
+/** 获取所有记忆 */
+export async function listMemories() {
+  const { data } = await api.get('/api/memories');
+  return data.memories;
 }

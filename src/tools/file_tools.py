@@ -2,6 +2,8 @@
 文件操作工具模块
 支持文件读取、写入、编辑，以及文件备份和回滚功能。
 新增 AST 感知的智能读取能力，避免大文件内容被压缩丢失。
+
+文件操作工具模块 - 提供文件读取、写入、编辑、AST 感知读取、备份回滚等功能。
 """
 
 import ast
@@ -10,16 +12,15 @@ import logging
 import os
 import shutil
 from datetime import datetime
+from typing import Optional
 
-from langchain_core.tools import tool
-
-from src.core.config import (
+from src.infra.config import (
     FUZZY_MATCH_THRESHOLD,
     LARGE_FILE_THRESHOLD,
     MAX_FUZZY_MATCH_LINES,
     WORKSPACE_DIR,
 )
-from src.core.logger import logger
+from src.infra.logger import logger
 
 # 备份目录
 BACKUP_DIR = os.path.join(WORKSPACE_DIR, ".backups")
@@ -27,6 +28,10 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
+
+# ==========================================
+# 路径安全检查
+# ==========================================
 
 def _get_safe_filepath(filename: str) -> str:
     """
@@ -43,26 +48,19 @@ def _get_safe_filepath(filename: str) -> str:
     return target_abs
 
 
+# ==========================================
+# 备份与回滚
+# ==========================================
+
 def _get_backup_filepath(filename: str) -> str:
-    """
-    获取文件的备份路径。
-    格式: .backups/{filename}.bak.{timestamp}
-    """
+    """获取文件的备份路径。格式: .backups/{filename}.bak.{timestamp}"""
     safe_name = filename.replace(os.sep, "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(BACKUP_DIR, f"{safe_name}.bak.{timestamp}")
 
 
-def backup_file(filename: str) -> str | None:
-    """
-    备份指定文件到 .backups 目录。
-    
-    Args:
-        filename: 要备份的文件相对路径
-    
-    Returns:
-        备份文件路径，如果文件不存在则返回 None
-    """
+def backup_file(filename: str) -> Optional[str]:
+    """备份指定文件到 .backups 目录。"""
     try:
         filepath = _get_safe_filepath(filename)
     except ValueError as e:
@@ -82,21 +80,11 @@ def backup_file(filename: str) -> str | None:
 
 
 def rollback_file(filename: str, backup_index: int = -1) -> str:
-    """
-    回滚文件到指定备份版本。
-    
-    Args:
-        filename: 要回滚的文件相对路径
-        backup_index: 备份索引，-1 表示最新备份，0 表示最旧备份
-    
-    Returns:
-        回滚结果消息
-    """
+    """回滚文件到指定备份版本。"""
     safe_name = filename.replace(os.sep, "_")
     backup_pattern = f"{safe_name}.bak."
 
     try:
-        # 获取所有备份文件
         backups = [
             f for f in os.listdir(BACKUP_DIR)
             if f.startswith(backup_pattern)
@@ -105,12 +93,10 @@ def rollback_file(filename: str, backup_index: int = -1) -> str:
         if not backups:
             return f"未找到文件 {filename} 的备份。"
 
-        # 按备份时间排序
         backups.sort()
         selected_backup = backups[backup_index]
         backup_path = os.path.join(BACKUP_DIR, selected_backup)
 
-        # 恢复文件
         filepath = _get_safe_filepath(filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         shutil.copy2(backup_path, filepath)
@@ -123,16 +109,8 @@ def rollback_file(filename: str, backup_index: int = -1) -> str:
         return f"回滚失败: {e!s}"
 
 
-def list_backups(filename: str | None = None) -> str:
-    """
-    列出所有备份文件。
-    
-    Args:
-        filename: 可选，指定文件名只列出该文件的备份
-    
-    Returns:
-        备份文件列表
-    """
+def list_backups(filename: Optional[str] = None) -> str:
+    """列出所有备份文件。"""
     try:
         backups = os.listdir(BACKUP_DIR)
 
@@ -160,10 +138,7 @@ def list_backups(filename: str | None = None) -> str:
 # ==========================================
 
 def _extract_ast_outline(filepath: str) -> str:
-    """
-    使用 ast 提取文件的函数/类大纲，返回结构化摘要。
-    包含：函数名、参数名、起始行号、结束行号。
-    """
+    """使用 ast 提取文件的函数/类大纲，返回结构化摘要。"""
     try:
         with open(filepath, encoding="utf-8") as f:
             source = f.read()
@@ -175,9 +150,8 @@ def _extract_ast_outline(filepath: str) -> str:
     total_lines = len(lines)
 
     parts: list[str] = []
-    _claimed_funcs: set = set()  # Track (func_name, lineno) claimed by classes
+    _claimed_funcs: set = set()
 
-    # Handle only module-level nodes to avoid double-counting methods inside classes
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             methods_info = []
@@ -220,9 +194,7 @@ def _format_function(node) -> str:
 
 
 def _extract_function_source(filepath: str, function_name: str) -> str:
-    """
-    使用 ast 定位指定函数，返回其完整源码（带行号前缀）。
-    """
+    """使用 ast 定位指定函数，返回其完整源码（带行号前缀）。"""
     try:
         with open(filepath, encoding="utf-8") as f:
             source = f.read()
@@ -244,9 +216,7 @@ def _extract_function_source(filepath: str, function_name: str) -> str:
 
 
 def _extract_class_source(filepath: str, class_name: str) -> str:
-    """
-    使用 ast 定位指定类，返回其完整源码（带行号前缀）。
-    """
+    """使用 ast 定位指定类，返回其完整源码（带行号前缀）。"""
     try:
         with open(filepath, encoding="utf-8") as f:
             source = f.read()
@@ -268,22 +238,19 @@ def _extract_class_source(filepath: str, class_name: str) -> str:
 
 
 # ==========================================
-# 工具定义 (Tools)
+# 工具函数（注册到 ToolRegistry）
 # ==========================================
 
-@tool
-def list_directory(path: str = ".") -> str:
+async def list_directory(workspace: str, path: str = ".") -> str:
     """
     列出指定目录中的文件和子目录。
 
-    参数 (Args):
-        path (str): 目录的相对路径，默认为工作区根目录 "."。
-
-    返回 (Returns):
-        str: 目录内容列表，包含文件/文件夹类型和名称。
+    Args:
+        workspace: 工作区根目录
+        path: 目录的相对路径，默认为工作区根目录 "."
     """
     try:
-        filepath = _get_safe_filepath(path)
+        filepath = _get_safe_filepath(os.path.join(workspace, path))
     except ValueError as e:
         return str(e)
 
@@ -307,22 +274,18 @@ def list_directory(path: str = ".") -> str:
         return f"Error listing directory {path}: {e!s}"
 
 
-@tool
-def read_file(filename: str) -> str:
+async def read_file(workspace: str, filename: str) -> str:
     """
     读取现有文件的内容。
     - 对于小文件（< 5000 字符），返回完整内容
-    - 对于大文件，返回 AST 解析的结构大纲，包含所有函数/类的名称和行号范围
-      然后你可以使用 read_function 或 read_file_range 工具获取需要的具体代码段
+    - 对于大文件，返回 AST 解析的结构大纲
 
-    参数 (Args):
-        filename (str): 要读取的目标文件的相对路径 (例如: "src/main.py")。
-
-    返回 (Returns):
-        str: 文件完整内容（小文件）或结构大纲（大文件）。
+    Args:
+        workspace: 工作区根目录
+        filename: 要读取的目标文件的相对路径
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
@@ -334,32 +297,26 @@ def read_file(filename: str) -> str:
             content = f.read()
         logger.debug(f"读取文件: {filename} ({len(content)} 字符)")
 
-        # 小文件直接返回完整内容
         if len(content) <= LARGE_FILE_THRESHOLD:
             return f"--- Content of {filename} ---\n{content}\n--- End of {filename} ---"
 
-        # 大文件返回 AST 结构大纲
         outline = _extract_ast_outline(filepath)
         return f"--- Structure of {filename} ({len(content)} 字符, 大文件) ---\n{outline}\n--- End of {filename} ---"
     except Exception as e:
         return f"Error reading file {filename}: {e!s}"
 
 
-@tool
-def read_function(filename: str, function_name: str) -> str:
+async def read_function(workspace: str, filename: str, function_name: str) -> str:
     """
     使用 AST 解析，精确提取指定函数的完整源码。
-    这是读取大文件特定函数内容的推荐方式。
 
-    参数 (Args):
-        filename (str): 目标文件的相对路径。
-        function_name (str): 要提取的函数名称。
-
-    返回 (Returns):
-        str: 函数的完整源码，带行号前缀。
+    Args:
+        workspace: 工作区根目录
+        filename: 目标文件的相对路径
+        function_name: 要提取的函数名称
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
@@ -369,21 +326,17 @@ def read_function(filename: str, function_name: str) -> str:
     return _extract_function_source(filepath, function_name)
 
 
-@tool
-def read_class(filename: str, class_name: str) -> str:
+async def read_class(workspace: str, filename: str, class_name: str) -> str:
     """
     使用 AST 解析，精确提取指定类的完整源码。
-    这是读取大文件特定类内容的推荐方式。
 
-    参数 (Args):
-        filename (str): 目标文件的相对路径。
-        class_name (str): 要提取的类名称。
-
-    返回 (Returns):
-        str: 类的完整源码，带行号前缀。
+    Args:
+        workspace: 工作区根目录
+        filename: 目标文件的相对路径
+        class_name: 要提取的类名称
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
@@ -393,21 +346,18 @@ def read_class(filename: str, class_name: str) -> str:
     return _extract_class_source(filepath, class_name)
 
 
-@tool
-def read_file_range(filename: str, start_line: int, end_line: int) -> str:
+async def read_file_range(workspace: str, filename: str, start_line: int, end_line: int) -> str:
     """
     读取文件的指定行范围内容。
 
-    参数 (Args):
-        filename (str): 目标文件的相对路径。
-        start_line (int): 起始行号（1-based，包含）。
-        end_line (int): 结束行号（1-based，包含）。
-
-    返回 (Returns):
-        str: 指定行范围的代码，带行号前缀。
+    Args:
+        workspace: 工作区根目录
+        filename: 目标文件的相对路径
+        start_line: 起始行号（1-based，包含）
+        end_line: 结束行号（1-based，包含）
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
@@ -419,7 +369,6 @@ def read_file_range(filename: str, start_line: int, end_line: int) -> str:
             lines = f.readlines()
 
         total_lines = len(lines)
-        # 校验行号范围
         if start_line < 1:
             return f"Error: start_line 必须 >= 1，当前值: {start_line}"
         if end_line > total_lines:
@@ -434,29 +383,24 @@ def read_file_range(filename: str, start_line: int, end_line: int) -> str:
         return f"Error reading file range {filename}: {e!s}"
 
 
-@tool
-def write_file(filename: str, content: str) -> str:
+async def write_file(workspace: str, filename: str, content: str) -> str:
     """
     创建一个全新的文件并写入内容。
     【警告】：切勿使用此工具来修改已存在的文件！如果需要修改文件，请务必使用 edit_file 工具。
 
-    参数 (Args):
-        filename (str): 要创建的新文件的相对路径 (例如: "tests/test_new.py")。如果目录不存在，系统会自动创建。
-        content (str): 要写入该新文件的完整代码或文本内容。
-
-    返回 (Returns):
-        str: 文件创建成功或失败的系统提示信息。
+    Args:
+        workspace: 工作区根目录
+        filename: 要创建的新文件的相对路径
+        content: 要写入该新文件的完整代码或文本内容
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
-    # 如果文件已存在，拒绝覆盖（应使用 edit_file 修改已有文件）
     if os.path.exists(filepath):
         return f"错误：文件 {filename} 已存在。write_file 仅用于创建新文件，请使用 edit_file 工具修改已有文件。"
 
-    # 增强功能：如果大模型想在不存在的子目录创建文件，自动帮它创建目录
     dir_name = os.path.dirname(filepath)
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
@@ -470,22 +414,19 @@ def write_file(filename: str, content: str) -> str:
         return f"Error writing file {filename}: {e!s}"
 
 
-@tool
-def edit_file(filename: str, search_block: str, replace_block: str) -> str:
+async def edit_file(workspace: str, filename: str, search_block: str, replace_block: str) -> str:
     """
     通过替换指定的代码块来精准修改现有的文件。
     系统支持智能容错，但请尽量保证 search_block 与原文件内容一致。
 
-    参数 (Args):
-        filename (str): 要修改的现有文件的相对路径 (例如: "src/utils.py")。
-        search_block (str): 原文件中需要被替换的具体代码块。必须从 read_file 的结果中一字不差地提取（连空格和换行都必须一样）。
-        replace_block (str): 用于替换的新代码块。
-
-    返回 (Returns):
-        str: 替换成功或失败的系统提示信息。如果 search_block 未找到，会返回详细的失败原因。
+    Args:
+        workspace: 工作区根目录
+        filename: 要修改的现有文件的相对路径
+        search_block: 原文件中需要被替换的具体代码块
+        replace_block: 用于替换的新代码块
     """
     try:
-        filepath = _get_safe_filepath(filename)
+        filepath = _get_safe_filepath(os.path.join(workspace, filename))
     except ValueError as e:
         return str(e)
 
@@ -496,7 +437,6 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         with open(filepath, encoding="utf-8") as f:
             content = f.read()
 
-        # 在修改前备份文件
         backup_path = backup_file(filename)
 
         new_content = None
@@ -512,10 +452,9 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
             new_content = content.replace(search_block.strip(), replace_block.strip())
             match_strategy = "首尾去空匹配 (Stripped Match)"
 
-        # 策略 3: 基于 difflib 的模糊匹配 (解决大模型缩进/换行幻觉)
+        # 策略 3: 基于 difflib 的模糊匹配
         else:
             content_lines = content.splitlines()
-            # 性能保护：超过 MAX_FUZZY_MATCH_LINES 行的文件跳过模糊匹配
             if len(content_lines) > MAX_FUZZY_MATCH_LINES:
                 return (
                     f"修改失败：{filename} 行数过多 ({len(content_lines)})，无法执行模糊匹配。\n"
@@ -525,29 +464,23 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
             content_lines = content.splitlines()
             search_lines = search_block.splitlines()
 
-            # 过滤掉空行，寻找最高相似度的代码块
             best_ratio = 0
             best_start = -1
             best_end = -1
             search_len = len(search_lines)
 
-            # 滑动窗口计算文本块相似度
             for i in range(len(content_lines) - search_len + 1):
                 window = content_lines[i:i + search_len]
-                # 将块拼起来计算相似度
                 ratio = difflib.SequenceMatcher(None, '\n'.join(window), '\n'.join(search_lines)).ratio()
                 if ratio > best_ratio:
                     best_ratio = ratio
                     best_start = i
                     best_end = i + search_len
 
-            # 设定相似度阈值
             if best_ratio > FUZZY_MATCH_THRESHOLD:
-                # 执行块替换，保留文件首尾空白不被 strip 破坏
                 before_block = '\n'.join(content_lines[:best_start])
                 after_block = '\n'.join(content_lines[best_end:])
                 new_content = before_block + '\n' + replace_block + '\n' + after_block
-                # 规范化连续多余空行 (4+ blank lines → 2)
                 import re as _re
                 new_content = _re.sub(r'\n{4,}', '\n\n\n', new_content)
                 if not new_content.endswith('\n'):
@@ -560,7 +493,6 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
                     f"可能原因：你产生了文本幻觉，或者遗漏了重要注释。请先调用 read_file 重新确认文件内容。"
                 )
 
-        # 写入新内容
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_content)
 
@@ -571,40 +503,153 @@ def edit_file(filename: str, search_block: str, replace_block: str) -> str:
         return f"修改文件 {filename} 时发生错误: {e!s}"
 
 
-@tool
-def rollback_file_tool(filename: str, backup_index: int = -1) -> str:
-    """
-    回滚文件到指定备份版本。
-    
-    参数 (Args):
-        filename (str): 要回滚的文件的相对路径。
-        backup_index (int): 备份索引，-1 表示最新备份（默认），0 表示最旧备份。
-    
-    返回 (Returns):
-        str: 回滚成功或失败的信息。
-    """
+async def rollback_file_tool(workspace: str, filename: str, backup_index: int = -1) -> str:
+    """回滚文件到指定备份版本。"""
     return rollback_file(filename, backup_index)
 
 
-@tool
-def list_backups_tool(filename: str = None) -> str:
-    """
-    列出所有备份文件。
-    
-    参数 (Args):
-        filename (str, optional): 指定文件名只列出该文件的备份。
-    
-    返回 (Returns):
-        str: 备份文件列表。
-    """
+async def list_backups_tool(workspace: str, filename: Optional[str] = None) -> str:
+    """列出所有备份文件。"""
     return list_backups(filename)
 
 
-# 基础工具列表（用于 Agent 绑定）- 包含新的 AST 感知读取工具
-tools = [write_file, edit_file, read_file, read_function, read_class, read_file_range]
+# ==========================================
+# 工具 Schema（OpenAI 格式）
+# ==========================================
 
-# Planner 专属工具列表：只有读取类工具 + 目录浏览
-planner_tools = [read_file, list_directory]
-
-# 扩展工具列表（包含备份管理工具）
-extended_tools = tools + [rollback_file_tool, list_backups_tool]
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "列出指定目录中的文件和子目录。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "目录的相对路径，默认为工作区根目录 \".\"。"}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取现有文件的内容。对于小文件返回完整内容，对于大文件返回 AST 结构大纲。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "要读取的目标文件的相对路径。"},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_function",
+            "description": "使用 AST 解析，精确提取指定函数的完整源码。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "目标文件的相对路径。"},
+                    "function_name": {"type": "string", "description": "要提取的函数名称。"},
+                },
+                "required": ["filename", "function_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_class",
+            "description": "使用 AST 解析，精确提取指定类的完整源码。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "目标文件的相对路径。"},
+                    "class_name": {"type": "string", "description": "要提取的类名称。"},
+                },
+                "required": ["filename", "class_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_range",
+            "description": "读取文件的指定行范围内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "目标文件的相对路径。"},
+                    "start_line": {"type": "integer", "description": "起始行号（1-based，包含）。"},
+                    "end_line": {"type": "integer", "description": "结束行号（1-based，包含）。"},
+                },
+                "required": ["filename", "start_line", "end_line"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "创建一个全新的文件并写入内容。警告：切勿使用此工具来修改已存在的文件！",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "要创建的新文件的相对路径。"},
+                    "content": {"type": "string", "description": "要写入该新文件的完整代码或文本内容。"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "通过替换指定的代码块来精准修改现有的文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "要修改的现有文件的相对路径。"},
+                    "search_block": {"type": "string", "description": "原文件中需要被替换的具体代码块。"},
+                    "replace_block": {"type": "string", "description": "用于替换的新代码块。"},
+                },
+                "required": ["filename", "search_block", "replace_block"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rollback_file",
+            "description": "回滚文件到指定备份版本。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "要回滚的文件的相对路径。"},
+                    "backup_index": {"type": "integer", "description": "备份索引，-1 表示最新备份（默认），0 表示最旧备份。"},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_backups",
+            "description": "列出所有备份文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "指定文件名只列出该文件的备份。"},
+                },
+                "required": [],
+            },
+        },
+    },
+]

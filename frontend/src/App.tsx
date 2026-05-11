@@ -1,8 +1,5 @@
 /**
  * 应用根组件
- *
- * 配置路由，渲染侧边栏和页面内容。
- * 使用 react-router-dom 实现页面间切换。
  */
 
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
@@ -94,14 +91,12 @@ function Sidebar() {
   function handleClearChat() {
     dispatch({ type: 'CLEAR_CHAT' });
     dispatch({ type: 'SET_THREAD_ID', payload: crypto.randomUUID() });
+    // 清除工作目录，强制重新设置
+    dispatch({ type: 'SET_WORKSPACE_DIR', payload: '' });
   }
 
   const statusClass = state.isRunning ? 'running' : 'idle';
   const statusText = state.isRunning ? '运行中' : '空闲';
-
-  const retryPercent = state.retryInfo.max > 0
-    ? (state.retryInfo.count / state.retryInfo.max) * 100
-    : 0;
 
   return (
     <aside className="sidebar">
@@ -116,7 +111,7 @@ function Sidebar() {
             {theme === 'dark' ? <IconSun /> : <IconMoon />}
           </button>
         </div>
-        <p>多智能体自动编程框架</p>
+        <p>LLM Tool Calling 自动编程框架</p>
       </div>
 
       {/* 状态行 */}
@@ -131,7 +126,7 @@ function Sidebar() {
       </div>
 
       <button className="sidebar-clear-btn" onClick={handleClearChat} disabled={state.isRunning}>
-        清空对话
+        新建对话
       </button>
 
       {/* 工作目录显示 */}
@@ -145,71 +140,6 @@ function Sidebar() {
       )}
 
       <div className="sidebar-body">
-        {/* 当前计划 */}
-        {state.currentPlan && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">
-              当前计划
-              <span className="chevron">▼</span>
-            </div>
-            <div className="sidebar-section-content">
-              <pre className="plan-text">{state.currentPlan}</pre>
-            </div>
-          </div>
-        )}
-
-        {/* 目标文件 */}
-        {state.activeFiles.length > 0 && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">
-              目标文件
-              <span className="chevron">▼</span>
-            </div>
-            <div className="sidebar-section-content">
-              <ul>
-                {state.activeFiles.map((f, i) => (
-                  <li key={i}>
-                    <span className="file-dot" />
-                    {f.split('/').pop()}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
-        {/* 重试进度 */}
-        {state.retryInfo.count > 0 && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">
-              重试进度
-              <span className="chevron">▼</span>
-            </div>
-            <div className="sidebar-section-content">
-              <div className="retry-progress-row">
-                <span>{state.retryInfo.count} / {state.retryInfo.max} 次</span>
-                <span>{Math.round(retryPercent)}%</span>
-              </div>
-              <div className="retry-bar-track">
-                <div className="retry-bar-fill" style={{ width: `${retryPercent}%` }} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 错误追踪 */}
-        {state.errorTrace && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">
-              错误追踪
-              <span className="chevron">▼</span>
-            </div>
-            <div className="sidebar-section-content">
-              <pre>{state.errorTrace.slice(0, 500)}</pre>
-            </div>
-          </div>
-        )}
-
         {/* 快速指标 */}
         <div className="sidebar-section">
           <div className="sidebar-section-title">
@@ -258,9 +188,6 @@ function Sidebar() {
   );
 }
 
-/**
- * 应用布局组件
- */
 function AppLayout() {
   return (
     <div className="app-root">
@@ -277,9 +204,6 @@ function AppLayout() {
   );
 }
 
-/**
- * 应用根组件
- */
 function App() {
   return (
     <AppProvider>

@@ -7,9 +7,9 @@ Covers:
 """
 
 import pytest
-from langchain_core.messages import AIMessage
+from src.infra.messages import AIMessage
 
-from src.core.state import AgentState, WorkflowCancelledError, check_cancelled
+from src.agent.state import AgentState, WorkflowCancelledError, check_cancelled
 
 
 class TestCheckCancelled:

@@ -1,9 +1,9 @@
 """
 nanoCursor API Server - FastAPI 后端
 
-提供给 React 前端的 REST + SSE 接口，替代原来的 Streamlit web_ui.py。
+提供给 React 前端的 REST + SSE 接口。
 主要功能：
-- 启动 LangGraph 工作流并流式返回事件 (SSE)
+- 启动 agent_loop 工作流并流式返回事件 (SSE)
 - 提供文件浏览、指标、配置等数据接口
 """
 
@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from langchain_core.messages import HumanMessage
+from src.infra.messages import HumanMessage
 
 # 导入 Pydantic API 模型
 from src.api.models import (
@@ -52,6 +52,43 @@ from src.api.models import (
     SystemConfig,
 )
 
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+
+class ErrorResponse(BaseModel):
+    """统一错误响应格式"""
+    code: str           # 例如 "VALIDATION_ERROR", "LLM_TIMEOUT"
+    message: str        # 人类可读的错误描述
+    details: dict | None = None
+    request_id: str     # 本次请求的追踪 ID
+
+
+class BashRequest(BaseModel):
+    """Bash 命令执行请求"""
+    command: str
+    workspace_dir: str | None = None
+    timeout: int = 120
+
+
+def _http_status_to_code(status: int) -> str:
+    """将 HTTP 状态码映射为业务错误码"""
+    mapping = {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        409: "CONFLICT",
+        422: "VALIDATION_ERROR",
+        429: "RATE_LIMITED",
+        500: "INTERNAL_ERROR",
+        502: "BAD_GATEWAY",
+        503: "SERVICE_UNAVAILABLE",
+        504: "GATEWAY_TIMEOUT",
+    }
+    return mapping.get(status, "UNKNOWN_ERROR")
+
+
 # ============================================================
 # 导入项目模块
 # ============================================================
@@ -62,13 +99,21 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 # 加载环境变量
-load_dotenv(os.path.join(ROOT, "src", "core", ".env"))
+load_dotenv(os.path.join(ROOT, ".env"))
 
-# 导入 LangGraph 应用、指标收集器、配置等
-from run import app as graph_app
-from src.core.config import WORKSPACE_DIR
-from src.core.metrics import metrics as metrics_collector
-from src.core.state import WorkflowCancelledError
+# 导入工作流引擎（统一 engine.py）
+from src.agent.engine import agent_loop, run_subagent, TOOLS, get_workdir, MODEL
+import src.infra.config as config_module
+from src.infra.metrics import metrics as metrics_collector
+
+# 始终从 config_module 读取，保证获取最新值
+def _get_workspace() -> str:
+    return config_module.WORKSPACE_DIR
+
+from src.agent.state import WorkflowCancelledError  # 保留导入，兼容旧接口
+
+# 持久化指标历史文件（项目根目录，跨工作区保留）
+METRICS_HISTORY_FILE = os.path.join(ROOT, "metrics_history.json")
 
 # ============================================================
 # 创建 FastAPI 应用
@@ -80,6 +125,10 @@ app = FastAPI(
     version="2.0.0",
 )
 
+# Initialize SQLite database (create tables if not exist)
+from src.infra.db import init_db
+init_db()
+
 # 配置 CORS，允许前端开发服务器访问
 app.add_middleware(
     CORSMiddleware,
@@ -88,6 +137,77 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc: HTTPException):
+    """将所有 HTTPException 统一格式化为 ErrorResponse"""
+    request_id = getattr(request.state, "request_id", "unknown")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            code=_http_status_to_code(exc.status_code),
+            message=str(exc.detail),
+            request_id=request_id,
+        ).model_dump()
+    )
+
+
+# ============================================================
+# 请求追踪中间件
+# ============================================================
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    """为每个请求注入 X-Request-ID，便于日志追踪"""
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+# ============================================================
+# 健康检查端点
+# ============================================================
+
+@app.get("/health")
+async def health():
+    """Liveness probe - Kubernetes 判断容器是否存活"""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe - 检查 LLM 提供商是否可用"""
+    try:
+        from src.agent.engine import create_client, MODEL
+        client = create_client()
+        # Quick API key check - try a minimal call
+        return {"status": "ready", "llm": "available", "model": MODEL}
+    except Exception as e:
+        return {"status": "degraded", "llm": "unavailable", "error": str(e)}, 503
+
+
+@app.get("/version")
+async def version():
+    """返回当前服务版本"""
+    import subprocess
+    version_str = "2.1.0"
+    commit_sha = os.getenv("COMMIT_SHA", "")
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            commit_sha = result.stdout.strip()
+    except Exception:
+        pass
+    return {"version": version_str, "commit": commit_sha or "dev"}
+
 
 # ============================================================
 # 活跃运行管理
@@ -144,55 +264,79 @@ def _check_rate_limit(thread_id: str) -> tuple[bool, str]:
 
 def _run_workflow(thread_id: str, initial_messages: list, max_retries: int = 3, max_coder_steps: int = 15):
     """
-    在后台线程中运行 LangGraph 工作流。
-
-    由于图中的 coder_node 和 reviewer_node 是 async def，需要使用 asyncio.run()
-    在独立线程的事件循环中与 astream() 配合运行。
+    在后台线程中运行 agent_loop 工作流。
 
     参数:
         thread_id: 会话的唯一标识符
         initial_messages: 用户输入的对话消息列表
-        max_retries: 沙盒测试最大重试次数
-        max_coder_steps: Coder 节点最大工具调用步数
+        max_retries: 保留参数（兼容旧接口）
+        max_coder_steps: 保留参数（兼容旧接口）
     """
-    asyncio.run(
-        _run_workflow_async(thread_id, initial_messages, max_retries, max_coder_steps)
-    )
+    # 创建新的 event loop 在这个线程中
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            _run_workflow_async(thread_id, initial_messages, max_retries, max_coder_steps)
+        )
+    finally:
+        loop.close()
 
 
 async def _run_workflow_async(thread_id: str, initial_messages: list, max_retries: int, max_coder_steps: int):
     """_run_workflow 的异步内部实现。"""
+
     with runs_lock:
         run_info = active_runs.get(thread_id)
         if not run_info:
             return
         q = run_info["queue"]
 
-    config = {"configurable": {"thread_id": thread_id}}
+    # 构建消息格式（base_engine 使用 {"role": ..., "content": ...}）
+    messages = [{"role": m.type if hasattr(m, 'type') else 'user', "content": m.content} for m in initial_messages]
 
-    # 构建初始状态，包含用户消息和配置参数
-    initial_state = {
-        "messages": [HumanMessage(content=msg) for msg in initial_messages],
-        "current_plan": "",
-        "active_files": [],
-        "error_trace": "",
-        "retry_count": 0,
-        "max_retries": max_retries,
-        "file_signatures": {},
-        "coder_step_count": 0,
-        "max_coder_steps": max_coder_steps,
-        "cancelled": False,
-    }
+    # 构建系统提示
+    _wd = str(get_workdir())
+    system = f"""你是一个自动编程助手，在 {_wd} 工作目录。
+
+【重要】你运行在 Windows 系统上！使用 Windows 命令：
+- 用 `dir` 而不是 `ls`
+- 用 `type` 而不是 `cat`
+- 用 `del` 而不是 `rm`
+- 用 `copy` 而不是 `cp`
+
+你有以下工具：
+- bash: 执行 shell 命令（参数：command）
+- read_file: 读取文件（参数：path, limit 可选）
+- write_file: 写文件（参数：path, content）
+- edit_file: 编辑文件（参数：path, old_text, new_text）
+- list_directory: 列出目录内容（参数：path）
+
+注意：
+- 工作目录已经是 {_wd}，所以写文件名时直接用文件名，不要加 workspace/ 前缀
+- 例如：write_file(path="prime.py", content="...") 而不是 write_file(path="workspace/prime.py", content="...")
+- 读文件同理，直接写文件名
+"""
+
+    def on_tool_call(tool_name: str, tool_input: dict, output: str):
+        """每次工具调用后发送事件到 SSE（含实时指标）"""
+        q.put(json.dumps({
+            "type": "tool_call",
+            "tool": tool_name,
+            "input": tool_input,
+            "output": output[:500] if output else "",
+            "metrics": metrics_collector.dump_summary(),
+        }, ensure_ascii=False))
 
     try:
-        # 使用 astream 异步流式获取每个节点的事件
-        async for event in graph_app.astream(initial_state, config=config, stream_mode="updates"):
-            for node_name, node_state in event.items():
-                # 提取每个节点的关键数据，简化后发送给前端
-                event_data = _extract_node_event(node_name, node_state)
-                q.put(json.dumps({"type": "node_update", "node": node_name, "data": event_data}, ensure_ascii=False))
-
-        # 工作流正常结束
+        result = await agent_loop(
+            messages=messages,
+            system=system,
+            tools=TOOLS,
+            max_turns=100,
+            on_tool_call=on_tool_call,
+        )
+        q.put(json.dumps({"type": "node_update", "node": "agent", "data": {"content": result[:1000]}}, ensure_ascii=False))
         q.put(json.dumps({"type": "done", "status": "completed"}, ensure_ascii=False))
 
     except WorkflowCancelledError:
@@ -201,10 +345,14 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         import traceback
         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         print(f"[_run_workflow_async] 工作流异常: {error_detail}")
-        # 工作流执行出错，发送错误事件
         q.put(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
     finally:
-        # 更新运行状态为已完成
+        # 持久化指标——每次任务结束都写入文件
+        try:
+            metrics_collector.flush_to_file()
+            metrics_collector.append_to_history(METRICS_HISTORY_FILE, tag=thread_id[:8])
+        except Exception:
+            pass
         with runs_lock:
             if thread_id in active_runs:
                 active_runs[thread_id]["status"] = "completed"
@@ -217,7 +365,7 @@ def _extract_node_event(node_name: str, node_state: dict) -> dict:
     不同的节点返回不同的数据字段，这个函数负责统一格式。
 
     参数:
-        node_name: 节点名称 (planner, coder, sandbox, reviewer 等)
+        node_name: 节点名称 (supervisor, planner, coder, sandbox, reviewer, verifier 等)
         node_state: 节点返回的状态字典
 
     返回:
@@ -225,55 +373,59 @@ def _extract_node_event(node_name: str, node_state: dict) -> dict:
     """
     data = {}
 
-    if node_name == "planner":
-        # Planner 节点返回当前计划
+    # ---- Supervisor: 路由决策 + 任务池状态 ----
+    if node_name == "supervisor":
+        data["last_action"] = node_state.get("last_action", "")
+        data["current_task_id"] = node_state.get("current_task_id")
+        data["step_budget"] = node_state.get("step_budget", 0)
+        if node_state.get("task_pool"):
+            data["task_pool"] = node_state["task_pool"]
+
+    # ---- Planner: 当前计划文本 ----
+    elif node_name == "planner":
         data["current_plan"] = node_state.get("current_plan", "")
 
+    # ---- Coder: 最新消息内容 ----
     elif node_name == "coder":
-        # Coder 节点返回最新消息内容
-        if node_state.get("messages"):
-            last_msg = node_state["messages"][-1]
-            content = last_msg.content
-            # 处理流式格式（list of content blocks）和空内容
-            if isinstance(content, list):
-                # 提取 text 类型的块
-                text_parts = [
-                    str(block.get("text", ""))
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                content = "\n".join(text_parts)
-            if content and isinstance(content, str):
-                data["content"] = content
+        _extract_messages_content(node_state, data)
 
-    elif node_name == "coder_step_counter":
-        # Coder 步数计数器
-        data["coder_step_count"] = node_state.get("coder_step_count", 0)
-
+    # ---- Sandbox: 错误跟踪 + 重试信息 ----
     elif node_name == "sandbox":
-        # 沙盒节点返回错误跟踪和重试信息
         data["error_trace"] = node_state.get("error_trace", "")
         data["retry_count"] = node_state.get("retry_count", 0)
         data["max_retries"] = node_state.get("max_retries", 3)
 
+    # ---- Reviewer: 诊断内容 ----
     elif node_name == "reviewer":
-        # Reviewer 节点返回诊断内容
-        if node_state.get("messages"):
-            last_msg = node_state["messages"][-1]
-            content = last_msg.content
-            if isinstance(content, list):
-                text_parts = [
-                    str(block.get("text", ""))
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                content = "\n".join(text_parts)
-            if content and isinstance(content, str):
-                data["content"] = content
+        _extract_messages_content(node_state, data)
+
+    # ---- Verifier: 验证结果 ----
+    elif node_name == "verifier":
+        data["verification_passed"] = node_state.get("verification_passed")
+        data["verification_result"] = node_state.get("verification_result")
+        _extract_messages_content(node_state, data)
 
     # 每个 node_update 附带上实时指标，前端据此更新侧边栏
     data["metrics"] = metrics_collector.dump_summary()
     return data
+
+
+def _extract_messages_content(node_state: dict, data: dict) -> None:
+    """从 node_state 中提取最新消息的文本内容，写入 data['content']。"""
+    messages = node_state.get("messages")
+    if not messages:
+        return
+    last_msg = messages[-1]
+    content = last_msg.content
+    if isinstance(content, list):
+        text_parts = [
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        content = "\n".join(text_parts)
+    if content and isinstance(content, str):
+        data["content"] = content
 
 
 # ============================================================
@@ -290,7 +442,8 @@ async def start_run(request: RunRequest):
     请求体:
         {
             "prompt": "用户输入的需求描述",
-            "thread_id": "可选的已有线程 ID，用于继续对话"
+            "thread_id": "可选的已有线程 ID，用于继续对话",
+            "messages": "可选的对话历史消息列表"
         }
 
     返回:
@@ -303,34 +456,30 @@ async def start_run(request: RunRequest):
     # 使用已有的 thread_id 或创建新的
     thread_id = request.thread_id or str(uuid.uuid4())
 
-    # 如果请求中包含工作目录，则更新 WORKSPACE_DIR
+    # 如果请求中包含工作目录，则更新 config_module.WORKSPACE_DIR
     if request.workspace_dir:
-        global WORKSPACE_DIR
         abs_path = os.path.abspath(request.workspace_dir)
         os.makedirs(abs_path, exist_ok=True)
-        WORKSPACE_DIR = abs_path
-        print(f"[API] 设置工作区: {WORKSPACE_DIR}")
+        config_module.WORKSPACE_DIR = abs_path
+        print(f"[API] 设置工作区: {abs_path}")
 
     # 限流检查：防止频繁启动或并发启动
     allowed, rate_limit_msg = _check_rate_limit(thread_id)
     if not allowed:
         raise HTTPException(status_code=429, detail=rate_limit_msg)
 
-    # 构建初始消息
-    initial_messages = [prompt]
+    # 构建初始消息（每个分支保证赋值）
+    # 优先级：request.messages > 单条prompt
+    if request.messages:
+        # 前端传入的新对话，直接构建 messages 列表
+        initial_messages = [HumanMessage(content=m.content) for m in request.messages]
+        initial_messages.append(HumanMessage(content=prompt))
+        print(f"[API] 使用前端传入历史消息 {len(request.messages)} 条，新 prompt 已追加")
+    else:
+        initial_messages = [HumanMessage(content=prompt)]
+        print(f"[API] 开始新会话")
 
-    # 如果继续使用已完成的会话，将新 prompt 追加到历史消息末尾以续跑
-    if request.thread_id:
-        config = {"configurable": {"thread_id": thread_id}}
-        try:
-            saved_state = graph_app.get_state(config)
-            if saved_state and saved_state.values:
-                existing_messages = saved_state.values.get("messages", [])
-                if existing_messages:
-                    initial_messages = existing_messages + [HumanMessage(content=prompt)]
-                    print(f"[API] 续跑会话: thread_id={thread_id}, 已追加新消息 (现有 {len(existing_messages)} 条历史消息)")
-        except Exception as e:
-            print(f"[API] 未能加载历史状态，开始新会话: {e}")
+    print(f"[API] 构建 initial_messages 完成，共 {len(initial_messages)} 条消息")
 
     # 创建事件队列
     q = queue.Queue()
@@ -431,7 +580,7 @@ async def list_workspaces():
     返回:
         {"workspaces": ["workspace", "workspace2", ...]}
     """
-    root = PROJECT_ROOT
+    root = config_module.PROJECT_ROOT
     workspaces = []
     try:
         for entry in os.listdir(root):
@@ -473,11 +622,10 @@ async def set_workspace(request: dict):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"无法创建目录: {e!s}")
 
-    # 更新 WORKSPACE_DIR（注意：这只会影响当前进程）
-    global WORKSPACE_DIR
-    WORKSPACE_DIR = full_path
+    # 更新 config_module.WORKSPACE_DIR
+    config_module.WORKSPACE_DIR = full_path
 
-    return {"success": True, "workspace_dir": WORKSPACE_DIR}
+    return {"success": True, "workspace_dir": full_path}
 
 
 @app.post("/api/run/{thread_id}/cancel")
@@ -485,16 +633,8 @@ async def cancel_run(thread_id: str):
     """
     取消指定线程的运行中的工作流。
 
-    通过向 checkpointer 写入 cancelled=True 标志实现。
-    各节点在执行前会检查此标志，发现后立即抛出 WorkflowCancelledError。
-
-    参数:
-        thread_id: 会话线程 ID
-
-    返回:
-        {"cancelled": true} 或错误信息
+    通过设置 active_runs 中状态为 "cancelled"，agent_loop 下次迭代时会检查并退出。
     """
-    # 检查是否在运行中
     with runs_lock:
         run_info = active_runs.get(thread_id)
 
@@ -504,13 +644,68 @@ async def cancel_run(thread_id: str):
     if run_info.get("status") != "running":
         raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
 
-    try:
-        config = {"configurable": {"thread_id": thread_id}}
-        graph_app.update_state(config, {"cancelled": True})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"取消失败: {e!s}")
-
+    # 直接标记为取消状态
+    run_info["status"] = "cancelled"
     return CancelResponse(cancelled=True, thread_id=thread_id)
+
+
+@app.post("/api/bash")
+async def run_bash_command(request: BashRequest):
+    """
+    直接执行 bash 命令（不走 agent loop）。
+
+    在 config_module.WORKSPACE_DIR 中运行命令并返回 stdout/stderr。
+    包含危险命令过滤。
+
+    请求体:
+        {"command": "dir", "workspace_dir": "D:\\projects\\myapp", "timeout": 120}
+
+    返回:
+        {"success": true, "stdout": "...", "stderr": "...", "exit_code": 0}
+    """
+    import subprocess as sp
+
+    command = request.command.strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="命令不能为空")
+
+    # 使用请求中指定的目录，否则使用全局工作区
+    work_dir = request.workspace_dir or config_module.WORKSPACE_DIR
+    work_dir = os.path.abspath(work_dir)
+
+    # 安全检查：危险命令过滤
+    dangerous = ["rm -rf /", "sudo ", "shutdown", "reboot", "> /dev/", "mkfs", "chroot", "dd if="]
+    for pattern in dangerous:
+        if pattern in command:
+            return {"success": False, "stdout": "", "stderr": f"Error: Dangerous command blocked (matches '{pattern}')", "exit_code": -1}
+
+    timeout = min(request.timeout, 300)
+
+    try:
+        r = sp.run(
+            command, shell=True, cwd=work_dir,
+            capture_output=True, timeout=timeout,
+        )
+        # GBK decode for Windows, fallback to UTF-8
+        try:
+            stdout = r.stdout.decode('gbk', errors='replace')
+            stderr = r.stderr.decode('gbk', errors='replace')
+        except Exception:
+            stdout = r.stdout.decode('utf-8', errors='replace') if r.stdout else ""
+            stderr = r.stderr.decode('utf-8', errors='replace') if r.stderr else ""
+
+        return {
+            "success": r.returncode == 0,
+            "stdout": stdout.strip()[:50000] or "(no output)",
+            "stderr": stderr.strip()[:10000],
+            "exit_code": r.returncode,
+        }
+    except sp.TimeoutExpired:
+        return {"success": False, "stdout": "", "stderr": f"Error: Command timed out after {timeout}s", "exit_code": -1}
+    except FileNotFoundError:
+        return {"success": False, "stdout": "", "stderr": "Error: Command not found. Check that the program is installed.", "exit_code": -1}
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": f"Error: {e}", "exit_code": -1}
 
 
 @app.get("/api/run/{thread_id}/state")
@@ -518,47 +713,24 @@ async def get_run_state(thread_id: str):
     """
     获取指定线程的当前状态（最终状态）。
 
-    调用 LangGraph 的 get_state 方法获取完整的黑板状态。
-
-    参数:
-        thread_id: 会话线程 ID
-
-    返回:
-        完整的 AgentState 状态字典
+    注意：base_engine 不使用 checkpointer，状态仅在运行期间可用。
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
 
-    try:
-        state = graph_app.get_state(config).values
-
-        # 将 LangChain 消息对象转换为可序列化的字典
-        messages = []
-        extra = {}
-        for key, value in state.items():
-            if key == "messages" and value:
-                # 将消息对象转换为 Message 格式
-                messages = [
-                    Message(role=m.type, content=m.content)
-                    for m in value
-                ]
-            elif key == "current_plan" or key == "error_trace" or key == "coder_step_count" or key == "retry_count" or key == "max_retries" or key == "cancelled":
-                extra[key] = value
-            else:
-                extra[key] = value
-
+    if not run_info:
         return AgentStateResponse(
-            messages=messages,
-            current_plan=extra.pop("current_plan", None),
-            error_trace=extra.pop("error_trace", None),
-            coder_step_count=extra.pop("coder_step_count", 0),
-            retry_count=extra.pop("retry_count", 0),
-            max_retries=extra.pop("max_retries", 3),
-            cancelled=extra.pop("cancelled", False),
-            extra=extra,
+            messages=[],
+            extra={"status": "not_found", "thread_id": thread_id},
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"获取状态失败: {e!s}")
+    return AgentStateResponse(
+        messages=[],
+        extra={
+            "status": run_info.get("status", "unknown"),
+            "thread_id": thread_id,
+        },
+    )
 
 
 @app.get("/api/files")
@@ -566,7 +738,7 @@ async def list_files():
     """
     列出工作区中的所有文件和目录树。
 
-    扫描 WORKSPACE_DIR，返回文件树结构，排除 .backups 和 .snapshots 目录。
+    扫描工作区目录，返回文件树结构，排除 .backups 和 .snapshots 目录。
 
     返回:
         {
@@ -579,13 +751,13 @@ async def list_files():
     files = []
 
     try:
-        for root, dirs, filenames in os.walk(WORKSPACE_DIR):
+        for root, dirs, filenames in os.walk(config_module.WORKSPACE_DIR):
             # 排除备份和快照目录
             dirs[:] = [d for d in dirs if d not in (".backups", ".snapshots")]
 
             for filename in filenames:
                 filepath = os.path.join(root, filename)
-                relpath = os.path.relpath(filepath, WORKSPACE_DIR)
+                relpath = os.path.relpath(filepath, config_module.WORKSPACE_DIR)
 
                 try:
                     stat = os.stat(filepath)
@@ -601,7 +773,7 @@ async def list_files():
             # 也添加目录节点
             for dirname in dirs:
                 dirpath = os.path.join(root, dirname)
-                relpath = os.path.relpath(dirpath, WORKSPACE_DIR)
+                relpath = os.path.relpath(dirpath, config_module.WORKSPACE_DIR)
                 files.append({
                     "path": relpath,
                     "is_dir": True,
@@ -626,7 +798,7 @@ async def read_file(file_path: str):
     读取指定文件的内容。
 
     参数:
-        file_path: 相对于 WORKSPACE_DIR 的文件路径
+        file_path: 相对于 config_module.WORKSPACE_DIR 的文件路径
 
     返回:
         {
@@ -638,11 +810,11 @@ async def read_file(file_path: str):
         }
     """
     # 构建完整文件路径
-    full_path = os.path.join(WORKSPACE_DIR, file_path)
+    full_path = os.path.join(config_module.WORKSPACE_DIR, file_path)
 
     # 安全检查：防止路径遍历攻击
     real_path = os.path.realpath(full_path)
-    real_root = os.path.realpath(WORKSPACE_DIR)
+    real_root = os.path.realpath(config_module.WORKSPACE_DIR)
     if not real_path.startswith(real_root):
         raise HTTPException(status_code=403, detail="禁止访问该路径")
 
@@ -752,23 +924,29 @@ async def get_metrics():
         ),
     )
 
-    # 尝试读取历史数据
+    # 读取持久化的历史指标（跨工作区保留）
     historical = []
-    metrics_file = os.path.join(WORKSPACE_DIR, "metrics.json")
-    if os.path.exists(metrics_file):
+    if os.path.exists(METRICS_HISTORY_FILE):
         try:
-            with open(metrics_file, encoding="utf-8") as f:
+            with open(METRICS_HISTORY_FILE, encoding="utf-8") as f:
                 data = json.load(f)
-            # 确保是列表格式（可能是单个 dict 或 list）
             if isinstance(data, list):
                 historical = data
-            elif isinstance(data, dict):
-                # 旧格式是单个对象，转为单元素列表
-                historical = [data]
         except Exception:
             pass
 
     return MetricsResponse(current=current, historical=historical)
+
+
+async def check_ollama_connected(base_url: str, timeout: float = 2.0) -> bool:
+    """检测 Ollama 服务是否真正可连接。"""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            return resp.status_code == 200
+    except Exception:
+        return False
 
 
 @app.get("/api/config")
@@ -800,17 +978,25 @@ async def get_config():
             has_key=True,  # Ollama 不需要 API key
             model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder"),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            is_connected=await check_ollama_connected(
+                os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            ),
         ),
         "deepseek": LLMProviderStatus(
             has_key=bool(os.getenv("DEEPSEEK_API_KEY")),
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         ),
+        "minimax": LLMProviderStatus(
+            has_key=bool(os.getenv("MINIMAX_API_KEY")),
+            model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.7"),
+            base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
+        ),
     }
 
     # 系统配置
     system_config = SystemConfig(
-        workspace_dir=str(WORKSPACE_DIR),
+        workspace_dir=str(config_module.WORKSPACE_DIR),
         sandbox_image=os.getenv("SANDBOX_IMAGE", "python:3.10-slim"),
         sandbox_mem_limit=os.getenv("SANDBOX_MEM_LIMIT", "256m"),
         sandbox_timeout=int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")),
@@ -859,7 +1045,7 @@ async def list_snapshots():
             ]
         }
     """
-    snapshots_dir = os.path.join(WORKSPACE_DIR, ".snapshots")
+    snapshots_dir = os.path.join(config_module.WORKSPACE_DIR, ".snapshots")
     snapshots = []
 
     if not os.path.exists(snapshots_dir):
@@ -917,7 +1103,7 @@ async def get_snapshot(snapshot_id: str):
             ]
         }
     """
-    snapshots_dir = os.path.join(WORKSPACE_DIR, ".snapshots")
+    snapshots_dir = os.path.join(config_module.WORKSPACE_DIR, ".snapshots")
     snapshot_path = os.path.join(snapshots_dir, snapshot_id)
 
     if not os.path.exists(snapshot_path):
@@ -981,7 +1167,7 @@ async def list_backups():
             ]
         }
     """
-    backups_dir = os.path.join(WORKSPACE_DIR, ".backups")
+    backups_dir = os.path.join(config_module.WORKSPACE_DIR, ".backups")
     backups = []
 
     if not os.path.exists(backups_dir):
@@ -1025,7 +1211,7 @@ async def read_backup(backup_name: str):
             "mtime": ...
         }
     """
-    backups_dir = os.path.join(WORKSPACE_DIR, ".backups")
+    backups_dir = os.path.join(config_module.WORKSPACE_DIR, ".backups")
     filepath = os.path.join(backups_dir, backup_name)
 
     # 安全检查
@@ -1051,6 +1237,124 @@ async def read_backup(backup_name: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取备份失败: {e!s}")
+
+
+# ============================================================
+# Todo List API
+# ============================================================
+
+from src.infra import db as nano_db
+
+@app.get("/api/todos")
+async def list_todos():
+    """List all todo items."""
+    try:
+        todos = nano_db.todo_get_all()
+        return {"todos": todos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/todos")
+async def create_todo(title: str, priority: int = 0, category: str | None = None):
+    """Create a new todo item."""
+    try:
+        item = nano_db.todo_create(title=title, priority=priority, category=category)
+        return {"todo": item}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/todos/{todo_id}/complete")
+async def complete_todo(todo_id: str):
+    """Mark a todo as completed."""
+    result = nano_db.todo_complete(todo_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"todo": result}
+
+@app.delete("/api/todos/{todo_id}")
+async def delete_todo(todo_id: str):
+    """Delete a todo item."""
+    deleted = nano_db.todo_delete(todo_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"deleted": True}
+
+
+# ============================================================
+# Memory API
+# ============================================================
+
+from src.memory.manager import get_memory_manager
+
+@app.get("/api/memories")
+async def list_memories(category: str | None = None, min_importance: int = 0, limit: int = 50):
+    """List memories, optionally filtered."""
+    try:
+        mm = get_memory_manager()
+        memories = mm.get(category=category, min_importance=min_importance, limit=limit)
+        return {"memories": memories}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/memories")
+async def create_memory(content: str, category: str, importance: int = 1, tags: str = ""):
+    """Store a new memory entry."""
+    try:
+        import json
+        tag_list = json.loads(tags) if tags else []
+        mm = get_memory_manager()
+        entry = mm.save(category=category, content=content, importance=importance, tags=tag_list)
+        return {"memory": entry}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/memories/search")
+async def search_memories(q: str, limit: int = 20):
+    """Full-text search on memories."""
+    try:
+        mm = get_memory_manager()
+        results = mm.search(query=q, limit=limit)
+        return {"memories": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/memories/{memory_id}")
+async def update_memory(memory_id: str, content: str | None = None, importance: int | None = None):
+    """Update a memory entry."""
+    result = nano_db.memory_update(memory_id, content, importance)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"memory": result}
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(memory_id: str):
+    """Delete a memory entry."""
+    deleted = nano_db.memory_delete(memory_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"deleted": True}
+
+
+# ============================================================
+# Sub-Agent API
+# ============================================================
+
+@app.get("/api/subagents")
+async def list_subagents():
+    """List all subagents (active and recent)."""
+    try:
+        active = nano_db.subagent_get_active()
+        return {"active": active}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/subagents/{subagent_id}")
+async def get_subagent(subagent_id: str):
+    """Get a specific subagent."""
+    result = nano_db.subagent_get(subagent_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="SubAgent not found")
+    return {"subagent": result}
 
 
 # ============================================================
@@ -1095,7 +1399,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  nanoCursor API Server")
     print("=" * 60)
-    print(f"  工作区: {WORKSPACE_DIR}")
+    print(f"  工作区: {config_module.WORKSPACE_DIR}")
     print("  开发模式: 运行 'cd frontend && npm run dev'")
     print("  生产模式: 先 'npm run build'，再运行此脚本")
     print("=" * 60)
