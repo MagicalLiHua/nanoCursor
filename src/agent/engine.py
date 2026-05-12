@@ -206,7 +206,7 @@ class TodoManager:
 # ========== 任务管理器 ==========
 class TaskManager:
     def __init__(self, tasks_dir: Path = None):
-        self.tasks_dir = (tasks_dir or TASKS_DIR)
+        self.tasks_dir = (tasks_dir or get_workdir() / ".tasks")
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
 
     def _task_file(self, task_id: str) -> Path:
@@ -444,26 +444,35 @@ TOOL_HANDLERS["claim_task"] = _safe_handler(["task_id"], lambda task_id: handle_
 DYNAMIC_BOUNDARY = "=== DYNAMIC_BOUNDARY ==="
 
 def _build_core() -> str:
-    return f"""你是一个自动编程助手，在 {get_workdir()} 工作。
+    return f"""你是 nanoCursor，一个运行在终端里的 AI 编程助手，类似 Claude Code。
 
-【重要】你运行在 Windows 系统上！使用 Windows 命令：
-- 用 `dir` 而不是 `ls`
-- 用 `type` 而不是 `cat`
-- 用 `del` 而不是 `rm`
-- 用 `copy` 而不是 `cp`
+【核心原则】
 
-你有以下工具：
-- bash: 执行 shell 命令（参数：command）
-- read_file: 读取文件（参数：path, limit 可选）
-- write_file: 写文件（参数：path, content）
-- edit_file: 编辑文件（参数：path, old_text, new_text）
-- list_directory: 列出目录内容（参数：path）
-- TodoWrite: 添加/更新 todo
-- TodoList: 列出所有 todo
-- task_create: 创建任务
-- task_update: 更新任务状态
-- task_list: 列出任务
-- task: 启动子代理
+1. **像人一样对话** — 用户只是聊天时，就自然地聊天，不要调用任何工具。说"你好"你就回"你好！有什么可以帮你的？"，仅此而已。
+
+2. **按需使用工具** — 只有在用户明确要求做编程相关操作时（读代码、写文件、执行命令、搜索项目等）才调用工具。不要为了"展示能力"而主动探索工作区。
+
+3. **先思考再行动** — 理解用户真正想要什么。如果一个简单对话就能解决的问题，不要把它变成编程任务。
+
+4. **用中文回复** — 始终使用中文与用户交流。
+
+5. **简洁有力** — 用户没说要看代码就不要贴代码，没说要做就不要做。回复尽量简短。
+
+【环境信息】
+- 工作目录: {get_workdir()}
+- 操作系统: Windows
+- Windows 命令: dir (不是 ls), type (不是 cat), del (不是 rm), copy (不是 cp)
+
+【工具说明（仅在用户要求编程时使用）】
+- bash: 执行 shell 命令
+- read_file: 读取文件内容
+- write_file: 创建/覆盖文件
+- edit_file: 精确替换文件中的文本
+- list_directory: 列出目录内容
+- TodoWrite / TodoList: 管理待办事项
+- task_create / task_update / task_list: 管理多步骤任务
+- task: 启动子代理处理独立任务
+- spawn_teammate / send_message / broadcast: 管理 AI 团队
 """
 
 def _build_tool_listing(tools: list) -> str:
@@ -636,6 +645,7 @@ async def agent_loop(
     tools: list = None,
     max_turns: int = 100,
     on_tool_call: Callable[[str, dict, str], None] = None,
+    on_llm_response: Callable[[int, int], None] = None,
     session_id: str = None,
 ) -> str:
     """
@@ -659,7 +669,9 @@ async def agent_loop(
                 tools=tools,
                 max_tokens=4096,
             )
-            _metrics.record_llm_call_end(_llm_start, resp.usage.input_tokens + resp.usage.output_tokens)
+            _metrics.record_llm_call_end(_llm_start, input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens)
+            if on_llm_response:
+                on_llm_response(resp.usage.input_tokens, resp.usage.output_tokens)
 
             messages.append({"role": "assistant", "content": _content_to_dict(resp.content)})
 

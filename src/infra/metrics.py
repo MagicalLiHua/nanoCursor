@@ -18,6 +18,8 @@ class MetricsCollector:
         self._lock = Lock()
         # LLM 调用指标
         self.llm_calls = 0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
         self.total_llm_tokens = 0
         self.total_llm_latency_ms = 0
         self.llm_latency_records: list[float] = []
@@ -42,22 +44,25 @@ class MetricsCollector:
         """记录一次 LLM 调用的开始，返回时间戳。"""
         return time.perf_counter()
 
-    def record_llm_call_end(self, start_time: float, tokens_used: int, node_name: str = "unknown"):
+    def record_llm_call_end(self, start_time: float, input_tokens: int = 0, output_tokens: int = 0, node_name: str = "unknown"):
         """记录一次 LLM 调用的完成，自动计算延迟并归档。"""
         latency_ms = (time.perf_counter() - start_time) * 1000
         with self._lock:
             self.llm_calls += 1
-            self.total_llm_tokens += tokens_used
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            self.total_llm_tokens += input_tokens + output_tokens
             self.total_llm_latency_ms += latency_ms
             self.llm_latency_records.append(latency_ms)
             self.recent_llm_records.append({
                 "node": node_name,
-                "tokens": tokens_used,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "latency_ms": round(latency_ms, 1),
             })
             if len(self.recent_llm_records) > 50:
                 self.recent_llm_records = self.recent_llm_records[-50:]
-        logger.info(f"[Metrics] LLM 调用 | node={node_name} | tokens={tokens_used} | latency={latency_ms:.0f}ms")
+        logger.info(f"[Metrics] LLM 调用 | node={node_name} | in={input_tokens} out={output_tokens} | latency={latency_ms:.0f}ms")
 
     # ----- 工具调用指标 -----
 
@@ -125,6 +130,8 @@ class MetricsCollector:
                 "llm": {
                     "total_calls": self.llm_calls,
                     "total_tokens": self.total_llm_tokens,
+                    "total_input_tokens": self.total_input_tokens,
+                    "total_output_tokens": self.total_output_tokens,
                     "avg_tokens_per_call": round(avg_tokens, 1),
                     "avg_latency_ms": round(avg_latency, 1),
                     "max_latency_ms": round(max(self.llm_latency_records), 1)
@@ -199,8 +206,9 @@ class MetricsCollector:
         tools_data = summary["tool_calls"]
         repair = summary["repair_cycles"]
         lines.append(f"  LLM 调用次数: {llm['total_calls']}")
-        lines.append(f"  总 Token 消耗: {llm['total_tokens']}")
-        lines.append(f"  平均每次调用 Token: {llm['avg_tokens_per_call']}")
+        lines.append(f"  ↑ 输入 Token: {llm.get('total_input_tokens', 0)}")
+        lines.append(f"  ↓ 输出 Token: {llm.get('total_output_tokens', 0)}")
+        lines.append(f"  ∑ 总 Token: {llm['total_tokens']}")
         lines.append(f"  平均延迟: {llm['avg_latency_ms']:.0f}ms")
         if llm['max_latency_ms'] > 0:
             lines.append(f"  最大延迟: {llm['max_latency_ms']:.0f}ms")

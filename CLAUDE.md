@@ -18,21 +18,17 @@ pytest
 # Run a single test file
 pytest tests/test_file_tools.py
 
-# Start the web application (React frontend + FastAPI backend)
+# Start interactive CLI (main entry point)
+python cli.py
+
+# One-shot mode: run a single prompt
+python cli.py "帮我找 bug"
+
+# Start the web API (optional, FastAPI backend)
 python api_server.py
 
-# Run CLI (executes hardcoded prompt in run.py)
+# Run old CLI (executes hardcoded prompt)
 python run.py
-
-# Streamlit Web UI (alternative frontend)
-streamlit run web_ui.py
-```
-
-Frontend development mode:
-```bash
-cd frontend
-npm install    # only needed once
-npm run dev    # starts Vite dev server on port 3000, proxies /api to localhost:8100
 ```
 
 ## Architecture
@@ -46,6 +42,10 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 
 | File | Purpose |
 |------|---------|
+| `cli.py` | CLI 入口（交互式 REPL + 单次模式） |
+| `src/cli/repl.py` | REPL 循环 + prompt_toolkit 输入 |
+| `src/cli/renderer.py` | Rich 终端渲染（Markdown/代码/表格/流式） |
+| `src/cli/commands.py` | 斜杠命令系统（/help /files /team /memory /task 等） |
 | `src/agent/engine.py` | Agent loop + 20 个工具处理函数 |
 | `src/agent/state.py` | AgentState + WorkflowCancelledError |
 | `src/agent/prompt.py` | 管道式系统提示构建 |
@@ -66,10 +66,10 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 
 ### Tech Stack
 - **Python 3.10+** with **asyncio** for async agent orchestration
-- **LLM providers**: MiniMax (Anthropic-compatible), OpenAI, Anthropic, Ollama, DeepSeek
+- **LLM providers**: DeepSeek, MiniMax (Anthropic-compatible), OpenAI, Anthropic, Ollama
 - **Pydantic v2** for structured output parsing
-- **FastAPI + uvicorn** for backend API + SSE streaming
-- **React 18 + TypeScript + Vite** for frontend
+- **Rich + prompt_toolkit** for CLI interface
+- **FastAPI + uvicorn** for optional backend API
 - **python-dotenv** for config
 
 ### Core Concepts
@@ -94,32 +94,35 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 
 **Memory System**: Markdown file-based persistent memories organized by category (user/feedback/project/reference).
 
-### Frontend Architecture
+### CLI Commands
 
-The React frontend uses a sidebar layout with four pages:
-1. **工作台 (Chat)**: Chat interface + real-time SSE updates + execution log
-2. **指标面板 (Metrics)**: LLM calls, tokens, latency, tool success rate
-3. **文件浏览器 (Files)**: File tree + syntax-highlighted viewer
-4. **配置面板 (Config)**: LLM provider status + system config + env vars
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all available commands |
+| `/clear` | Start a new conversation thread |
+| `/files` (or `/ls`) | List workspace files |
+| `/cat <path>` | Display file contents with syntax highlighting |
+| `/config` | Show LLM configuration |
+| `/metrics` | Show current metrics (LLM calls, tokens, tool success) |
+| `/workspace` (or `/pwd`) | Show current workspace path |
+| `/model <name>` | Hot-switch LLM model for current session |
+| `/team spawn/list/send/inbox/shutdown` | Multi-agent team management |
+| `/memory save/search/list` | Persistent memory management |
+| `/task create/list/update/graph` | Task DAG management |
 
-Global state managed via React Context (`AppContext.tsx`). SSE events drive real-time UI updates.
+### Backend API (api_server.py, optional)
 
-### Backend API (api_server.py)
+The FastAPI backend is retained for optional external integration but is not the primary interface.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/run` | Start workflow with prompt, return `{thread_id, status}` |
-| `GET /api/run/{thread_id}/events` | SSE stream of events |
-| `GET /api/run/{thread_id}/state` | Get final state |
+| `POST /api/run` | Start workflow |
+| `GET /api/run/{id}/events` | SSE event stream |
 | `GET /api/files` | Workspace file tree |
-| `GET /api/files/{path}` | Read file content |
 | `GET /api/metrics` | Metrics dump + historical |
-| `GET /api/config` | LLM provider status, system config, env vars |
-| `GET /api/snapshots` | List recovery snapshots |
-| `GET /api/backups` | List backup files |
-| `GET/POST /api/todos` | Todo CRUD |
+| `GET /api/config` | LLM provider status, system config |
 | `GET/POST /api/memories` | Memory CRUD + search |
 
 ## Configuration
 
-Config is in `src/core/.env` (gitignored), see `.env.example` for template. Supports `MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `DEEPSEEK_API_KEY`.
+Config is in `.env` (gitignored), see `.env.example` for template. Supports `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MINIMAX_API_KEY`, `OLLAMA_BASE_URL`.
