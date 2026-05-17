@@ -23,22 +23,24 @@ class TestMetricsCollector:
         """record_llm_call_end increments counters."""
         mc = MetricsCollector()
         start = mc.record_llm_call_start()
-        mc.record_llm_call_end(start, tokens_used=1000, node_name="planner")
+        mc.record_llm_call_end(start, input_tokens=600, output_tokens=400)
 
         summary = mc.dump_summary()
         assert summary["llm"]["total_calls"] == 1
-        assert summary["llm"]["total_tokens"] == 1000
+        assert summary["llm"]["total_input_tokens"] == 600
+        assert summary["llm"]["total_output_tokens"] == 400
 
     def test_records_multiple_llm_calls(self):
         """Multiple calls accumulate correctly."""
         mc = MetricsCollector()
         for i in range(3):
             start = mc.record_llm_call_start()
-            mc.record_llm_call_end(start, tokens_used=100 + i, node_name="test")
+            mc.record_llm_call_end(start, input_tokens=100 + i, output_tokens=1)
 
         summary = mc.dump_summary()
         assert summary["llm"]["total_calls"] == 3
-        assert summary["llm"]["total_tokens"] == 303
+        assert summary["llm"]["total_input_tokens"] == 303
+        assert summary["llm"]["total_output_tokens"] == 3
 
     def test_llm_latency_recorded(self):
         """Latency is recorded and min/max/avg are computed."""
@@ -116,7 +118,7 @@ class TestMetricsCollector:
         """flush_to_file writes a valid JSON file."""
         mc = MetricsCollector()
         start = mc.record_llm_call_start()
-        mc.record_llm_call_end(start, tokens_used=500, node_name="planner")
+        mc.record_llm_call_end(start, input_tokens=300, output_tokens=200)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             mc.output_file = f.name
@@ -136,6 +138,6 @@ class TestMetricsCollector:
         mc = MetricsCollector()
         for i in range(60):
             start = mc.record_llm_call_start()
-            mc.record_llm_call_end(start, tokens_used=i, node_name="test")
+            mc.record_llm_call_end(start, input_tokens=i, output_tokens=0)
 
         assert len(mc.recent_llm_records) == 50

@@ -87,6 +87,12 @@ def cmd_config(args: list[str]) -> None:
 
 def cmd_metrics(args: list[str]) -> None:
     summary = _metrics.dump_summary()
+    # 添加记忆库统计
+    try:
+        mm = get_memory_manager()
+        summary["memory_count"] = len(mm.get(limit=1000))
+    except Exception:
+        pass
     render_metrics(summary)
 
 
@@ -324,6 +330,57 @@ def cmd_task(args: list[str]) -> None:
         render_error(f"Unknown task subcommand: {sub}. Use: create, list, update, graph")
 
 
+# ── Project command ─────────────────────────────────────────────────
+
+def cmd_project(args: list[str]) -> None:
+    """显示项目结构概览（索引+依赖图）"""
+    from src.indexer.indexer import get_project_index
+    from rich.tree import Tree
+    from rich.console import Console
+    from rich.panel import Panel
+
+    idx = get_project_index()
+    idx.build()
+
+    s = idx.summary()
+
+    # Build a Rich Tree
+    root = Tree(f"[bold cyan]📦 {idx.workspace.name}[/bold cyan]")
+
+    # Entry points
+    ep_node = root.add("[bold green]入口点[/bold green]")
+    for ep in s.get("entry_points", []):
+        ep_node.add(f"🚀 {ep}")
+
+    # Modules
+    mod_node = root.add("[bold blue]模块[/bold blue]")
+    modules = s.get("modules", {})
+    shown = 0
+    for mod_path, info in sorted(modules.items()):
+        if shown >= 20:
+            mod_node.add(f"[dim]... 及其他 {len(modules) - 20} 个模块[/dim]")
+            break
+        syms = [f"{sym['type']} [cyan]{sym['name']}[/cyan]" for sym in info.get("symbols", [])[:3]]
+        label = mod_path
+        if syms:
+            label += f"  [dim]({', '.join(syms)})[/dim]"
+        mod_node.add(label)
+        shown += 1
+
+    # Stats
+    stats_node = root.add("[bold yellow]统计[/bold yellow]")
+    stats_node.add(f"文件: {s['total_files']} 个 (source: {s['source_count']}, test: {s['test_count']}, config: {s['config_count']})")
+    stats_node.add(f"代码量: {s['total_loc']:,} 字节")
+
+    # Recent changes
+    if s.get("recently_modified"):
+        rc_node = root.add("[bold magenta]最近修改[/bold magenta]")
+        for path, _ in s["recently_modified"][:5]:
+            rc_node.add(path)
+
+    Console().print(root)
+
+
 # ── Command router ─────────────────────────────────────────────────
 
 COMMAND_MAP: dict[str, Callable] = {
@@ -338,6 +395,7 @@ COMMAND_MAP: dict[str, Callable] = {
     "workspace": cmd_workspace,
     "pwd": cmd_workspace,
     "model": cmd_model,
+    "project": cmd_project,
     "team": cmd_team,
     "memory": cmd_memory,
     "task": cmd_task,

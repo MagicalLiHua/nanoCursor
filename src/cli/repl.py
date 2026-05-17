@@ -59,6 +59,7 @@ COMMAND_PALETTE = [
     ("files", "", "列出工作区文件"),
     ("cat", "<path>", "查看文件内容（语法高亮）"),
     # System
+    ("project", "", "显示项目结构概览"),
     ("config", "", "显示 LLM 配置"),
     ("metrics", "", "显示 LLM 调用统计"),
     ("workspace", "", "显示工作区路径"),
@@ -130,8 +131,9 @@ class NanoREPL:
     """Interactive REPL for nanoCursor, Claude Code style."""
 
     def __init__(self):
+        import uuid
         self.messages: list[dict] = []
-        self.session_id: str = ""
+        self.session_id: str = str(uuid.uuid4())
         self.running = True
         self._session: Optional["PromptSession"] = None
         # Cumulative session token totals
@@ -171,8 +173,9 @@ class NanoREPL:
                 if is_command(user_input):
                     result = handle_command(user_input)
                     if result == "__CLEAR__":
+                        import uuid
                         self.messages = []
-                        self.session_id = ""
+                        self.session_id = str(uuid.uuid4())
                         self.total_inp = 0
                         self.total_out = 0
                         render_success("已清空对话。")
@@ -187,6 +190,16 @@ class NanoREPL:
             except EOFError:
                 self.running = False
                 break
+
+        # 会话退出时自动整理记忆
+        try:
+            from src.memory.manager import get_memory_manager
+            mm = get_memory_manager()
+            deleted = mm.consolidate()
+            if deleted:
+                console.print(f"[dim]已清理 {deleted} 条低质量记忆[/dim]")
+        except Exception:
+            pass
 
         console.print("\n[dim]再见！[/dim]")
 
@@ -274,10 +287,11 @@ class NanoREPL:
             return None
 
     async def _run_agent(self, user_input: str) -> None:
-        """Run the agent with the user's input."""
-        from src.agent.engine import agent_loop, ALL_TOOLS, SystemPromptBuilder
+        """Run the agent with the user's input using streaming output."""
+        from src.agent.engine import agent_loop_stream, ALL_TOOLS, SystemPromptBuilder
         from src.infra.metrics import metrics as _metrics
         from rich.live import Live
+        from rich.markdown import Markdown
         from rich.text import Text
         import time as _time
 
@@ -293,35 +307,80 @@ class NanoREPL:
         def on_tool_call(tool_name: str, tool_input: dict, output: str):
             render_tool_call(tool_name, tool_input, output)
 
-        def on_token_update(input_tokens: int, output_tokens: int):
-            token_state["inp"] += input_tokens
-            token_state["out"] += output_tokens
-
         t0 = _time.time()
+        accumulated_text = ""
+        pending_tool_results: list[tuple] = []
 
+        # Use Live display for streaming
         live = Live(Text("  Thinking… 1s", style="bold #999999"), console=console,
-                    refresh_per_second=4, transient=False)
+                    refresh_per_second=10, transient=False)
         live.start()
 
-        # Background task to tick the timer every second
         async def tick_timer():
             while True:
                 await asyncio.sleep(1)
                 elapsed = int(_time.time() - t0) or 1
-                live.update(Text(f"  Thinking… {elapsed}s", style="bold #999999"))
+                if accumulated_text:
+                    # Show streaming text with elapsed time
+                    display = Markdown(accumulated_text + "▌")
+                    live.update(display)
+                else:
+                    live.update(Text(f"  Thinking… {elapsed}s", style="bold #999999"))
 
         tick_task = asyncio.create_task(tick_timer())
 
         result = ""
         try:
-            result = await agent_loop(
+            async for event in agent_loop_stream(
                 messages=self.messages,
                 system=system,
                 tools=ALL_TOOLS,
                 max_turns=100,
                 on_tool_call=on_tool_call,
-                on_llm_response=on_token_update,
-            )
+                session_id=self.session_id,
+            ):
+                ev_type = event[0]
+
+                if ev_type == "token":
+                    accumulated_text += event[1]
+                    # Update live display with accumulated markdown
+                    live.update(Markdown(accumulated_text + "▌"))
+
+                elif ev_type == "tool_start":
+                    # Tool call starting - pause the thinking display
+                    tick_task.cancel()
+                    try:
+                        await tick_task
+                    except asyncio.CancelledError:
+                        pass
+                    live.stop()
+                    console.print(f"  [dim]🔧 {event[1]}...[/dim]")
+                    tick_task = asyncio.create_task(tick_timer())
+                    live.start()
+
+                elif ev_type == "tool_result":
+                    tool_name, tool_input, output = event[1], event[2], event[3]
+                    # Flush any pending tool results
+                    live.stop()
+                    render_tool_call(tool_name, tool_input, output)
+                    tick_task.cancel()
+                    try:
+                        await tick_task
+                    except asyncio.CancelledError:
+                        pass
+                    tick_task = asyncio.create_task(tick_timer())
+                    live.start()
+
+                elif ev_type == "metrics":
+                    token_state["inp"] += event[1]
+                    token_state["out"] += event[2]
+
+                elif ev_type == "done":
+                    result = event[1]
+
+                elif ev_type == "error":
+                    result = f"Error: {event[1]}"
+                    break
         except Exception as e:
             result = f"Error: {e}"
         finally:
@@ -331,11 +390,10 @@ class NanoREPL:
             except asyncio.CancelledError:
                 pass
             elapsed = int(_time.time() - t0) or 1
-            live.update(Text(f"  Thought for {elapsed}s", style="bold #777777"))
             live.stop()
 
         # Add assistant response to message history
-        if result and not result.startswith("Error:"):
+        if result and not result.startswith("Error:") and result != "(max turns reached)":
             self.messages.append({
                 "role": "assistant",
                 "content": [{"type": "text", "text": result}]
@@ -345,7 +403,7 @@ class NanoREPL:
         self.total_inp += token_state["inp"]
         self.total_out += token_state["out"]
 
-        # Render the final result
+        # Render the final result (without cursor)
         console.print()
         if result.startswith("Error:"):
             render_error(result)

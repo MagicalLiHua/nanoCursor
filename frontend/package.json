@@ -1,0 +1,11 @@
+{
+  "name": "nanocursor-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "preview": "node scripts/serve.mjs",
+    "check": "node --check src/main.js && node --check scripts/serve.mjs"
+  }
+}

@@ -40,9 +40,12 @@ def _get_safe_filepath(filename: str) -> str:
     使用 os.path.realpath 解析符号链接，防止通过软链接逃逸工作区。
     """
     workspace_abs = os.path.realpath(WORKSPACE_DIR)
-    target_abs = os.path.realpath(os.path.join(workspace_abs, filename))
+    normalized = str(filename).replace("\\", os.sep)
+    target_abs = os.path.realpath(
+        normalized if os.path.isabs(normalized) else os.path.join(workspace_abs, normalized)
+    )
 
-    if not target_abs.startswith(workspace_abs):
+    if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
         raise ValueError(f"安全拦截：禁止访问工作区之外的路径 -> {filename}")
 
     return target_abs

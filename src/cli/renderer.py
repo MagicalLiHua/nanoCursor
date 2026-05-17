@@ -162,19 +162,24 @@ def render_metrics(metrics_data: dict) -> None:
     """Render metrics summary as a table."""
     llm = metrics_data.get("llm", {})
 
-    table = Table(title="Token 用量", box=box.ROUNDED, border_style="blue")
-    table.add_column("方向", style="cyan", no_wrap=True)
-    table.add_column("Token 数", style="green")
+    table = Table(title="📊 系统指标", box=box.ROUNDED, border_style="blue")
+    table.add_column("指标", style="cyan", no_wrap=True)
+    table.add_column("值", style="green")
 
     inp = llm.get("total_input_tokens", 0)
     out = llm.get("total_output_tokens", 0)
 
-    table.add_row("↑ 输入 (prompt)", _fmt_tokens(inp))
-    table.add_row("↓ 输出 (completion)", _fmt_tokens(out))
-    table.add_row("∑ 合计", _fmt_tokens(inp + out))
+    table.add_row("↑ Token 输入", _fmt_tokens(inp))
+    table.add_row("↓ Token 输出", _fmt_tokens(out))
+    table.add_row("∑ Token 合计", _fmt_tokens(inp + out))
     table.add_row("LLM 调用次数", str(llm.get("total_calls", 0)))
     table.add_row("平均延迟", f"{llm.get('avg_latency_ms', 0):.0f}ms")
     table.add_row("最大延迟", f"{llm.get('max_latency_ms', 0):.0f}ms")
+
+    # 自我进化指标
+    mem_count = metrics_data.get("memory_count", 0)
+    if mem_count:
+        table.add_row("记忆库大小", f"{mem_count} 条")
 
     console.print(table)
 
@@ -310,6 +315,7 @@ def render_help() -> None:
             ("/cat <path>", "查看文件（语法高亮）"),
         ]),
         ("系统", [
+            ("/project", "项目结构概览"),
             ("/config", "LLM 配置"),
             ("/metrics", "调用统计"),
             ("/workspace", "工作区路径"),

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nanocursor"
 version = "2.0.0"
-description = "Multi-agent automatic programming framework built on custom agent orchestration and Docker"
-readme = "README.md"
+description = "Multi-agent software delivery workspace"
+readme = "readme.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "you@example.com"}
+    {name = "LiHua"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

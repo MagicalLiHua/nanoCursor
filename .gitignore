@@ -68,6 +68,9 @@ skills/
 .nanocursor.db
 *.db
 metrics_history.json
+.nanoCursor
+docs/
+memory/
 
 # LangGraph checkpointer (旧版兼容)
 .checkpoints/

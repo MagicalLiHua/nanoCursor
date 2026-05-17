@@ -22,7 +22,7 @@ TOOL_SCHEMAS = [
                     "content": {"type": "string", "description": "The memory content to store"},
                     "category": {
                         "type": "string",
-                        "description": "Category: fact | decision | context | error_pattern | user_preference",
+                        "description": "Category: user | feedback | project | reference",
                     },
                     "importance": {"type": "integer", "description": "Importance 0-10. High (>7) memories are loaded on every new session.", "default": 1},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for search", "default": []},
@@ -40,7 +40,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query to find relevant memories"},
-                    "category": {"type": "string", "description": "Optional category filter: fact | decision | context | error_pattern | user_preference"},
+                    "category": {"type": "string", "description": "Optional category filter: user | feedback | project | reference"},
                     "limit": {"type": "integer", "description": "Max memories to return", "default": 10},
                 }
             }
@@ -69,8 +69,7 @@ TOOL_SCHEMAS = [
 # Tool Implementations
 # ==========================================
 
-async def add_memory(
-    workspace: str,
+def add_memory(
     content: str,
     category: str,
     importance: int = 1,
@@ -89,8 +88,7 @@ async def add_memory(
         return f"Failed to add memory: {e}"
 
 
-async def recall_memories(
-    workspace: str,
+def recall_memories(
     query: str,
     category: str | None = None,
     limit: int = 10,
@@ -124,8 +122,7 @@ async def recall_memories(
         return f"Failed to recall memories: {e}"
 
 
-async def update_memory(
-    workspace: str,
+def update_memory(
     memory_id: str,
     content: str | None = None,
     importance: int | None = None,

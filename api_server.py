@@ -14,6 +14,7 @@ import queue
 import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -25,31 +26,56 @@ from src.infra.messages import HumanMessage
 
 # 导入 Pydantic API 模型
 from src.api.models import (
+    AgentEvent,
     AgentStateResponse,
+    ArtifactCenterResponse,
     BackupContentResponse,
     BackupEntry,
     BackupListResponse,
+    BenchmarkListResponse,
+    BenchmarkRunRequest,
+    BenchmarkRunResponse,
     CancelResponse,
+    CapabilityRecommendRequest,
     CodeFile,
     ConfigResponse,
+    ConversationCreateRequest,
+    ConversationRunRequest,
+    ConversationTeamRecommendRequest,
+    ConversationTeamUpdateRequest,
     EnvVar,
     FileContentResponse,
     FileEntry,
     FileListResponse,
+    ApprovalDecisionRequest,
     LLMProviderStatus,
     Message,
     MetricsCurrentResponse,
     MetricsLLMData,
+    MemoryProfileResponse,
     MetricsRepairData,
     MetricsResponse,
     MetricsToolData,
+    DeliveryScoreResponse,
+    QualityGateResponse,
+    PreferenceCreateRequest,
+    RecoveryCenterResponse,
+    RequirementTraceabilityResponse,
+    RollbackRequest,
+    RollbackResponse,
+    RunBlueprintRequest,
+    RunHistoryResponse,
+    RunEventsResponse,
     RunRequest,
     RunResponse,
+    RunSessionResponse,
+    SkillImportRequest,
     SnapshotDetailResponse,
     SnapshotEntry,
     SnapshotListResponse,
     SnapshotMetadata,
     SystemConfig,
+    TeamAgentCreateRequest,
 )
 
 from fastapi.responses import JSONResponse
@@ -110,7 +136,84 @@ from src.infra.metrics import metrics as metrics_collector
 def _get_workspace() -> str:
     return config_module.WORKSPACE_DIR
 
+
+def _set_active_workspace(dir_path: str) -> str:
+    """Switch the active workspace and reset workspace-scoped caches."""
+    abs_path = os.path.abspath(dir_path)
+    os.makedirs(abs_path, exist_ok=True)
+    config_module.WORKSPACE_DIR = abs_path
+
+    try:
+        import src.tools.file_tools as file_tools_module
+
+        file_tools_module.WORKSPACE_DIR = abs_path
+        file_tools_module.BACKUP_DIR = os.path.join(abs_path, ".backups")
+        os.makedirs(file_tools_module.BACKUP_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+    try:
+        from src.indexer.indexer import reset_index
+
+        reset_index()
+    except Exception:
+        pass
+
+    try:
+        from src.tools.git_tools import set_git_workspace
+
+        set_git_workspace(Path(abs_path))
+    except Exception:
+        pass
+
+    try:
+        from src.agent.engine import reset_runtime_caches
+
+        reset_runtime_caches()
+    except Exception:
+        pass
+
+    return abs_path
+
+
+def _workspace_for_thread(thread_id: str) -> str:
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        workspace_dir = run_info.get("workspace_dir") if run_info else None
+    return workspace_dir or _get_workspace()
+
 from src.agent.state import WorkflowCancelledError  # 保留导入，兼容旧接口
+from src.api.services.agenthub_state import add_team_member, list_task_items, list_team_members
+from src.api.services.artifact_service import build_artifact_center
+from src.api.services.benchmark_service import emit_benchmark_run, get_benchmark, list_benchmarks
+from src.api.services.blueprint_service import build_run_blueprint
+from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
+from src.api.services.conversation_service import (
+    create_conversation,
+    finalize_conversation_run,
+    get_conversation,
+    link_run_to_conversation,
+    list_conversations,
+    refresh_conversation_recommendation,
+    update_conversation_team,
+)
+from src.api.services.demo_run import DEMO_PROMPT, emit_demo_run
+from src.api.services.diff_service import get_run_diff
+from src.api.services.event_store import get_event_store
+from src.api.services.sse_broker import get_sse_broker, stream_events_push, patch_event_store_for_push
+# Enable push-based SSE: all events are automatically broadcast to connected clients
+patch_event_store_for_push()
+from src.api.services.orchestration_service import build_execution_plan, build_runtime_instructions
+from src.api.services.quality_service import build_quality_gate
+from src.api.services.preference_service import add_preference_memory, build_memory_profile
+from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
+from src.api.services.report_service import build_delivery_report
+from src.api.services.run_history import list_run_history
+from src.api.services.run_context import RunContext
+from src.api.services.score_service import build_delivery_score
+from src.api.services.traceability_service import build_requirement_traceability
+from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
+from src.api.services.workspace_service import build_workspace_overview
 
 # 持久化指标历史文件（项目根目录，跨工作区保留）
 METRICS_HISTORY_FILE = os.path.join(ROOT, "metrics_history.json")
@@ -213,11 +316,115 @@ async def version():
 # 活跃运行管理
 # ============================================================
 
-# 存储每个线程的运行状态和事件队列
-# 结构: { thread_id: { "queue": Queue, "status": str, "thread": Thread } }
-active_runs: dict[str, dict[str, Any]] = {}
+# 存储每个线程的运行上下文
+active_runs: dict[str, RunContext] = {}
 # 线程锁，保护 active_runs 的并发访问
 runs_lock = threading.Lock()
+event_store = get_event_store()
+
+
+def _approval_title(decision: str) -> str:
+    labels = {
+        "approved": "计划已批准",
+        "revise": "计划需调整",
+        "rejected": "计划已拒绝",
+    }
+    return labels.get(decision, "计划审批已记录")
+
+
+def _finalize_conversation_for_run(
+    thread_id: str,
+    workspace_dir: str,
+    status: str,
+    summary: str = "",
+    error: str = "",
+) -> None:
+    """Sync terminal run status back to its owning conversation."""
+    with runs_lock:
+        run_info = active_runs.get(thread_id) or {}
+        conversation_id = run_info.get("conversation_id")
+    if not conversation_id:
+        return
+    finalize_conversation_run(
+        conversation_id=conversation_id,
+        thread_id=thread_id,
+        status=status,
+        workspace_dir=workspace_dir,
+        summary=summary,
+        error=error,
+    )
+    event_store.update_session(
+        thread_id,
+        workspace_dir,
+        conversation_id=conversation_id,
+        conversation_status=status,
+    )
+
+
+def _emit_agenthub_event(
+    thread_id: str,
+    event_type: str,
+    title: str = "",
+    content: str = "",
+    agent: str = "lead",
+    payload: dict[str, Any] | None = None,
+    legacy_event: dict[str, Any] | None = None,
+    workspace_dir: str | None = None,
+) -> AgentEvent:
+    """Persist a unified AgentHub event and optionally publish a legacy SSE event."""
+    if workspace_dir is None:
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            workspace_dir = run_info.get("workspace_dir") if run_info else None
+    workspace_dir = workspace_dir or _get_workspace()
+    event = event_store.append_event(
+        thread_id=thread_id,
+        event_type=event_type,
+        title=title,
+        content=content,
+        agent=agent,
+        payload=payload or {},
+        workspace_dir=workspace_dir,
+    )
+
+    if legacy_event is not None:
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            q = run_info.get("queue") if run_info else None
+        if q:
+            enriched = dict(legacy_event)
+            enriched["agenthub_event"] = event.model_dump()
+            q.put(json.dumps(enriched, ensure_ascii=False))
+
+    return event
+
+
+def _sync_run_context(thread_id: str, workspace_dir: str) -> RunContext | None:
+    """Persist the current in-memory run context into the session file."""
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        metadata = run_info.session_metadata() if run_info else None
+    if not run_info or not metadata:
+        return run_info
+    event_store.update_session(thread_id, workspace_dir, **metadata)
+    return run_info
+
+
+def _emit_stage_updates(
+    thread_id: str,
+    workspace_dir: str,
+    updates: list[dict[str, Any]] | None,
+) -> None:
+    for update in updates or []:
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="stage_updated",
+            title=f"阶段状态：{update.get('title') or update.get('stage_id')}",
+            content=f"{update.get('previous_status')} -> {update.get('status')}",
+            agent=str(update.get("owner") or "lead").lower(),
+            payload=update,
+            workspace_dir=workspace_dir,
+        )
 
 # ============================================================
 # API 限流管理
@@ -262,7 +469,7 @@ def _check_rate_limit(thread_id: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _run_workflow(thread_id: str, initial_messages: list, max_retries: int = 3, max_coder_steps: int = 15):
+def _run_workflow(thread_id: str, initial_messages: list, workspace_dir: str, max_retries: int = 3, max_coder_steps: int = 15):
     """
     在后台线程中运行 agent_loop 工作流。
 
@@ -277,13 +484,13 @@ def _run_workflow(thread_id: str, initial_messages: list, max_retries: int = 3, 
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_workflow_async(thread_id, initial_messages, max_retries, max_coder_steps)
+            _run_workflow_async(thread_id, initial_messages, max_retries, max_coder_steps, workspace_dir)
         )
     finally:
         loop.close()
 
 
-async def _run_workflow_async(thread_id: str, initial_messages: list, max_retries: int, max_coder_steps: int):
+async def _run_workflow_async(thread_id: str, initial_messages: list, max_retries: int, max_coder_steps: int, workspace_dir: str | None = None):
     """_run_workflow 的异步内部实现。"""
 
     with runs_lock:
@@ -291,6 +498,10 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         if not run_info:
             return
         q = run_info["queue"]
+        workspace_dir = workspace_dir or run_info.get("workspace_dir")
+        execution_plan = run_info.get("execution_plan", {})
+        run_team = run_info.get("team", [])
+    workspace_dir = workspace_dir or _get_workspace()
 
     # 构建消息格式（base_engine 使用 {"role": ..., "content": ...}）
     messages = [{"role": m.type if hasattr(m, 'type') else 'user', "content": m.content} for m in initial_messages]
@@ -317,16 +528,81 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
 - 例如：write_file(path="prime.py", content="...") 而不是 write_file(path="workspace/prime.py", content="...")
 - 读文件同理，直接写文件名
 """
+    runtime_instructions = build_runtime_instructions(execution_plan, run_team)
+    if runtime_instructions:
+        system = f"{system}\n{runtime_instructions}"
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="orchestration_applied",
+            title="动态编排已注入 Runtime",
+            content="本次运行将按团队执行策略约束 Agent 的阶段、能力和验证要求。",
+            agent="lead",
+            payload={
+                "strategy": execution_plan.get("strategy"),
+                "stage_count": len(execution_plan.get("stages", [])),
+                "team_count": len(run_team),
+                "runtime_instruction_length": len(runtime_instructions),
+            },
+            workspace_dir=workspace_dir,
+        )
 
     def on_tool_call(tool_name: str, tool_input: dict, output: str):
         """每次工具调用后发送事件到 SSE（含实时指标）"""
-        q.put(json.dumps({
+        capability_trace = capability_trace_for_tool(tool_name)
+        with runs_lock:
+            current_run = active_runs.get(thread_id)
+            stage_updates = (
+                current_run.apply_tool_event(
+                    tool_name=tool_name,
+                    capability_id=capability_trace["capability_id"],
+                    agent=capability_trace["agent"],
+                    ok=not str(output or "").startswith("Error:"),
+                    output=output or "",
+                )
+                if current_run
+                else []
+            )
+            current_stage_id = (
+                current_run.metadata.get("lifecycle", {}).get("current_stage_id")
+                if current_run
+                else None
+            )
+        _sync_run_context(thread_id, workspace_dir)
+        _emit_stage_updates(thread_id, workspace_dir, stage_updates)
+        legacy_event = {
             "type": "tool_call",
             "tool": tool_name,
             "input": tool_input,
             "output": output[:500] if output else "",
             "metrics": metrics_collector.dump_summary(),
-        }, ensure_ascii=False))
+        }
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="tool_call_finished",
+            title=f"能力调用：{capability_trace['capability_name']}",
+            content=output[:1000] if output else "",
+            agent=capability_trace["agent"].lower(),
+            payload={
+                "tool": tool_name,
+                "input": tool_input,
+                "output": output[:5000] if output else "",
+                "metrics": metrics_collector.dump_summary(),
+                "capability_trace": capability_trace,
+                "stage_id": current_stage_id,
+            },
+            legacy_event=legacy_event,
+            workspace_dir=workspace_dir,
+        )
+        for derived_event in derive_agenthub_events(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            output=output,
+            workspace_dir=workspace_dir,
+            thread_id=thread_id,
+        ):
+            _emit_agenthub_event(thread_id=thread_id, workspace_dir=workspace_dir, **derived_event)
+
+    final_status = "completed"
 
     try:
         result = await agent_loop(
@@ -336,16 +612,94 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             max_turns=100,
             on_tool_call=on_tool_call,
         )
-        q.put(json.dumps({"type": "node_update", "node": "agent", "data": {"content": result[:1000]}}, ensure_ascii=False))
-        q.put(json.dumps({"type": "done", "status": "completed"}, ensure_ascii=False))
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="assistant_message",
+            title="Agent 回复",
+            content=result[:5000],
+            agent="lead",
+            payload={"content": result},
+            legacy_event={
+                "type": "node_update",
+                "node": "agent",
+                "data": {"content": result[:1000]},
+            },
+            workspace_dir=workspace_dir,
+        )
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            stage_updates = run_info.finalize_lifecycle("completed") if run_info else []
+        _sync_run_context(thread_id, workspace_dir)
+        _emit_stage_updates(thread_id, workspace_dir, stage_updates)
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="done",
+            title="任务完成",
+            content="Agent 运行已完成",
+            agent="lead",
+            payload={"status": "completed"},
+            legacy_event={"type": "done", "status": "completed"},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(thread_id, workspace_dir, status="completed")
+        _finalize_conversation_for_run(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            status="completed",
+            summary=result,
+        )
 
     except WorkflowCancelledError:
-        q.put(json.dumps({"type": "done", "status": "cancelled"}, ensure_ascii=False))
+        final_status = "cancelled"
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            stage_updates = run_info.finalize_lifecycle("cancelled", "Agent 运行已取消") if run_info else []
+        _sync_run_context(thread_id, workspace_dir)
+        _emit_stage_updates(thread_id, workspace_dir, stage_updates)
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="done",
+            title="任务已取消",
+            content="Agent 运行已取消",
+            agent="lead",
+            payload={"status": "cancelled"},
+            legacy_event={"type": "done", "status": "cancelled"},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(thread_id, workspace_dir, status="cancelled")
+        _finalize_conversation_for_run(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            status="cancelled",
+            summary="Agent 运行已取消",
+        )
     except Exception as e:
+        final_status = "failed"
         import traceback
         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         print(f"[_run_workflow_async] 工作流异常: {error_detail}")
-        q.put(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            stage_updates = run_info.finalize_lifecycle("failed", str(e)) if run_info else []
+        _sync_run_context(thread_id, workspace_dir)
+        _emit_stage_updates(thread_id, workspace_dir, stage_updates)
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="error",
+            title="运行异常",
+            content=str(e),
+            agent="lead",
+            payload={"error": str(e), "detail": error_detail},
+            legacy_event={"type": "error", "message": str(e)},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(thread_id, workspace_dir, status="failed", error=str(e))
+        _finalize_conversation_for_run(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            status="failed",
+            error=str(e),
+        )
     finally:
         # 持久化指标——每次任务结束都写入文件
         try:
@@ -355,7 +709,7 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             pass
         with runs_lock:
             if thread_id in active_runs:
-                active_runs[thread_id]["status"] = "completed"
+                active_runs[thread_id].set_status(final_status)
 
 
 def _extract_node_event(node_name: str, node_state: dict) -> dict:
@@ -458,9 +812,7 @@ async def start_run(request: RunRequest):
 
     # 如果请求中包含工作目录，则更新 config_module.WORKSPACE_DIR
     if request.workspace_dir:
-        abs_path = os.path.abspath(request.workspace_dir)
-        os.makedirs(abs_path, exist_ok=True)
-        config_module.WORKSPACE_DIR = abs_path
+        abs_path = _set_active_workspace(request.workspace_dir)
         print(f"[API] 设置工作区: {abs_path}")
 
     # 限流检查：防止频繁启动或并发启动
@@ -483,21 +835,54 @@ async def start_run(request: RunRequest):
 
     # 创建事件队列
     q = queue.Queue()
+    run_workspace = _get_workspace()
+    run_team = list(request.team or [])
+    run_execution_plan = dict(request.execution_plan or {})
 
     with runs_lock:
-        active_runs[thread_id] = {
-            "queue": q,
-            "status": "running",
-            "thread": None,
-        }
+        run_context = RunContext(
+            thread_id=thread_id,
+            workspace_dir=run_workspace,
+            queue=q,
+            status="running",
+            conversation_id=request.conversation_id,
+            team=run_team,
+            execution_plan=run_execution_plan,
+        )
+        active_runs[thread_id] = run_context
+
+    event_store.create_session(
+        thread_id=thread_id,
+        prompt=prompt,
+        workspace_dir=run_workspace,
+        status="running",
+    )
+    session_metadata = run_context.session_metadata()
+    if session_metadata:
+        event_store.update_session(thread_id, run_workspace, **session_metadata)
+    stage_updates = run_context.start_first_stage()
+    _sync_run_context(thread_id, run_workspace)
+    _emit_stage_updates(thread_id, run_workspace, stage_updates)
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="run_started",
+        title="任务已启动",
+        content=prompt,
+        payload={
+            "workspace_dir": run_workspace,
+            "thread_id": thread_id,
+            "conversation_id": request.conversation_id,
+        },
+        workspace_dir=run_workspace,
+    )
 
     # 在后台线程中启动工作流
     t = threading.Thread(
         target=_run_workflow,
-        args=(thread_id, initial_messages),
+        args=(thread_id, initial_messages, run_workspace),
         daemon=True,
     )
-    active_runs[thread_id]["thread"] = t
+    active_runs[thread_id].thread = t
     t.start()
 
     return RunResponse(thread_id=thread_id, status="started")
@@ -571,6 +956,580 @@ async def stream_events(thread_id: str):
     )
 
 
+@app.post("/api/runs")
+async def start_agenthub_run(request: RunRequest):
+    """启动 AgentHub 标准运行接口（保留旧 /api/run 作为兼容入口）。"""
+    return await start_run(request)
+
+
+@app.post("/api/conversations")
+async def create_agenthub_conversation(request: ConversationCreateRequest):
+    """创建独立会话上下文，并按首条需求生成推荐团队。"""
+    return {
+        "conversation": create_conversation(
+            prompt=request.prompt,
+            workspace_dir=request.workspace_dir or _get_workspace(),
+        )
+    }
+
+
+@app.get("/api/conversations")
+async def list_agenthub_conversations(limit: int = 50, workspace_dir: str | None = None):
+    """列出当前工作区的 AgentHub 会话。"""
+    safe_limit = min(max(limit, 0), 200)
+    return {
+        "conversations": list_conversations(
+            workspace_dir=workspace_dir or _get_workspace(),
+            limit=safe_limit,
+        )
+    }
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_agenthub_conversation(conversation_id: str, workspace_dir: str | None = None):
+    """获取会话上下文、当前团队和运行绑定。"""
+    conversation = get_conversation(conversation_id, workspace_dir or _get_workspace())
+    if not conversation:
+        raise HTTPException(status_code=404, detail="未找到该会话")
+    return {"conversation": conversation}
+
+
+@app.post("/api/conversations/{conversation_id}/team/recommend")
+async def recommend_agenthub_conversation_team(
+    conversation_id: str,
+    request: ConversationTeamRecommendRequest,
+):
+    """重新生成并保存本会话的智能组队建议。"""
+    try:
+        result = refresh_conversation_recommendation(
+            conversation_id=conversation_id,
+            prompt=request.prompt,
+            workspace_dir=request.workspace_dir or _get_workspace(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return result
+
+
+@app.put("/api/conversations/{conversation_id}/team")
+async def update_agenthub_conversation_team(
+    conversation_id: str,
+    request: ConversationTeamUpdateRequest,
+):
+    """保存用户对本会话 Agent 群组的增删改。"""
+    try:
+        team = update_conversation_team(
+            conversation_id=conversation_id,
+            members=request.members,
+            workspace_dir=request.workspace_dir or _get_workspace(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"team": team}
+
+
+@app.post("/api/conversations/{conversation_id}/runs")
+async def start_agenthub_conversation_run(
+    conversation_id: str,
+    request: ConversationRunRequest,
+):
+    """在会话上下文中启动一次隔离 Agent 运行。"""
+    conversation = get_conversation(conversation_id, request.workspace_dir or _get_workspace())
+    if not conversation:
+        raise HTTPException(status_code=404, detail="未找到该会话")
+
+    workspace_dir = request.workspace_dir or conversation["workspace_dir"]
+    team = conversation.get("team", {})
+    execution_plan = build_execution_plan(
+        prompt=request.prompt,
+        team=team.get("members", []),
+        workspace_dir=workspace_dir,
+    )
+    response = await start_run(
+        RunRequest(
+            prompt=request.prompt,
+            workspace_dir=workspace_dir,
+            conversation_id=conversation_id,
+            team=team.get("members", []),
+            execution_plan=execution_plan,
+        )
+    )
+    thread_id = response.thread_id
+    updated = link_run_to_conversation(
+        conversation_id,
+        thread_id,
+        workspace_dir,
+        prompt=request.prompt,
+        team=team.get("members", []),
+    )
+    team = updated.get("team", {})
+
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        if run_info is not None:
+            run_info.bind_conversation(conversation_id, team.get("members", []))
+            run_info.set_execution_plan(execution_plan)
+
+    event_store.update_session(
+        thread_id,
+        workspace_dir,
+        conversation_id=conversation_id,
+        team=team.get("members", []),
+        execution_plan=execution_plan,
+        agent_loop_policy=updated.get("agent_loop_policy", "run_per_message"),
+    )
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="team_updated",
+        title="会话团队已绑定",
+        content="本次运行将使用会话内的 Agent 群组配置。",
+        agent="lead",
+        payload={
+            "conversation_id": conversation_id,
+            "members": team.get("members", []),
+            "source": team.get("source", "unknown"),
+        },
+        workspace_dir=workspace_dir,
+    )
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="plan_created",
+        title="动态执行策略已生成",
+        content="AgentHub 已根据本会话团队生成本轮执行阶段。",
+        agent="lead",
+        payload={
+            "conversation_id": conversation_id,
+            "strategy": execution_plan["strategy"],
+            "stages": execution_plan["stages"],
+            "tasks": execution_plan["tasks"],
+            "risks": execution_plan["risks"],
+            "summary": execution_plan["summary"],
+        },
+        workspace_dir=workspace_dir,
+    )
+    return {"run": response, "conversation": updated}
+
+
+@app.post("/api/runs/demo")
+async def start_agenthub_demo_run(request: RunRequest):
+    """启动不依赖 LLM 的稳定 AgentHub 演示运行。"""
+    prompt = request.prompt or DEMO_PROMPT
+    thread_id = request.thread_id or f"demo-{uuid.uuid4()}"
+
+    if request.workspace_dir:
+        _set_active_workspace(request.workspace_dir)
+
+    q = queue.Queue()
+    approval_event = threading.Event()
+    run_workspace = _get_workspace()
+    with runs_lock:
+        active_runs[thread_id] = RunContext(
+            thread_id=thread_id,
+            workspace_dir=run_workspace,
+            queue=q,
+            status="running",
+            mode="agenthub_demo",
+            approval_event=approval_event,
+        )
+
+    event_store.create_session(
+        thread_id=thread_id,
+        prompt=prompt,
+        workspace_dir=run_workspace,
+        status="running",
+        mode="agenthub_demo",
+    )
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="run_started",
+        title="Demo Run 已启动",
+        content=prompt,
+        payload={"workspace_dir": run_workspace, "thread_id": thread_id, "mode": "agenthub_demo"},
+        workspace_dir=run_workspace,
+    )
+
+    def update_status(status: str):
+        with runs_lock:
+            if thread_id in active_runs:
+                active_runs[thread_id].set_status(status)
+
+    def wait_for_approval(timeout_seconds: float) -> str | None:
+        approval_event.wait(timeout_seconds)
+        with runs_lock:
+            run_info = active_runs.get(thread_id) or {}
+            return run_info.get("approval_decision")
+
+    t = threading.Thread(
+        target=emit_demo_run,
+        kwargs={
+            "thread_id": thread_id,
+            "workspace_dir": run_workspace,
+            "store": event_store,
+            "status_callback": update_status,
+            "approval_waiter": wait_for_approval,
+        },
+        daemon=True,
+    )
+    active_runs[thread_id].thread = t
+    t.start()
+
+    return RunResponse(thread_id=thread_id, status="started")
+
+
+@app.get("/api/benchmarks")
+async def get_agenthub_benchmarks():
+    """获取固定基准任务目录。"""
+    return BenchmarkListResponse(benchmarks=list_benchmarks(_get_workspace()))
+
+
+@app.post("/api/benchmarks/run")
+async def start_agenthub_benchmark_run(request: BenchmarkRunRequest):
+    """启动一个固定 Benchmark 运行。"""
+    try:
+        benchmark = get_benchmark(request.benchmark_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    thread_id = request.thread_id or f"benchmark-{request.benchmark_id}-{uuid.uuid4()}"
+
+    if request.workspace_dir:
+        _set_active_workspace(request.workspace_dir)
+
+    run_workspace = _get_workspace()
+    q = queue.Queue()
+    with runs_lock:
+        active_runs[thread_id] = RunContext(
+            thread_id=thread_id,
+            workspace_dir=run_workspace,
+            queue=q,
+            status="running",
+            mode="agenthub_benchmark",
+            metadata={"benchmark_id": request.benchmark_id},
+        )
+
+    event_store.create_session(
+        thread_id=thread_id,
+        prompt=benchmark["prompt"],
+        workspace_dir=run_workspace,
+        status="running",
+        mode="agenthub_benchmark",
+    )
+    event_store.update_session(thread_id, run_workspace, benchmark_id=request.benchmark_id)
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="run_started",
+        title="Benchmark Run 已启动",
+        content=benchmark["prompt"],
+        payload={
+            "workspace_dir": run_workspace,
+            "thread_id": thread_id,
+            "benchmark_id": request.benchmark_id,
+            "mode": "agenthub_benchmark",
+        },
+        workspace_dir=run_workspace,
+    )
+
+    def update_status(status: str):
+        with runs_lock:
+            if thread_id in active_runs:
+                active_runs[thread_id].set_status(status)
+
+    t = threading.Thread(
+        target=emit_benchmark_run,
+        kwargs={
+            "thread_id": thread_id,
+            "benchmark_id": request.benchmark_id,
+            "workspace_dir": run_workspace,
+            "store": event_store,
+            "status_callback": update_status,
+        },
+        daemon=True,
+    )
+    active_runs[thread_id].thread = t
+    t.start()
+
+    return BenchmarkRunResponse(
+        thread_id=thread_id,
+        status="started",
+        benchmark_id=request.benchmark_id,
+        title=benchmark["title"],
+    )
+
+
+@app.get("/api/runs")
+async def list_agenthub_runs(
+    status: str | None = None,
+    mode: str | None = None,
+    limit: int = 50,
+):
+    """列出 AgentHub 历史运行摘要。"""
+    safe_limit = min(max(limit, 0), 200)
+    return RunHistoryResponse(
+        runs=list_run_history(
+            workspace_dir=_get_workspace(),
+            status=status,
+            mode=mode,
+            limit=safe_limit,
+        )
+    )
+
+
+@app.get("/api/runs/{thread_id}")
+async def get_agenthub_run(thread_id: str):
+    """获取 AgentHub 运行会话状态。"""
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        run_workspace = run_info.get("workspace_dir") if run_info else None
+    run_workspace = run_workspace or _get_workspace()
+    session = event_store.get_session(thread_id, run_workspace)
+
+    if not session and not run_info:
+        raise HTTPException(status_code=404, detail="未找到该运行记录")
+
+    if session is None:
+        session = {
+            "thread_id": thread_id,
+            "workspace_dir": run_workspace,
+            "status": run_info.get("status", "unknown") if run_info else "unknown",
+            "prompt": "",
+            "mode": "agenthub_delivery",
+            "created_at": None,
+            "updated_at": None,
+        }
+    elif run_info and run_info.get("status"):
+        session["status"] = run_info["status"]
+
+    return RunSessionResponse(**session)
+
+
+@app.get("/api/runs/{thread_id}/events/history")
+async def get_agenthub_event_history(thread_id: str):
+    """获取 AgentHub 运行历史事件，供刷新页面后恢复状态。"""
+    workspace_dir = _workspace_for_thread(thread_id)
+    session = event_store.get_session(thread_id, workspace_dir)
+    if not session:
+        raise HTTPException(status_code=404, detail="未找到该运行记录")
+    return RunEventsResponse(events=event_store.list_events(thread_id, workspace_dir))
+
+
+@app.post("/api/runs/{thread_id}/approval")
+async def resolve_agenthub_approval(thread_id: str, request: ApprovalDecisionRequest):
+    """记录用户对 Agent 计划的审批结果。"""
+    workspace_dir = _workspace_for_thread(thread_id)
+    session = event_store.get_session(thread_id, workspace_dir)
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+
+    if not session and not run_info:
+        raise HTTPException(status_code=404, detail="未找到该运行记录")
+
+    decision = request.decision.strip().lower()
+    if decision not in {"approved", "revise", "rejected"}:
+        raise HTTPException(status_code=400, detail="审批结果必须是 approved、revise 或 rejected")
+
+    event = event_store.append_event(
+        thread_id=thread_id,
+        event_type="approval_resolved",
+        title=_approval_title(decision),
+        content=request.comment or _approval_title(decision),
+        agent="user",
+        payload={
+            "plan_id": request.plan_id or "default-plan",
+            "decision": decision,
+            "comment": request.comment,
+        },
+        workspace_dir=workspace_dir,
+    )
+
+    with runs_lock:
+        current_run = active_runs.get(thread_id)
+        if current_run:
+            current_run.resolve_approval(decision)
+
+    return event
+
+
+@app.get("/api/runs/{thread_id}/diff")
+async def get_agenthub_run_diff(thread_id: str):
+    """获取本次运行的文件变更和 unified diff。"""
+    return get_run_diff(thread_id, _workspace_for_thread(thread_id))
+
+
+@app.get("/api/runs/{thread_id}/report")
+async def get_agenthub_run_report(thread_id: str):
+    """获取或生成本次运行的交付报告。"""
+    return build_delivery_report(thread_id, _workspace_for_thread(thread_id))
+
+
+@app.get("/api/runs/{thread_id}/quality")
+async def get_agenthub_run_quality(thread_id: str):
+    """获取本次运行的交付质量门禁结果。"""
+    return QualityGateResponse(**build_quality_gate(thread_id, _workspace_for_thread(thread_id)))
+
+
+@app.get("/api/runs/{thread_id}/score")
+async def get_agenthub_run_score(thread_id: str):
+    """获取本次运行的交付评分。"""
+    return DeliveryScoreResponse(**build_delivery_score(thread_id, _workspace_for_thread(thread_id)))
+
+
+@app.get("/api/runs/{thread_id}/traceability")
+async def get_agenthub_run_traceability(thread_id: str):
+    """获取本次运行的需求追踪矩阵。"""
+    return RequirementTraceabilityResponse(
+        **build_requirement_traceability(thread_id, _workspace_for_thread(thread_id))
+    )
+
+
+@app.get("/api/runs/{thread_id}/artifacts")
+async def get_agenthub_run_artifacts(thread_id: str):
+    """获取本次运行的交付物中心。"""
+    return ArtifactCenterResponse(**build_artifact_center(thread_id, _workspace_for_thread(thread_id)))
+
+
+@app.get("/api/runs/{thread_id}/recovery")
+async def get_agenthub_run_recovery(thread_id: str):
+    """获取本次运行的安全与恢复状态。"""
+    return RecoveryCenterResponse(**build_recovery_center(thread_id, _workspace_for_thread(thread_id)))
+
+
+@app.get("/api/runs/{thread_id}/events")
+async def stream_agenthub_events(thread_id: str):
+    """
+    AgentHub push-based SSE 事件流。
+
+    事件通过 asyncio.Queue 实时推送，客户端可立即收到。
+    先回放历史事件，然后订阅实时推送。
+    支持多个前端同时订阅同一 thread。
+    """
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        run_workspace = run_info.get("workspace_dir") if run_info else None
+    run_workspace = run_workspace or _get_workspace()
+    session = event_store.get_session(thread_id, run_workspace)
+
+    if not session and not run_info:
+        raise HTTPException(status_code=404, detail="未找到该运行记录")
+
+    return StreamingResponse(
+        stream_events_push(thread_id, run_workspace),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/tasks")
+async def get_agenthub_tasks():
+    """获取 AgentHub 标准化任务列表。"""
+    return {"tasks": list_task_items(_get_workspace())}
+
+
+@app.get("/api/team")
+async def get_agenthub_team():
+    """获取 AgentHub 标准化团队成员状态。"""
+    return {"members": list_team_members(_get_workspace())}
+
+
+@app.get("/api/capabilities")
+async def get_agenthub_capabilities():
+    """获取 AgentHub 能力中心：内置工具、MCP 连接器和 Skills。"""
+    return build_capability_hub(_get_workspace())
+
+
+@app.post("/api/capabilities/recommend")
+async def recommend_agenthub_capabilities(request: CapabilityRecommendRequest):
+    """根据用户需求推荐 Agent 组合和能力包。"""
+    return recommend_capabilities(request.prompt, _get_workspace())
+
+
+@app.post("/api/capabilities/skills")
+async def import_agenthub_skill(request: SkillImportRequest):
+    """导入工作区自定义 Skill。"""
+    try:
+        skill = import_workspace_skill(
+            name=request.name,
+            description=request.description,
+            content=request.content,
+            workspace_dir=_get_workspace(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"skill": skill, "hub": build_capability_hub(_get_workspace())}
+
+
+@app.post("/api/runs/blueprint")
+async def create_agenthub_run_blueprint(request: RunBlueprintRequest):
+    """根据用户需求生成运行前执行蓝图。"""
+    return build_run_blueprint(request.prompt, _get_workspace())
+
+
+@app.post("/api/team/agents")
+async def create_agenthub_team_agent(request: TeamAgentCreateRequest):
+    """创建自定义 Agent 角色卡。"""
+    try:
+        member = add_team_member(
+            name=request.name,
+            role=request.role,
+            goal=request.goal,
+            tools=request.tools,
+            capabilities=request.capabilities,
+            workspace_dir=_get_workspace(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"member": member, "members": list_team_members(_get_workspace())}
+
+
+@app.get("/api/preferences/profile")
+async def get_agenthub_memory_profile(min_importance: int = 0):
+    """获取用户偏好档案。"""
+    return MemoryProfileResponse(
+        **build_memory_profile(_get_workspace(), min_importance=min_importance)
+    )
+
+
+@app.post("/api/preferences")
+async def create_agenthub_preference(request: PreferenceCreateRequest):
+    """保存一条用户偏好记忆。"""
+    try:
+        memory = add_preference_memory(
+            preference_type=request.preference_type,
+            content=request.content,
+            importance=request.importance,
+            workspace_dir=_get_workspace(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"memory": memory, "profile": build_memory_profile(_get_workspace())}
+
+
+@app.get("/api/recovery")
+async def get_agenthub_recovery():
+    """获取当前工作区安全与恢复状态。"""
+    return RecoveryCenterResponse(**build_recovery_center(None, _get_workspace()))
+
+
+@app.post("/api/recovery/rollback")
+async def rollback_agenthub_file(request: RollbackRequest):
+    """从指定备份回滚文件。"""
+    try:
+        return RollbackResponse(
+            **rollback_from_backup(
+                backup_name=request.backup_name,
+                target_path=request.target_path,
+                workspace_dir=_get_workspace(),
+            )
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/workspaces")
 async def list_workspaces():
     """
@@ -591,7 +1550,17 @@ async def list_workspaces():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取工作区失败: {e!s}")
 
-    return {"workspaces": workspaces}
+    return {
+        "workspaces": workspaces,
+        "current_workspace": _get_workspace(),
+        "project_root": config_module.PROJECT_ROOT,
+    }
+
+
+@app.get("/api/workspace/overview")
+async def get_workspace_overview(workspace_dir: str | None = None):
+    """获取当前项目目录的会话、运行、能力、恢复点和代码索引摘要。"""
+    return build_workspace_overview(workspace_dir or _get_workspace())
 
 
 @app.post("/api/workspaces")
@@ -613,17 +1582,10 @@ async def set_workspace(request: dict):
     if not os.path.isabs(dir_path):
         raise HTTPException(status_code=400, detail="请输入绝对路径")
 
-    full_path = os.path.abspath(dir_path)
-
-    # 确保目录存在
-    if not os.path.isdir(full_path):
-        try:
-            os.makedirs(full_path, exist_ok=True)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"无法创建目录: {e!s}")
-
-    # 更新 config_module.WORKSPACE_DIR
-    config_module.WORKSPACE_DIR = full_path
+    try:
+        full_path = _set_active_workspace(dir_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"无法创建目录: {e!s}")
 
     return {"success": True, "workspace_dir": full_path}
 
@@ -645,7 +1607,24 @@ async def cancel_run(thread_id: str):
         raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
 
     # 直接标记为取消状态
-    run_info["status"] = "cancelled"
+    run_info.set_status("cancelled")
+    workspace_dir = run_info.get("workspace_dir") or _workspace_for_thread(thread_id)
+    event_store.update_session(thread_id, workspace_dir, status="cancelled")
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="done",
+        title="任务已取消",
+        content="用户请求取消运行",
+        agent="lead",
+        payload={"status": "cancelled"},
+        workspace_dir=workspace_dir,
+    )
+    _finalize_conversation_for_run(
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+        status="cancelled",
+        summary="用户请求取消运行",
+    )
     return CancelResponse(cancelled=True, thread_id=thread_id)
 
 
@@ -815,7 +1794,7 @@ async def read_file(file_path: str):
     # 安全检查：防止路径遍历攻击
     real_path = os.path.realpath(full_path)
     real_root = os.path.realpath(config_module.WORKSPACE_DIR)
-    if not real_path.startswith(real_root):
+    if os.path.commonpath([real_root, real_path]) != real_root:
         raise HTTPException(status_code=403, detail="禁止访问该路径")
 
     if not os.path.exists(full_path):
@@ -1392,6 +2371,75 @@ def serve_frontend(production: bool = False):
 # ============================================================
 # 启动入口
 # ============================================================
+
+# Persistence file for active runs (for graceful shutdown recovery)
+ACTIVE_RUNS_STATE_FILE = os.path.join(config_module.PROJECT_ROOT, ".nanocursor", "active_runs_state.json")
+
+def _save_active_runs_state():
+    """Persist active runs to disk for recovery after restart."""
+    state_dir = os.path.dirname(ACTIVE_RUNS_STATE_FILE)
+    os.makedirs(state_dir, exist_ok=True)
+    with runs_lock:
+        runs_snapshot = {}
+        for tid, ctx in active_runs.items():
+            runs_snapshot[tid] = {
+                "thread_id": tid,
+                "workspace_dir": ctx.get("workspace_dir", _get_workspace()),
+                "status": ctx.get("status", "unknown"),
+                "conversation_id": ctx.get("conversation_id", ""),
+                "started_at": getattr(ctx, "started_at", 0) if hasattr(ctx, "started_at") else _time.time(),
+                "mode": ctx.get("mode", "agenthub_delivery"),
+            }
+    try:
+        with open(ACTIVE_RUNS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(runs_snapshot, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+def _recover_interrupted_runs():
+    """On startup, mark any previously active runs as interrupted."""
+    if not os.path.exists(ACTIVE_RUNS_STATE_FILE):
+        return
+    try:
+        with open(ACTIVE_RUNS_STATE_FILE, "r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    recovered = 0
+    for tid, info in snapshot.items():
+        ws_dir = info.get("workspace_dir", _get_workspace())
+        session = event_store.get_session(tid, ws_dir)
+        if session and session.get("status") == "running":
+            event_store.update_session(tid, ws_dir, status="interrupted",
+                error="Server was shut down while this run was active. You can restart it.")
+            event_store.append_event(
+                thread_id=tid, event_type="error",
+                title="运行中断", content="服务在运行期间关闭。该运行已标记为 interrupted，可重新启动。",
+                agent="system", payload={"reason": "server_shutdown"},
+                workspace_dir=ws_dir,
+            )
+            recovered += 1
+
+    if recovered:
+        print(f"[startup] Recovered {recovered} interrupted run(s)")
+    # Clean up state file
+    try:
+        os.remove(ACTIVE_RUNS_STATE_FILE)
+    except OSError:
+        pass
+
+# Register shutdown and startup handlers via FastAPI lifespan
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: recover interrupted runs. Shutdown: persist active runs."""
+    _recover_interrupted_runs()
+    yield
+    _save_active_runs_state()
+
+app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     import uvicorn

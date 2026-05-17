@@ -59,6 +59,13 @@ class TestSafeFilepath:
             with pytest.raises(ValueError, match="安全拦截"):
                 _get_safe_filepath(malicious)
 
+    def test_common_prefix_sibling_escape_blocked(self, tmp_workspace):
+        from src.tools.file_tools import _get_safe_filepath
+
+        sibling = tmp_workspace.parent / f"{tmp_workspace.name}_evil" / "secret.txt"
+        with pytest.raises(ValueError, match="安全拦截"):
+            _get_safe_filepath(str(sibling))
+
 
 # ---------------------------------------------------------------------------
 # AST-aware large file reading

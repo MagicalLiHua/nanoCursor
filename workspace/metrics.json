@@ -1,17 +1,19 @@
 {
   "llm": {
-    "total_calls": 4,
-    "total_tokens": 2894,
-    "avg_tokens_per_call": 723.5,
-    "avg_latency_ms": 8307.8,
-    "max_latency_ms": 15569.3,
-    "min_latency_ms": 2865.0
+    "total_calls": 0,
+    "total_tokens": 0,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "avg_tokens_per_call": 0,
+    "avg_latency_ms": 0,
+    "max_latency_ms": 0,
+    "min_latency_ms": 0
   },
   "tool_calls": {
-    "total": 1,
-    "successes": 1,
+    "total": 0,
+    "successes": 0,
     "failures": 0,
-    "success_rate": 1.0,
+    "success_rate": 0,
     "failure_reasons": []
   },
   "repair_cycles": {
@@ -19,26 +21,5 @@
     "outcomes": []
   },
   "supervisor_decisions": [],
-  "recent_llm_records": [
-    {
-      "node": "unknown",
-      "tokens": 1809,
-      "latency_ms": 7069.5
-    },
-    {
-      "node": "unknown",
-      "tokens": 170,
-      "latency_ms": 2865.0
-    },
-    {
-      "node": "unknown",
-      "tokens": 394,
-      "latency_ms": 7727.3
-    },
-    {
-      "node": "unknown",
-      "tokens": 521,
-      "latency_ms": 15569.3
-    }
-  ]
+  "recent_llm_records": []
 }
