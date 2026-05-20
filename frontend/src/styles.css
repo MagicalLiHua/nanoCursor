@@ -490,6 +490,28 @@ button {
   font-weight: 720;
 }
 
+.workspace-default-note {
+  padding: 8px;
+  border: 1px solid rgba(168, 111, 24, 0.18);
+  border-radius: 8px;
+  background: #fff8ed;
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.project-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.project-actions .button {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
 .project-card-header,
 .project-section-header {
   display: flex;
@@ -652,6 +674,87 @@ button.project-mini-item:hover {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.health-checks {
+  display: grid;
+  gap: 6px;
+}
+
+.health-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.health-check.ok {
+  color: var(--green);
+}
+
+.health-check.warn {
+  color: var(--coral);
+}
+
+.health-check span {
+  font-weight: 820;
+  font-size: 13px;
+}
+
+/* Settings panel */
+.settings-panel {
+  display: grid;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.settings-group {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-group h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 820;
+  color: var(--text);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-field {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-field label {
+  font-size: 12px;
+  font-weight: 720;
+  color: var(--muted);
+}
+
+.settings-field input[type="text"],
+.settings-field input[type="number"] {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-field.checkbox {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field.checkbox label {
+  font-size: 13px;
+  color: var(--text);
 }
 
 .file-tree {
@@ -1742,25 +1845,45 @@ button.project-mini-item:hover {
   background: #f7fbff;
 }
 
-.skill-import-panel div {
+.mcp-config-panel {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(20, 148, 112, 0.18);
+  border-radius: 8px;
+  background: #f6fffb;
+}
+
+.mcp-config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.skill-import-panel div,
+.mcp-config-panel div {
   display: grid;
   gap: 3px;
 }
 
-.skill-import-panel strong {
+.skill-import-panel strong,
+.mcp-config-panel strong {
   color: var(--text);
   font-size: 13px;
   font-weight: 820;
 }
 
-.skill-import-panel span {
+.skill-import-panel span,
+.mcp-config-panel span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .skill-import-panel input,
-.skill-import-panel textarea {
+.skill-import-panel textarea,
+.mcp-config-panel input,
+.mcp-config-panel textarea {
   width: 100%;
   min-width: 0;
   padding: 9px 10px;
@@ -1772,12 +1895,15 @@ button.project-mini-item:hover {
   font-size: 12px;
 }
 
-.skill-import-panel textarea {
+.skill-import-panel textarea,
+.mcp-config-panel textarea {
   resize: vertical;
 }
 
 .skill-import-panel input:focus,
-.skill-import-panel textarea:focus {
+.skill-import-panel textarea:focus,
+.mcp-config-panel input:focus,
+.mcp-config-panel textarea:focus {
   border-color: rgba(47, 111, 221, 0.48);
   box-shadow: 0 0 0 3px rgba(47, 111, 221, 0.1);
 }
@@ -1939,6 +2065,193 @@ button.project-mini-item:hover {
   font-size: 11px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+/* MCP fields inside capability cards */
+.mcp-fields {
+  display: grid;
+  gap: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+}
+
+.mcp-field {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.mcp-field strong {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 820;
+  line-height: 1.45;
+}
+
+.mcp-field span,
+.mcp-field code {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.mcp-field code {
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  background: var(--surface-soft);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.mcp-hint {
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.mcp-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-validation {
+  display: grid;
+  gap: 4px;
+  padding-top: 4px;
+}
+
+.mcp-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.mcp-check-label {
+  font-weight: 820;
+  min-width: 70px;
+}
+
+.mcp-check-detail {
+  color: var(--muted);
+  font-weight: 650;
+  flex: 1;
+}
+
+.mcp-check.passed .mcp-check-label { color: var(--green); }
+.mcp-check.warning .mcp-check-label { color: var(--amber); }
+.mcp-check.failed .mcp-check-label { color: var(--coral); }
+.mcp-check.planned .mcp-check-label { color: var(--muted); }
+
+/* Skill detail panel */
+.skill-detail-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.skill-detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.skill-detail-header > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.skill-detail-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 820;
+  color: var(--text);
+}
+
+.badge.builtin {
+  background: var(--violet);
+  color: #fff;
+}
+
+.skill-detail-meta {
+  display: grid;
+  gap: 7px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.skill-detail-meta div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.skill-detail-meta strong {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 820;
+  line-height: 1.45;
+}
+
+.skill-detail-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.skill-detail-content pre {
+  margin: 0;
+  padding: 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  color: var(--text);
+}
+
+.skill-edit-textarea {
+  width: 100%;
+  padding: 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--blue);
+  border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.skill-detail-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-top: 4px;
+}
+
+.muted-hint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .metric-item {
@@ -2198,6 +2511,10 @@ button.project-mini-item:hover {
 
 .bottom-collapse-button {
   margin-left: auto;
+}
+
+.workspace:not(.bottom-collapsed) .prompt-box {
+  display: none;
 }
 
 .bottom-content {
@@ -3186,6 +3503,73 @@ button.project-mini-item:hover {
   color: var(--green);
   font-size: 13px;
   font-weight: 720;
+}
+
+.recovery-failure-groups {
+  padding-top: 4px;
+}
+
+.recovery-failure-groups h3 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 820;
+  color: var(--text);
+}
+
+.failure-group-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.failure-group-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.failure-group-chip strong {
+  font-size: 13px;
+  font-weight: 820;
+  color: var(--text);
+}
+
+.remediation-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.remediation-panel h3 {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  font-weight: 820;
+  color: var(--coral);
+}
+
+.remediation-panel p {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.remediation-panel input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text);
 }
 
 .empty {

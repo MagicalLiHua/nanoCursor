@@ -11,8 +11,13 @@ from typing import Any
 
 from src.infra.logger import logger
 
-# DB path — project root
-_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "nanocursor.db")
+# DB path — project root by default, overridable for tests and isolated tooling.
+_DB_PATH = os.path.abspath(os.path.expanduser(
+    os.getenv(
+        "NANOCURSOR_DB_PATH",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "nanocursor.db"),
+    )
+))
 
 
 def get_db_path() -> str:

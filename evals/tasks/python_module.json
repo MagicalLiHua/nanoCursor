@@ -1,0 +1,22 @@
+{
+  "id": "python_module",
+  "title": "Create Python Utility Module",
+  "fixture": "python_module",
+  "prompt": "Create a helpers.py module with a square(n) function and a test for it.",
+  "category": "small_feature",
+  "difficulty": "easy",
+  "timeout_seconds": 120,
+  "test_command": "pytest -q tests/",
+  "expected_signals": {
+    "required_events": [
+      "plan_created",
+      "tool_call_finished",
+      "done"
+    ],
+    "tests_pass": true,
+    "max_changed_files": 3,
+    "required_files": [
+      "helpers.py"
+    ]
+  }
+}

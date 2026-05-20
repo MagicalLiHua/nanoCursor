@@ -7,5 +7,8 @@
     "dev": "node scripts/serve.mjs",
     "preview": "node scripts/serve.mjs",
     "check": "node --check src/main.js && node --check scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }

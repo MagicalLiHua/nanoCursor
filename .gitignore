@@ -50,6 +50,8 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
 
 # ==========================================
 # nanoCursor Runtime Artifacts
@@ -65,11 +67,11 @@ workspace/
 .transcripts/
 .task_outputs/
 skills/
+.nanocursor/
 .nanocursor.db
 *.db
 metrics_history.json
 .nanoCursor
-docs/
 memory/
 
 # LangGraph checkpointer (旧版兼容)
@@ -77,6 +79,7 @@ memory/
 
 # 日志
 *.log
+docs/
 
 # 操作系统
 .DS_Store

@@ -1,0 +1,22 @@
+{
+  "id": "frontend_add_heading",
+  "title": "Add Page Heading",
+  "fixture": "frontend_add_heading",
+  "prompt": "Add an <h1> heading 'My App' at the top of index.html.",
+  "category": "frontend_polish",
+  "difficulty": "easy",
+  "timeout_seconds": 120,
+  "test_command": "grep -q '<h1>My App</h1>' index.html",
+  "expected_signals": {
+    "required_events": [
+      "plan_created",
+      "file_changed",
+      "done"
+    ],
+    "tests_pass": true,
+    "max_changed_files": 1,
+    "required_files": [
+      "index.html"
+    ]
+  }
+}

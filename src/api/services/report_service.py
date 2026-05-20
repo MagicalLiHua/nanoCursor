@@ -1,11 +1,13 @@
-"""Delivery report generation for AgentHub runs."""
+"""Delivery report generation for nanoCursor runs."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
+from src.api.services.capability_usage_service import build_capability_usage
 from src.api.services.diff_service import get_run_diff
+from src.api.services.eval_service import build_aggregate_metrics
 from src.api.services.event_store import get_event_store
 from src.infra import config as config_module
 
@@ -80,12 +82,12 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     summary = (
         assistant_messages[-1][:300]
         if assistant_messages
-        else "AgentHub run has not produced a final assistant message yet."
+        else "nanoCursor run has not produced a final assistant message yet."
     )
     status = _status_text(session)
 
     lines = [
-        "# AgentHub Delivery Report",
+        "# nanoCursor Delivery Report",
         "",
         "## Summary",
         "",
@@ -122,6 +124,32 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     else:
         lines.append("- No tool calls recorded yet.")
 
+    # Capabilities Used
+    lines.extend(["", "## Capabilities Used", ""])
+    cap_evidence: list[dict[str, Any]] = []
+    try:
+        cap_usage = build_capability_usage(thread_id, str(workspace))
+        caps = cap_usage.get("capabilities", [])
+        if caps:
+            lines.append("| Capability | Kind | Status | Evidence |")
+            lines.append("|---|---|---|---|")
+            for cap in caps:
+                ev_count = len(cap.get("evidence", []))
+                lines.append(f"| {cap['name']} | {cap['kind']} | {cap['status']} | {ev_count} events |")
+        else:
+            lines.append("- No capability evidence recorded.")
+        cap_evidence = caps
+    except Exception:
+        lines.append("- Capability usage data is not available for this run.")
+
+    # Run Metrics
+    lines.extend(["", "## Run Metrics", ""])
+    lines.append(f"- LLM calls: {sum(1 for e in events if e.type == 'llm_response') or 'N/A'}")
+    lines.append(f"- Tool calls: {len(tool_events)}")
+    lines.append(f"- Errors: {len(error_events)}")
+    lines.append(f"- Events total: {len(events)}")
+    lines.append("")
+
     lines.extend(["", "## Risks", ""])
     if error_events:
         lines.extend(f"- {event.content}" for event in error_events[-5:])
@@ -147,5 +175,6 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
         "requirements": [prompt] if prompt else [],
         "changed_files": changed_files,
         "risks": [event.content for event in error_events[-5:]],
+        "capabilities_used": cap_evidence,
         "source": "generated",
     }

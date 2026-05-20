@@ -48,7 +48,11 @@ def test_conversation_run_persists_execution_plan_and_events(tmp_path, monkeypat
     events = api_server.event_store.list_events(thread_id, str(workspace))
     event_types = [event.type for event in events]
 
-    assert session["execution_plan"]["strategy"] == "team_aware_run_per_message"
+    assert "strategy" in session["execution_plan"]
+    assert session["execution_plan"]["strategy"] in {
+        "feature_delivery", "small_patch", "bug_fix", "refactor",
+        "docs_only", "analysis_only",
+    }
     assert any(stage["id"] == "diff_review" for stage in session["execution_plan"]["stages"])
     assert all(stage["status"] in {"completed", "skipped"} for stage in session["execution_plan"]["stages"])
     assert "plan_created" in event_types

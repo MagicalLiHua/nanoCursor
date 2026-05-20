@@ -23,7 +23,24 @@ from src.api.services.score_service import build_delivery_score
 from src.api.services.traceability_service import build_requirement_traceability
 from src.api.services.event_store import EventStore
 from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
-from src.api.services.workspace_service import build_workspace_overview
+from src.api.services.workspace_registry_service import get_workspace_identity, list_recent_projects, open_project
+from src.api.services.workspace_service import build_workspace_health, build_workspace_overview
+from src.api.services.workspace_settings_service import get_workspace_settings, save_workspace_settings
+from src.agent.context_pack import ContextPack
+from src.agent.strategy.planner import select_strategy
+from src.agent.strategy.tool_policy import ToolPolicy
+from src.api.services.checkpoint_service import create_checkpoint, list_checkpoints, restore_checkpoint
+from src.api.services.eval_service import build_aggregate_metrics, list_evals, run_eval
+from src.api.services.git_sandbox_service import commit_branch, discard_branch, git_branch_status, prepare_git_branch
+from src.api.services.recovery_service import _action_risk_level
+from src.runtime.run_events import enrich_event
+from src.runtime.run_manager import RunManager
+from src.runtime.run_state import RunStateMachine, RunStatus
+from src.api.services.mcp_service import list_mcp_servers, upsert_mcp_server_config, validate_mcp_config
+from src.api.services.capability_usage_service import build_capability_usage
+from src.api.services.failure_classifier_service import classify_failure
+from src.api.services.recovery_action_service import execute_recovery_action
+from src.api.services.skill_service import delete_workspace_skill, get_skill_detail, update_workspace_skill
 
 
 def test_list_task_items_normalizes_workspace_tasks(tmp_path):
@@ -387,6 +404,17 @@ def test_build_delivery_report_includes_execution_stages(tmp_path):
     assert "## Execution Stages" in report["markdown"]
     assert "代码实现" in report["markdown"]
     assert "write_file" in report["markdown"]
+
+
+def test_build_delivery_report_handles_missing_capability_usage(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    report = build_delivery_report("missing-run", str(workspace))
+
+    assert report["source"] == "generated"
+    assert report["capabilities_used"] == []
+    assert "Capability usage data is not available" in report["markdown"]
 
 
 def test_derive_task_created_event(tmp_path):
@@ -1058,3 +1086,734 @@ def test_rollback_from_backup_blocks_path_escape(tmp_path):
         assert "escapes workspace" in str(exc)
     else:
         raise AssertionError("path escape should fail")
+
+
+# --- MCP config detail tests ---
+
+def test_list_mcp_servers_parses_config(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"github": {"command": "node", "args": ["server.js"], "env": {"GITHUB_TOKEN": "xxx"}}}}),
+        encoding="utf-8",
+    )
+    result = list_mcp_servers(str(workspace))
+
+    assert ".mcp.json" in result["config_paths"]
+    github = next(s for s in result["servers"] if s["id"] == "mcp.github")
+    assert github["status"] == "configured"
+    assert github["command"] == "node"
+    assert github["args"] == ["server.js"]
+    assert "GITHUB_TOKEN" in github["env_keys"]
+    assert github["source"] == ".mcp.json"
+
+
+def test_list_mcp_servers_includes_templates_when_no_config(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = list_mcp_servers(str(workspace))
+
+    assert len(result["config_paths"]) == 0
+    template_ids = [s["id"] for s in result["servers"] if s["status"] == "planned"]
+    assert "mcp.github" in template_ids
+    assert "mcp.figma" in template_ids
+    assert "mcp.docs" in template_ids
+
+
+def test_list_mcp_servers_scans_multiple_config_paths(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".cursor").mkdir(parents=True)
+    (workspace / ".cursor" / "mcp.json").write_text(
+        json.dumps({"servers": {"figma": {"command": "figma-mcp"}}}),
+        encoding="utf-8",
+    )
+    result = list_mcp_servers(str(workspace))
+
+    assert ".cursor/mcp.json" in result["config_paths"]
+    assert str(workspace / ".mcp.json").split("/")[-1] not in [p.split("/")[-1] for p in result["config_paths"]]
+    figma = next(s for s in result["servers"] if s["id"] == "mcp.figma")
+    assert figma["status"] == "configured"
+    assert figma["source"] == ".cursor/mcp.json"
+
+
+def test_upsert_mcp_server_config_writes_workspace_config(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    server = upsert_mcp_server_config(
+        "mcp.github",
+        "npx",
+        ["-y", "@modelcontextprotocol/server-github"],
+        ["GITHUB_TOKEN"],
+        str(workspace),
+    )
+    result = list_mcp_servers(str(workspace))
+
+    assert server["id"] == "mcp.github"
+    assert ".nanocursor/mcp.json" in result["config_paths"]
+    github = next(s for s in result["servers"] if s["id"] == "mcp.github")
+    assert github["status"] == "configured"
+    assert github["command"] == "npx"
+    assert github["args"] == ["-y", "@modelcontextprotocol/server-github"]
+    assert "GITHUB_TOKEN" in github["env_keys"]
+
+
+def test_capability_hub_deduplicates_configured_mcp(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    upsert_mcp_server_config("github", "npx", ["server"], [], str(workspace))
+
+    hub = build_capability_hub(str(workspace))
+    github_cards = [item for item in hub["capabilities"] if item["id"] == "mcp.github"]
+
+    assert len(github_cards) == 1
+    assert github_cards[0]["status"] == "configured"
+
+
+def test_validate_mcp_config_checks_command(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"github": {"args": ["server.js"]}}}),
+        encoding="utf-8",
+    )
+    result = validate_mcp_config(server_id="mcp.github", workspace_dir=str(workspace))
+
+    checks = result.get("servers", {}).get("mcp.github", {}).get("checks", [])
+    command_check = next((c for c in checks if c["id"] == "command_exists"), None)
+    assert command_check is not None
+    assert command_check["status"] in ("warning", "planned")
+
+
+# --- Skill detail / CRUD tests ---
+
+def test_get_skill_detail_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill = import_workspace_skill("api-review", "API review", "# API Review\n\nCheck API endpoints.", str(workspace))
+    skill_id = skill["id"]
+
+    detail = get_skill_detail(skill_id, str(workspace))
+    assert detail["id"] == skill_id
+    assert detail["name"] == "API Review"
+    assert detail["status"] == "configured"
+    assert "API Review" in detail["content"]
+    assert detail["source"] != "built-in"
+
+
+def test_get_skill_detail_builtin():
+    detail = get_skill_detail("skill.frontend-polish")
+    assert detail["id"] == "skill.frontend-polish"
+    assert detail["source"] == "built-in"
+    assert detail["status"] == "ready"
+    assert len(detail["content"]) > 0
+
+
+def test_update_workspace_skill(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill = import_workspace_skill("api-review", "API review", "# Old Content", str(workspace))
+    skill_id = skill["id"]
+
+    updated = update_workspace_skill(skill_id, "# New Content\n\nUpdated.", str(workspace))
+    assert updated["id"] == skill_id
+    assert "New Content" in updated["content"]
+
+    detail = get_skill_detail(skill_id, str(workspace))
+    assert "New Content" in detail["content"]
+
+
+def test_update_builtin_skill_fails():
+    try:
+        update_workspace_skill("skill.frontend-polish", "# Hacked", workspace_dir=".")
+    except ValueError as exc:
+        assert "只能查看" in str(exc)
+    else:
+        raise AssertionError("updating built-in skill should fail")
+
+
+def test_delete_workspace_skill(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill = import_workspace_skill("temp-skill", "temp", "# Temp", str(workspace))
+    skill_id = skill["id"]
+
+    result = delete_workspace_skill(skill_id, str(workspace))
+    assert result["ok"] is True
+
+    try:
+        get_skill_detail(skill_id, str(workspace))
+    except ValueError as exc:
+        assert "不存在" in str(exc)
+    else:
+        raise AssertionError("deleted skill should not be found")
+
+
+def test_delete_builtin_skill_fails():
+    try:
+        delete_workspace_skill("skill.delivery-review", workspace_dir=".")
+    except ValueError as exc:
+        assert "不能删除" in str(exc)
+    else:
+        raise AssertionError("deleting built-in skill should fail")
+
+
+# --- Capability usage tests ---
+
+def test_build_capability_usage_from_events(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("usage-run", "Test prompt", str(workspace), status="completed")
+    store.append_event("usage-run", "tool_call_finished", title="wrote file", payload={
+        "tool": "write_file",
+        "capability_trace": {"capability_id": "tool.file_ops", "capability_name": "文件读写", "kind": "tool", "agent": "Coder", "tool": "write_file"},
+        "stage_id": "implement",
+    }, workspace_dir=str(workspace))
+    store.append_event("usage-run", "tool_call_finished", title="ran bash", payload={
+        "tool": "bash",
+        "capability_trace": {"capability_id": "skill.delivery-review", "capability_name": "交付复核", "kind": "skill", "agent": "Tester", "tool": "bash"},
+        "stage_id": "verify",
+    }, workspace_dir=str(workspace))
+    store.append_event("usage-run", "tool_call_finished", title="searched code", payload={
+        "tool": "search_codebase",
+        "capability_trace": {"capability_id": "tool.project_index", "capability_name": "项目索引", "kind": "tool", "agent": "Planner", "tool": "search_codebase"},
+        "stage_id": "plan",
+    }, workspace_dir=str(workspace))
+
+    usage = build_capability_usage("usage-run", str(workspace))
+    assert usage["thread_id"] == "usage-run"
+    assert usage["summary"]["used_count"] == 3
+    assert usage["summary"]["tool_count"] == 2
+    assert usage["summary"]["skill_count"] == 1
+
+    caps_by_id = {c["id"]: c for c in usage["capabilities"]}
+    assert caps_by_id["tool.file_ops"]["status"] == "used"
+    assert len(caps_by_id["tool.file_ops"]["evidence"]) == 1
+    assert caps_by_id["skill.delivery-review"]["status"] == "used"
+    assert caps_by_id["tool.project_index"]["status"] == "used"
+
+
+def test_build_capability_usage_includes_planned(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    session = store.create_session("planned-run", "Test", str(workspace), status="running")
+    store.update_session("planned-run", str(workspace), execution_plan={
+        "stages": [
+            {"id": "intake", "title": "接收需求", "capabilities": ["tool.memory"]},
+            {"id": "plan", "title": "规划", "capabilities": ["tool.project_index"]},
+            {"id": "implement", "title": "实现", "capabilities": ["tool.file_ops", "skill.frontend-polish"]},
+        ]
+    })
+
+    usage = build_capability_usage("planned-run", str(workspace))
+    assert usage["thread_id"] == "planned-run"
+    caps_by_id = {c["id"]: c for c in usage["capabilities"]}
+    assert "tool.memory" in caps_by_id
+    assert caps_by_id["tool.memory"]["status"] == "planned"
+    assert "skill.frontend-polish" in caps_by_id
+    assert caps_by_id["skill.frontend-polish"]["status"] == "planned"
+
+
+def test_build_capability_usage_nonexistent_run():
+    try:
+        build_capability_usage("nonexistent-run-id", workspace_dir=".")
+    except ValueError as exc:
+        assert "不存在" in str(exc)
+    else:
+        raise AssertionError("nonexistent run should raise ValueError")
+
+
+# --- Failure classifier tests ---
+
+def test_classify_failure_test():
+    result = classify_failure("FAILED: test_app.py::test_home - AssertionError: assert 1 == 2")
+    assert result["category"] == "test_failure"
+    assert result["confidence"] == "high"
+
+
+def test_classify_failure_syntax():
+    result = classify_failure("SyntaxError: invalid syntax at line 42")
+    assert result["category"] == "syntax_error"
+    assert result["confidence"] == "high"
+
+
+def test_classify_failure_permission():
+    result = classify_failure("Permission denied: cannot write to /etc/config")
+    assert result["category"] == "permission_denied"
+    assert result["confidence"] == "high"
+
+
+def test_classify_failure_unknown():
+    result = classify_failure("Something went wrong but we don't know what")
+    assert result["category"] == "unknown"
+    assert result["confidence"] == "low"
+
+
+# --- Recovery action execution tests ---
+
+def test_execute_inspect_failed_stage(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("test-run", "Test", str(workspace), status="failed")
+    store.update_session("test-run", str(workspace), execution_plan={
+        "stages": [
+            {"id": "implement", "title": "实现", "status": "failed", "failure": "tool error", "tool_evidence": []},
+            {"id": "verify", "title": "验证", "status": "skipped"},
+        ]
+    })
+
+    result = execute_recovery_action("test-run", "inspect-failed-stage", "", False, str(workspace))
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert "实现" in result["message"]
+
+
+def test_execute_restore_backup_requires_confirmed(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("test-run", "Test", str(workspace))
+
+    try:
+        execute_recovery_action("test-run", "restore-backup", "file.bak", False, str(workspace))
+    except ValueError as exc:
+        assert "confirmed" in str(exc)
+    else:
+        raise AssertionError("restore-backup without confirmed should fail")
+
+
+def test_execute_rerun_tests(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("test-run", "Test", str(workspace))
+
+    result = execute_recovery_action("test-run", "rerun-tests", "", False, str(workspace))
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+
+
+# --- E1 Workspace registry / settings / health tests ---
+
+def test_open_project_writes_workspace_json(tmp_path):
+    proj = tmp_path / "myproject"
+    proj.mkdir()
+    result = open_project(str(proj))
+    assert result["path"] == str(proj)
+    assert result["workspace_id"].startswith("ws_")
+    assert result["schema_version"] == 1
+    assert (proj / ".nanocursor" / "workspace.json").exists()
+    identity = json.loads((proj / ".nanocursor" / "workspace.json").read_text(encoding="utf-8"))
+    assert identity["trusted"] is False
+    assert identity["schema_version"] == 1
+
+
+def test_open_project_updates_recent(tmp_path):
+    proj = tmp_path / "myproject"
+    proj.mkdir()
+    open_project(str(proj))
+    recent = list_recent_projects()
+    assert any(r["path"] == str(proj) for r in recent)
+
+
+def test_open_project_preserves_workspace_id_when_directory_moves(tmp_path):
+    old_proj = tmp_path / "old"
+    new_proj = tmp_path / "new"
+    old_proj.mkdir()
+    new_proj.mkdir()
+
+    identity = open_project(str(old_proj))
+    nc_dir = new_proj / ".nanocursor"
+    nc_dir.mkdir()
+    (nc_dir / "workspace.json").write_text(
+        json.dumps(identity, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    moved = open_project(str(new_proj))
+
+    assert moved["workspace_id"] == identity["workspace_id"]
+    assert moved["path"] == str(new_proj)
+    assert moved["previous_path"] == str(old_proj)
+
+
+def test_open_project_rejects_relative_path():
+    try:
+        open_project("relative/path")
+    except ValueError as exc:
+        assert "绝对路径" in str(exc)
+    else:
+        raise AssertionError("relative path should fail")
+
+
+def test_workspace_health(tmp_path):
+    proj = tmp_path / "myproject"
+    proj.mkdir()
+    health = build_workspace_health(str(proj))
+    assert health["exists"] is True
+    assert health["writable"] is True
+    assert health["is_git_repo"] is False
+    assert "run_count" in health
+
+
+def test_get_set_workspace_settings(tmp_path):
+    proj = tmp_path / "myproject"
+    proj.mkdir()
+    settings = get_workspace_settings(str(proj))
+    assert "model" in settings
+    assert "safety" in settings
+
+    saved = save_workspace_settings({"model": {"provider": "deepseek"}}, str(proj))
+    assert saved["model"]["provider"] == "deepseek"
+
+    reloaded = get_workspace_settings(str(proj))
+    assert reloaded["model"]["provider"] == "deepseek"
+
+
+def test_get_workspace_settings_defaults(tmp_path):
+    proj = tmp_path / "myproject"
+    proj.mkdir()
+    settings = get_workspace_settings(str(proj))
+    assert settings["safety"]["require_approval_for_shell"] is True
+    assert settings["safety"]["require_approval_for_file_delete"] is True
+    assert "node_modules" in settings["indexing"]["ignore"]
+
+
+# --- E2 State machine / RunManager tests ---
+
+def test_state_machine_valid_transitions():
+    sm = RunStateMachine(RunStatus.CREATED)
+    sm.transition(RunStatus.RUNNING)
+    assert sm.status == RunStatus.RUNNING
+    sm.transition(RunStatus.VALIDATING)
+    assert sm.status == RunStatus.VALIDATING
+    sm.transition(RunStatus.COMPLETED)
+    assert sm.status == RunStatus.COMPLETED
+    assert sm.is_terminal()
+
+
+def test_state_machine_invalid_transition_raises():
+    sm = RunStateMachine(RunStatus.RUNNING)
+    try:
+        sm.transition(RunStatus.CREATED)
+    except ValueError as exc:
+        assert "不允许的状态转移" in str(exc)
+    else:
+        raise AssertionError("invalid transition should raise ValueError")
+
+
+def test_state_machine_terminal():
+    sm = RunStateMachine(RunStatus.COMPLETED)
+    assert sm.is_terminal()
+    sm2 = RunStateMachine(RunStatus.CANCELLED)
+    assert sm2.is_terminal()
+    sm3 = RunStateMachine(RunStatus.RUNNING)
+    assert not sm3.is_terminal()
+
+
+def test_state_machine_history():
+    sm = RunStateMachine(RunStatus.CREATED)
+    sm.transition(RunStatus.PLANNING)
+    sm.transition(RunStatus.RUNNING)
+    assert sm.history() == [RunStatus.CREATED, RunStatus.PLANNING, RunStatus.RUNNING]
+
+
+def test_run_manager_detect_interrupted(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("orphan-run", "Test", str(workspace), status="running")
+    rm = RunManager()
+    interrupted = rm.detect_interrupted(str(workspace))
+    assert "orphan-run" in interrupted
+    session = store.get_session("orphan-run", str(workspace))
+    assert session["status"] == "interrupted"
+
+
+def test_run_manager_register_unregister(tmp_path):
+    from unittest.mock import MagicMock
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ctx = MagicMock()
+    ctx.thread_id = "test-run"
+    ctx.workspace_dir = str(workspace)
+    ctx.metadata = {}
+
+    rm = RunManager()
+    rm.register(ctx)
+    assert rm.get("test-run") is not None
+    rm.unregister("test-run")
+    assert rm.get("test-run") is None
+
+
+def test_run_manager_rejects_second_write_run_same_workspace(tmp_path):
+    from unittest.mock import MagicMock
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    first = MagicMock()
+    first.thread_id = "run-1"
+    first.workspace_dir = str(workspace)
+    first.metadata = {"mode": "agenthub_delivery"}
+
+    second = MagicMock()
+    second.thread_id = "run-2"
+    second.workspace_dir = str(workspace)
+    second.metadata = {"mode": "agenthub_delivery"}
+
+    rm = RunManager()
+    rm.register(first)
+    try:
+        rm.register(second)
+    except ValueError as exc:
+        assert "同时只允许一个写入型 run" in str(exc)
+    else:
+        raise AssertionError("second write run should be rejected")
+    assert rm.get("run-2") is None
+
+
+def test_event_schema_enrich():
+    raw = {"type": "done", "title": "完成"}
+    enriched = enrich_event(raw, thread_id="t1")
+    assert enriched["schema_version"] == 1
+    assert enriched["thread_id"] == "t1"
+    assert "event_id" in enriched
+    assert "created_at" in enriched
+    assert enriched["severity"] == "info"
+
+    error_event = enrich_event({"type": "error"}, thread_id="t2")
+    assert error_event["severity"] == "error"
+
+
+# --- E3 Strategy / Context Pack tests ---
+
+def test_context_pack_to_text():
+    pack = ContextPack(
+        task_summary="修复导入错误",
+        relevant_files=["src/app.py", "tests/test_app.py"],
+        selected_skills=["skill.delivery-review"],
+    )
+    text = pack.to_text()
+    assert "修复导入错误" in text
+    assert "src/app.py" in text
+    assert "skill.delivery-review" in text
+    assert "Token 预算" in text
+
+
+def test_context_pack_estimate_tokens():
+    pack = ContextPack(task_summary="A" * 300)
+    assert pack.estimate_tokens() > 50
+
+
+def test_select_strategy_bug_fix():
+    assert select_strategy("帮我修复一个导入错误") == "bug_fix"
+    assert select_strategy("fix the bug in login") == "bug_fix"
+
+
+def test_select_strategy_small_patch():
+    assert select_strategy("改个配置项") == "small_patch"
+    assert select_strategy("typo fix") == "small_patch"
+
+
+def test_select_strategy_docs_only():
+    assert select_strategy("写一下README文档") == "docs_only"
+
+
+def test_select_strategy_default():
+    assert select_strategy("帮我做一个完整的用户登录功能") == "feature_delivery"
+
+
+def test_tool_policy_check():
+    policy = ToolPolicy(
+        allowed_tools=["read_file", "write_file"],
+        denied_tools=["delete_file"],
+    )
+    assert policy.check("read_file") is True
+    assert policy.check("delete_file") is False
+    assert policy.check("unknown_tool") is False
+
+
+def test_tool_policy_budget():
+    policy = ToolPolicy(
+        allowed_tools=["read_file"],
+        budgets={"max_tool_calls": 5, "max_file_writes": 2},
+    )
+    assert policy.within_budget(3, 1) is True
+    assert policy.within_budget(6, 0) is False
+    assert policy.within_budget(3, 3) is False
+
+
+# --- E4 Checkpoint / Git sandbox tests ---
+
+def test_create_checkpoint(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("print('hello')", encoding="utf-8")
+    meta = create_checkpoint(
+        filepath="app.py", reason="before edit", stage_id="implement",
+        thread_id="test-run", workspace_dir=str(workspace),
+    )
+    assert meta["filepath"] == "app.py"
+    assert meta["reason"] == "before edit"
+    checkpoints_dir = workspace / ".checkpoints" / "test-run"
+    assert checkpoints_dir.exists()
+
+
+def test_list_checkpoints(tmp_path):
+    import time as _time
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("v1", encoding="utf-8")
+    create_checkpoint("app.py", "v1", "implement", "test-run", str(workspace))
+    _time.sleep(0.01)
+    (workspace / "app.py").write_text("v2", encoding="utf-8")
+    create_checkpoint("app.py", "v2", "implement", "test-run", str(workspace))
+
+    result = list_checkpoints("test-run", str(workspace))
+    assert result["total"] == 2
+    assert "app.py" in result["files"]
+
+
+def test_restore_checkpoint(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("original", encoding="utf-8")
+    meta = create_checkpoint("app.py", "backup", "implement", "test-run", str(workspace))
+    (workspace / "app.py").write_text("modified", encoding="utf-8")
+
+    result = restore_checkpoint(meta["checkpoint_id"], "test-run", confirmed=True, workspace_dir=str(workspace))
+    assert result["restored"] is True
+    assert (workspace / "app.py").read_text(encoding="utf-8") == "original"
+
+
+def test_restore_checkpoint_requires_confirmed(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("x", encoding="utf-8")
+    meta = create_checkpoint("app.py", "test", "s", "r", str(workspace))
+    try:
+        restore_checkpoint(meta["checkpoint_id"], "r", confirmed=False, workspace_dir=str(workspace))
+    except ValueError as exc:
+        assert "confirmed" in str(exc)
+    else:
+        raise AssertionError("should require confirmed")
+
+
+def test_checkpoint_rejects_path_escape(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')", encoding="utf-8")
+
+    try:
+        create_checkpoint("../outside.py", "escape", "s", "r", str(workspace))
+    except ValueError as exc:
+        assert "路径越界" in str(exc)
+    else:
+        raise AssertionError("path escape should be rejected")
+
+
+def test_recovery_action_risk_levels():
+    assert _action_risk_level("inspect-failed-stage") == "safe"
+    assert _action_risk_level("rerun-tests") == "guarded"
+    assert _action_risk_level("restore-backup") == "destructive"
+    assert _action_risk_level("continue-delivery") == "safe"
+
+
+# --- E5 Eval / Metrics tests ---
+
+def test_list_evals_returns_catalog():
+    evals = list_evals()
+    assert len(evals) >= 2
+    ids = [e["id"] for e in evals]
+    assert "todo_web_app" in ids
+    assert "bug_fix_import_error" in ids
+
+
+def test_run_eval_scores_against_signals(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    result = run_eval("todo_web_app", str(workspace), store)
+    assert "score" in result
+    assert result["eval_id"] == "todo_web_app"
+    assert result["score"]["overall"] == "passed"
+
+
+def test_build_aggregate_metrics(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_dir = workspace / ".nanocursor" / "runs" / "test-run"
+    runs_dir.mkdir(parents=True)
+    (runs_dir / "session.json").write_text(
+        json.dumps({"thread_id": "test-run", "status": "completed", "prompt": "test"}),
+        encoding="utf-8",
+    )
+    (runs_dir / "events.jsonl").write_text(
+        json.dumps({"type": "tool_call_finished", "payload": {"metrics": {"total_llm_tokens": 500}}}) + "\n" +
+        json.dumps({"type": "tool_call_finished", "payload": {"metrics": {"total_llm_tokens": 300}}}) + "\n",
+        encoding="utf-8",
+    )
+    metrics = build_aggregate_metrics(str(workspace))
+    assert metrics["total_runs"] == 1
+    assert metrics["completed"] == 1
+    assert metrics["avg_tool_calls"] == 2.0
+    assert metrics["avg_tokens"] == 800
+
+
+def test_execute_recovery_center_recommended_actions_are_supported(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("test-run", "Test", str(workspace), status="failed")
+    store.update_session("test-run", str(workspace), execution_plan={
+        "stages": [
+            {"id": "implement", "title": "实现", "status": "failed", "failure": "tool error", "tool_evidence": []},
+        ]
+    })
+    store.append_event("test-run", "error", content="AssertionError: boom", workspace_dir=str(workspace))
+
+    center = build_recovery_center("test-run", str(workspace))
+    supported_results = []
+    for action in center["actions"]:
+        if not action.get("enabled"):
+            continue
+        supported_results.append(
+            execute_recovery_action(
+                "test-run",
+                action["id"],
+                action.get("target", ""),
+                False,
+                str(workspace),
+            )
+        )
+
+    assert supported_results
+    assert all(result["status"] in {"completed", "failed"} for result in supported_results)
+
+
+def test_execute_restore_backup_uses_explicit_target_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backups = workspace / ".backups"
+    backups.mkdir()
+    (backups / "app.py.bak.1").write_text("print('restored')\n", encoding="utf-8")
+    store = EventStore()
+    store.create_session("test-run", "Test", str(workspace))
+
+    result = execute_recovery_action(
+        "test-run",
+        "restore-backup",
+        "app.py.bak.1",
+        True,
+        str(workspace),
+        target_path="src/app.py",
+    )
+
+    assert result["ok"] is True
+    assert (workspace / "src" / "app.py").read_text(encoding="utf-8") == "print('restored')\n"

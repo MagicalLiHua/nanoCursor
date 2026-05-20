@@ -1,0 +1,22 @@
+{
+  "id": "refactor_safe_rename",
+  "title": "Rename Function Safely",
+  "fixture": "refactor_safe_rename",
+  "prompt": "Rename the 'add' function in calc.py to 'add_numbers'. Update all tests and callers.",
+  "category": "refactor_safe",
+  "difficulty": "medium",
+  "timeout_seconds": 180,
+  "test_command": "pytest -q tests/",
+  "expected_signals": {
+    "required_events": [
+      "plan_created",
+      "tool_call_finished",
+      "done"
+    ],
+    "tests_pass": true,
+    "max_changed_files": 3,
+    "required_files": [
+      "calc.py"
+    ]
+  }
+}

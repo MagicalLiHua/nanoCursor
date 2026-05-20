@@ -6,17 +6,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **nanoCursor** is a multi-agent automatic programming framework that transforms user requests into working code through an LLM-driven agent loop with tool calling. It uses a simple while-loop architecture (inspired by s_full.py) rather than a complex state machine.
 
+## Project Type
+
+Personal independent full-stack project.
+
+## Development Rules
+
+- Inspect related files before editing.
+- Prefer small, safe, incremental changes.
+- Use existing project patterns.
+- Do not rewrite large unrelated areas.
+- Do not run destructive commands without explicit confirmation.
+- Do not modify production database.
+- Use Context7 for version-sensitive or unfamiliar library APIs.
+- Use Playwright or a frontend smoke check when UI behavior changes.
+- Run relevant checks after meaningful changes.
+
 ## Development Commands
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run tests
+# Run all tests
 pytest
+
+# Run tests with coverage (target: ≥50%)
+pytest --cov
 
 # Run a single test file
 pytest tests/test_file_tools.py
+
+# Lint (ruff)
+ruff check .
+
+# Type check (mypy)
+mypy src/
+
+# Frontend check
+cd frontend && npm run check
 
 # Start interactive CLI (main entry point)
 python cli.py
@@ -24,8 +52,11 @@ python cli.py
 # One-shot mode: run a single prompt
 python cli.py "帮我找 bug"
 
-# Start the web API (optional, FastAPI backend)
-python api_server.py
+# Start web backend
+python -m uvicorn api_server:app --host 127.0.0.1 --port 8100
+
+# Start web frontend (separate terminal)
+cd frontend && npm run dev
 
 # Run old CLI (executes hardcoded prompt)
 python run.py
@@ -36,13 +67,14 @@ python run.py
 ### Core Engine
 
 The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agent_loop.py):
-- `src/core/engine.py` - 统一 MVP 引擎，整合所有功能模块
+- `src/agent/engine.py` - Agent loop + 20 个工具处理函数
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
 | `cli.py` | CLI 入口（交互式 REPL + 单次模式） |
+| `api_server.py` | FastAPI 后端，Web 工作台 API |
 | `src/cli/repl.py` | REPL 循环 + prompt_toolkit 输入 |
 | `src/cli/renderer.py` | Rich 终端渲染（Markdown/代码/表格/流式） |
 | `src/cli/commands.py` | 斜杠命令系统（/help /files /team /memory /task 等） |
@@ -50,11 +82,23 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 | `src/agent/state.py` | AgentState + WorkflowCancelledError |
 | `src/agent/prompt.py` | 管道式系统提示构建 |
 | `src/agent/error_recovery.py` | 错误恢复 + 指数退避 |
+| `src/agent/learner.py` | Agent 学习器（从运行中学习） |
+| `src/api/models.py` | API Pydantic 数据模型 |
+| `src/api/services/` | 业务服务层（会话、运行、蓝图、质量、报告等 20 个服务） |
+| `src/indexer/indexer.py` | 项目索引器 |
 | `src/team/team.py` | 团队协作（MessageBus + TeammateManager） |
 | `src/memory/manager.py` | 跨会话记忆（Markdown 持久化） |
 | `src/memory/compactor.py` | 三层上下文压缩 |
 | `src/tasks/manager.py` | TaskPool DAG 管理 |
 | `src/tasks/skill.py` | 技能按需加载 |
+| `src/tools/file_tools.py` | 文件操作 |
+| `src/tools/bash_tools.py` | Bash 命令执行 |
+| `src/tools/git_tools.py` | Git 操作 |
+| `src/tools/memory_tools.py` | 记忆 CRUD 工具 |
+| `src/tools/project_tools.py` | 项目级工具 |
+| `src/tools/todo_tools.py` | Todo 管理工具 |
+| `src/infra/config.py` | 配置管理 |
+| `src/infra/llm_config.py` | LLM 提供商配置 |
 | `src/infra/hooks.py` | 事件钩子系统 |
 | `src/infra/background.py` | 后台任务管理 |
 | `src/infra/cron.py` | 定时任务调度 |
@@ -62,7 +106,8 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 | `src/infra/permission.py` | 权限管道 + Bash 安全验证 |
 | `src/infra/db.py` | SQLite 持久化（todos/memories） |
 | `src/infra/metrics.py` | MetricsCollector |
-| `src/tools/file_tools.py` | 文件操作工具 |
+| `src/infra/schemas.py` | 共享 Pydantic schemas |
+| `src/infra/messages.py` | 消息流管理 |
 
 ### Tech Stack
 - **Python 3.10+** with **asyncio** for async agent orchestration
@@ -125,4 +170,55 @@ The FastAPI backend is retained for optional external integration but is not the
 
 ## Configuration
 
-Config is in `.env` (gitignored), see `.env.example` for template. Supports `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MINIMAX_API_KEY`, `OLLAMA_BASE_URL`.
+Config is in `.env` (gitignored), see `.env.example` for template.
+
+**LLM providers** (auto-detection priority: Anthropic > DeepSeek > MiniMax > OpenAI > Ollama):
+
+| Env var | Purpose |
+|---------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `DEEPSEEK_API_KEY` | DeepSeek |
+| `MINIMAX_API_KEY` | MiniMax |
+| `OPENAI_API_KEY` | OpenAI |
+| `OLLAMA_BASE_URL` | Ollama local (default `http://localhost:11434`) |
+| `LLM_PROVIDER` | Explicit provider override |
+| `LLM_TEMPERATURE` | Default 0.2 |
+| `LLM_MAX_TOKENS` | Default 4096 |
+
+Each provider also has a `*_MODEL` env var (e.g., `ANTHROPIC_MODEL`, `DEEPSEEK_MODEL`).
+
+**Other config**: `LOG_LEVEL`, `LOG_FILE`, `CONTEXT_MAX_TOKENS`, `MAX_CODER_STEPS`, `MAX_PLANNER_STEPS`, `LLM_TIMEOUT_SECONDS`, `MAX_CONCURRENT_RUNS`, `SANDBOX_MEM_LIMIT`, `SANDBOX_TIMEOUT_SECONDS`.
+
+## Database Safety
+
+- Never run destructive database commands without explicit confirmation.
+- Prefer local or staging database.
+- Use readonly credentials for MCP database access.
+- For migrations, inspect existing migrations first.
+- This project uses SQLite locally (via `src/infra/db.py`). No production database in repo.
+
+## Git Rules
+
+- Before large changes, inspect git status.
+- Summarize changed files after edits.
+- Do not commit unless explicitly asked.
+
+## Runtime Data Directory
+
+`PROJECT_ROOT` is the nanoCursor source directory. Do not use it as the implicit user project workspace.
+
+By default, nanoCursor starts in an isolated workspace at `.nanocursor/workspaces/default`. Users can point startup to a real project with `NANOCURSOR_WORKSPACE_DIR`, or switch explicitly through the frontend/API. The framework writes project-level state into the currently opened workspace directory:
+
+```
+<opened-workspace>/
+  .nanocursor/
+    runs/{thread_id}/        # session.json, events.jsonl, report.md, requirements.json
+    conversations/{id}/      # conversation.json, team.json
+    skills/{name}/           # SKILL.md
+    project_index.json
+  .tasks/                    # JSON task persistence
+  .team/                     # Teammate inboxes
+  .backups/                  # File backups
+  .snapshots/                # State snapshots
+  .memory/                   # Persistent memories
+```

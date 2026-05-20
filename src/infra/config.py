@@ -20,22 +20,35 @@ logger = logging.getLogger(__name__)
 _current_file = os.path.abspath(__file__)
 
 # 2. 向上推算项目根目录
-# config.py 在 src/core/ 下，所以向上退两级就是项目根目录
+# config.py 在 src/infra/ 下，所以向上退两级就是项目根目录
 _core_dir = os.path.dirname(_current_file)
 _src_dir = os.path.dirname(_core_dir)
 PROJECT_ROOT = os.path.dirname(_src_dir)
 
-# 3. 稳妥地在项目根目录下定义 workspace
-WORKSPACE_DIR = os.path.join(PROJECT_ROOT, "workspace")
+# 3. 运行数据和默认用户工作区分离
+# - PROJECT_ROOT 是 nanoCursor 源码目录。
+# - RUNTIME_ROOT 存放 nanoCursor 自身运行状态，默认被 git 忽略。
+# - WORKSPACE_ROOT 存放默认/临时用户项目工作区。
+# - 用户真正打开项目时，会通过 API 显式切换 WORKSPACE_DIR。
+RUNTIME_ROOT = os.path.join(PROJECT_ROOT, ".nanocursor")
+WORKSPACE_ROOT = os.path.abspath(os.path.expanduser(
+    os.getenv("NANOCURSOR_WORKSPACE_ROOT", os.path.join(RUNTIME_ROOT, "workspaces"))
+))
+DEFAULT_WORKSPACE_DIR = os.path.abspath(os.path.expanduser(
+    os.getenv("NANOCURSOR_WORKSPACE_DIR", os.path.join(WORKSPACE_ROOT, "default"))
+))
+WORKSPACE_DIR = DEFAULT_WORKSPACE_DIR
 
 
 def _resolve_workspace_dir() -> str:
     """可被子类覆盖的工作区路径解析（API server 使用）"""
-    return os.path.join(PROJECT_ROOT, "workspace")
+    return WORKSPACE_DIR
 
 
 # 确保文件夹存在（模块级，失败时记录但不阻塞）
 try:
+    os.makedirs(RUNTIME_ROOT, exist_ok=True)
+    os.makedirs(WORKSPACE_ROOT, exist_ok=True)
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
 except OSError as e:
     logger.warning(f"无法创建 WORKSPACE_DIR ({WORKSPACE_DIR}): {e}")

@@ -19,6 +19,7 @@ nanoCursor Core Engine - 统一 MVP 引擎
 
 import os
 import asyncio
+import inspect
 import json
 import time
 import uuid
@@ -1018,12 +1019,31 @@ def get_background_manager() -> BackgroundManager:
     return _bg_manager
 
 
+def _tool_policy_allows(decision: Any) -> tuple[bool, str]:
+    if decision is None:
+        return True, ""
+    if isinstance(decision, dict):
+        return bool(decision.get("allowed", True)), str(decision.get("reason", ""))
+    return bool(getattr(decision, "allowed", True)), str(getattr(decision, "reason", ""))
+
+
+async def _call_tool_check(callback: Callable[[str, dict], Any] | None, tool_name: str, tool_input: dict) -> Any:
+    """Run a sync or async tool-policy callback."""
+    if not callback:
+        return None
+    decision = callback(tool_name, tool_input)
+    if inspect.isawaitable(decision):
+        return await decision
+    return decision
+
+
 # ========== 主 Agent Loop ==========
 async def agent_loop(
     messages: list,
     system: str,
     tools: list = None,
     max_turns: int = 100,
+    on_tool_check: Callable[[str, dict], Any] = None,
     on_tool_call: Callable[[str, dict, str], None] = None,
     on_llm_response: Callable[[int, int], None] = None,
     session_id: str = None,
@@ -1075,8 +1095,13 @@ async def agent_loop(
                         tool_name = block.name
                         tool_input = block.input
                         tool_id = block.id
+                        decision = await _call_tool_check(on_tool_check, tool_name, tool_input)
+                        allowed, reason = _tool_policy_allows(decision)
 
-                        if tool_name == "task":
+                        if not allowed:
+                            output = f"Error: Tool policy blocked: {reason}"
+                            _metrics.record_tool_failure(tool_name, output)
+                        elif tool_name == "task":
                             output = await run_subagent(
                                 tool_input.get("prompt", ""),
                                 agent_type=tool_input.get("agent_type", "Explore"),
@@ -1179,6 +1204,7 @@ async def agent_loop_stream(
     system: str,
     tools: list = None,
     max_turns: int = 100,
+    on_tool_check: Callable[[str, dict], Any] = None,
     on_tool_call: Callable[[str, dict, str], None] = None,
     session_id: str = None,
 ):
@@ -1314,8 +1340,13 @@ async def agent_loop_stream(
                     tool_name = tb["name"]
                     tool_input = tb["input"]
                     tool_id = tb["id"]
+                    decision = await _call_tool_check(on_tool_check, tool_name, tool_input)
+                    allowed, reason = _tool_policy_allows(decision)
 
-                    if tool_name == "task":
+                    if not allowed:
+                        output = f"Error: Tool policy blocked: {reason}"
+                        _metrics.record_tool_failure(tool_name, output)
+                    elif tool_name == "task":
                         output = await run_subagent(
                             tool_input.get("prompt", ""),
                             agent_type=tool_input.get("agent_type", "Explore"),

@@ -1,0 +1,17 @@
+{
+  "id": "bug_fix_import_error",
+  "title": "Fix Python Import Error",
+  "fixture": "python_import_bug",
+  "prompt": "The app/main.py imports from app.util which doesn't exist. Create app/util.py with a format_name function, or fix the import. Then make tests pass.",
+  "category": "bugfix",
+  "difficulty": "medium",
+  "timeout_seconds": 180,
+  "expected_signals": {
+    "required_events": ["plan_created", "tool_call_finished", "done"],
+    "tests_pass": true,
+    "max_changed_files": 4,
+    "forbidden_paths": [".env"],
+    "required_files": ["app/util.py"]
+  },
+  "test_command": "pytest -q"
+}

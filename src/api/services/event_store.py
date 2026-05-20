@@ -25,6 +25,35 @@ class EventStore:
         run_root.mkdir(parents=True, exist_ok=True)
         return run_root
 
+    def _thread_workspace_index_path(self) -> Path:
+        root = Path(config_module.RUNTIME_ROOT).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root / "thread_workspaces.json"
+
+    def _remember_thread_workspace(self, thread_id: str, workspace_dir: str) -> None:
+        path = self._thread_workspace_index_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if not isinstance(data, dict):
+                data = {}
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        data[thread_id] = str(Path(workspace_dir).resolve())
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    def workspace_for_thread(self, thread_id: str) -> str | None:
+        path = self._thread_workspace_index_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        workspace = data.get(thread_id) if isinstance(data, dict) else None
+        return str(Path(workspace).resolve()) if workspace else None
+
     def run_dir(self, thread_id: str, workspace_dir: str | None = None) -> Path:
         safe_id = thread_id.replace("/", "_").replace("\\", "_")
         path = self._root(workspace_dir) / safe_id
@@ -60,6 +89,8 @@ class EventStore:
                 json.dumps(session, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            self._remember_thread_workspace(thread_id, workspace_dir)
+            self._upsert_run_index(session, workspace_dir)
         return session
 
     def get_session(
@@ -86,6 +117,7 @@ class EventStore:
                 json.dumps(session, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            self._upsert_run_index(session, session.get("workspace_dir") or workspace_dir)
             return session
 
     def append_event(
@@ -143,6 +175,13 @@ class EventStore:
             return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
         except OSError:
             return 0
+
+    def _upsert_run_index(self, session: dict[str, Any], workspace_dir: str | None = None) -> None:
+        try:
+            from src.api.services.run_history import upsert_run_index
+            upsert_run_index(session, workspace_dir)
+        except Exception:
+            pass
 
 
 event_store = EventStore()

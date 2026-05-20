@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.api.services.event_store import get_event_store
+from src.api.services.failure_classifier_service import classify_failure
 from src.api.services.quality_service import build_quality_gate
 from src.infra import config as config_module
 
@@ -135,13 +136,20 @@ def _run_risks(thread_id: str | None, workspace: Path) -> list[dict[str, Any]]:
 
     error_events = [event for event in events if event.type == "error"]
     for index, event in enumerate(error_events, start=1):
+        classification = classify_failure(event.content or "")
         risks.append(
             {
                 "id": f"error-{index}",
                 "severity": "high",
                 "title": "Run recorded an error event",
                 "detail": event.content,
-                "evidence": {"event_id": event.id, "agent": event.agent},
+                "evidence": {
+                    "event_id": event.id,
+                    "agent": event.agent,
+                    "failure_category": classification["category"],
+                    "failure_confidence": classification["confidence"],
+                    "failure_summary": classification["summary"],
+                },
             }
         )
 
@@ -185,6 +193,19 @@ def _run_risks(thread_id: str | None, workspace: Path) -> list[dict[str, Any]]:
 def _primary_recovery_point(points: list[dict[str, Any]]) -> dict[str, Any] | None:
     preferred = next((point for point in points if point["kind"] == "snapshot"), None)
     return preferred or (points[0] if points else None)
+
+
+def _action_risk_level(action_id: str) -> str:
+    """Classify recovery action by risk level."""
+    safe = {"inspect-failed-stage", "inspect-failure-event", "continue-delivery",
+            "review-dangerous-command", "open-quality-gate", "create-recovery-point"}
+    guarded = {"rerun-tests", "restore-last-safe-point"}
+    destructive = {"restore-backup", "create-remediation-run"}
+    if action_id in destructive:
+        return "destructive"
+    if action_id in guarded:
+        return "guarded"
+    return "safe"
 
 
 def _recovery_actions(
@@ -293,6 +314,10 @@ def _recovery_actions(
             }
         )
 
+    # Add risk_level to all actions
+    for action in actions:
+        action["risk_level"] = _action_risk_level(action["id"])
+
     return actions
 
 
@@ -327,7 +352,27 @@ def build_recovery_center(thread_id: str | None = None, workspace_dir: str | Non
         "recovery_points": points,
         "risks": risks,
         "actions": actions,
+        "failure_groups": _build_failure_groups(risks),
     }
+
+
+def _build_failure_groups(risks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group risks by failure category for structured display."""
+    groups: dict[str, dict[str, Any]] = {}
+    for risk in risks:
+        evidence = risk.get("evidence", {}) if isinstance(risk.get("evidence"), dict) else {}
+        category = evidence.get("failure_category", "unknown")
+        if category not in groups:
+            groups[category] = {
+                "category": category,
+                "count": 0,
+                "risk_ids": [],
+                "summary": evidence.get("failure_summary", ""),
+            }
+        groups[category]["count"] += 1
+        groups[category]["risk_ids"].append(risk["id"])
+
+    return sorted(groups.values(), key=lambda g: g["count"], reverse=True)
 
 
 def rollback_from_backup(backup_name: str, target_path: str, workspace_dir: str | None = None) -> dict[str, Any]:

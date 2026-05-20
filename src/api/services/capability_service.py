@@ -268,10 +268,12 @@ def import_workspace_skill(
 def build_capability_hub(workspace_dir: str | None = None) -> dict[str, Any]:
     """Return AgentHub capabilities grouped for the frontend."""
     workspace = _workspace(workspace_dir)
+    mcp_by_id = {item["id"]: dict(item) for item in MCP_TEMPLATES}
+    for configured in _read_mcp_config(workspace):
+        mcp_by_id[configured["id"]] = configured
     capabilities = [
         *BUILTIN_CAPABILITIES,
-        *MCP_TEMPLATES,
-        *_read_mcp_config(workspace),
+        *mcp_by_id.values(),
         *SKILL_TEMPLATES,
         *_read_workspace_skills(workspace),
     ]

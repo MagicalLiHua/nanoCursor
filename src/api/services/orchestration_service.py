@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from src.agent.strategy.planner import get_strategy_definition, get_tool_policy, select_strategy
+
 
 ROLE_ALIASES = {
     "lead": {"lead", "leader", "supervisor", "总控", "协调"},
@@ -301,14 +303,19 @@ def build_execution_plan(
     if not risks:
         risks.append(_risk("low", "常规交付风险", "按团队编排执行，重点关注 Diff、测试和需求覆盖。"))
 
+    strategy_id = select_strategy(prompt)
+    strategy_def = get_strategy_definition(strategy_id)
+
     capability_ids = _capability_ids_from_stages(stages)
-    tool_policy = build_tool_policy(capability_ids)
+    tool_policy_obj = get_tool_policy(strategy_id)
+    tool_policy = {**tool_policy_obj.to_dict(), **build_tool_policy(capability_ids)}
     skill_context = load_skill_context(capability_ids, workspace_dir)
 
     return {
         "prompt": prompt,
         "workspace_dir": workspace_dir,
-        "strategy": "team_aware_run_per_message",
+        "strategy": strategy_id,
+        "strategy_definition": strategy_def,
         "agents": [member.get("name") or member.get("role") or "Agent" for member in members],
         "stages": stages,
         "tasks": tasks_from_execution_plan(stages),

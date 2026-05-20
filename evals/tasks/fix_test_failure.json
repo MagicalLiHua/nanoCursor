@@ -1,0 +1,22 @@
+{
+  "id": "fix_test_failure",
+  "title": "Fix Failing Unit Test",
+  "fixture": "fix_test_failure",
+  "prompt": "The test at tests/test_calc.py is failing. Fix the calc.py implementation so tests pass.",
+  "category": "bug_fix",
+  "difficulty": "easy",
+  "timeout_seconds": 120,
+  "test_command": "pytest -q tests/",
+  "expected_signals": {
+    "required_events": [
+      "plan_created",
+      "tool_call_finished",
+      "done"
+    ],
+    "tests_pass": true,
+    "max_changed_files": 3,
+    "required_files": [
+      "calc.py"
+    ]
+  }
+}

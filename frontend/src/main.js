@@ -13,7 +13,7 @@ let activeApiBase = API_CANDIDATES[0];
 
 const demoState = {
   status: "idle",
-  activeTab: "diff",
+  activeTab: "report",
   leftTab: "runs",
   rightTab: "tasks",
   currentThreadId: "demo-run",
@@ -57,6 +57,12 @@ const demoState = {
       risks: [],
       actions: [],
     },
+  },
+  workspaceMeta: {
+    default_workspace: "",
+    workspace_root: "",
+    project_root: "",
+    is_default_workspace: false,
   },
   layout: loadLayoutPreference(),
   prompt:
@@ -606,6 +612,17 @@ new file mode 100644
     ],
     risks: [],
   },
+  mcpConfig: {
+    servers: [],
+    config_paths: [],
+    summary: {},
+    validation: null,
+    validationByServer: {},
+  },
+  skillDetail: null,
+  skillEditing: false,
+  workspaceSettings: null,
+  recentProjects: [],
 };
 
 const state = structuredClone(demoState);
@@ -681,10 +698,17 @@ function statusLabel(status) {
   const labels = {
     idle: "空闲",
     draft: "草稿",
+    created: "已创建",
+    planning: "规划中",
+    waiting_approval: "等待审批",
     running: "运行中",
+    validating: "验证中",
+    cancelling: "取消中",
     completed: "完成",
     failed: "失败",
     cancelled: "取消",
+    interrupted: "已中断",
+    recovering: "恢复中",
     pending: "待处理",
     in_progress: "进行中",
     skipped: "跳过",
@@ -702,6 +726,16 @@ function statusLabel(status) {
     replay_paused: "已暂停",
   };
   return labels[status] || status || "未知";
+}
+
+function statusColor(status) {
+  const colors = {
+    created: "var(--slate)", planning: "var(--blue)", waiting_approval: "var(--amber)",
+    running: "var(--green)", validating: "var(--blue)", cancelling: "var(--amber)",
+    completed: "var(--green)", failed: "var(--coral)", cancelled: "var(--slate)",
+    interrupted: "var(--coral)", recovering: "var(--amber)",
+  };
+  return colors[status] || "var(--slate)";
 }
 
 function replayStatusLabel(status) {
@@ -908,7 +942,7 @@ function renderTopbar() {
         <span class="pill">Conv&nbsp;<strong>${escapeHtml(state.currentConversationId || "未创建")}</strong></span>
         <span class="pill">Thread&nbsp;<strong>${escapeHtml(state.currentThreadId)}</strong></span>
         <form class="workspace-picker" id="workspace-form">
-          <input id="workspace-input" value="${escapeHtml(state.workspaceInput || state.workspaceDir || "")}" placeholder="打开项目目录绝对路径" />
+          <input id="workspace-input" value="${escapeHtml(state.workspaceInput || state.workspaceDir || "")}" placeholder="打开要开发的项目目录绝对路径" />
           <button class="button secondary compact-button" type="submit">打开</button>
         </form>
       </div>
@@ -997,6 +1031,10 @@ function renderProjectOverview() {
   const recentConversations = overview.recent_conversations || [];
   const skills = overview.skills || [];
   const mcp = overview.mcp || [];
+  const workspaceMeta = state.workspaceMeta || {};
+  const isDefaultWorkspace =
+    workspaceMeta.is_default_workspace ||
+    (workspaceMeta.default_workspace && (overview.workspace_dir || state.workspaceDir) === workspaceMeta.default_workspace);
   const statItems = [
     ["会话", summary.conversation_count ?? 0],
     ["Runs", summary.recent_run_count ?? 0],
@@ -1011,7 +1049,19 @@ function renderProjectOverview() {
       <strong title="${escapeHtml(overview.workspace_dir || state.workspaceDir || "")}">
         ${escapeHtml(shortPath(overview.workspace_dir || state.workspaceDir || "未打开项目目录"))}
       </strong>
+      ${
+        isDefaultWorkspace
+          ? `<div class="workspace-default-note">默认隔离工作区。要修改真实项目，请点击顶部“打开”选择项目目录。</div>`
+          : ""
+      }
       <button class="button secondary compact-button" data-action="refresh-project-overview" type="button">同步</button>
+    </div>
+
+    <div class="project-actions">
+      <button class="button primary compact-button" data-action="new-session" type="button">+ 新建会话</button>
+      <button class="button secondary compact-button" data-action="refresh-project-overview" type="button">刷新索引</button>
+      <button class="button secondary compact-button" data-action="goto-capabilities" type="button">配置 MCP</button>
+      <button class="button secondary compact-button" data-action="goto-capabilities" type="button">导入 Skill</button>
     </div>
 
     <div class="project-stat-grid">
@@ -1112,6 +1162,43 @@ function renderProjectOverview() {
           .slice(0, 3)
           .map((item) => `<div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.priority)}</span></div>`)
           .join("") || `<div><span>暂无恢复建议</span></div>`}
+      </div>
+    </section>
+
+    ${renderProjectHealth(overview.health)}
+
+    <section class="project-section">
+      <div class="project-section-title">
+        <strong>最近项目</strong>
+      </div>
+      <div class="project-mini-list" id="recent-projects-list">
+        <div><span>加载中…</span></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderProjectHealth(health) {
+  if (!health) return "";
+  const checks = [
+    ["目录存在", health.exists],
+    ["可写", health.writable],
+    ["Git 仓库", health.is_git_repo],
+    ["索引完成", health.index_status === "indexed"],
+  ];
+  return `
+    <section class="project-section">
+      <div class="project-section-title">
+        <strong>工作区健康</strong>
+        <span>${health.run_count ?? 0} runs · ${health.backup_count ?? 0} 备份</span>
+      </div>
+      <div class="health-checks">
+        ${checks.map(([label, ok]) => `
+          <div class="health-check ${ok ? "ok" : "warn"}">
+            <span>${ok ? "✓" : "✗"}</span>
+            ${escapeHtml(label)}
+          </div>
+        `).join("")}
       </div>
     </section>
   `;
@@ -1399,15 +1486,40 @@ function agentAvatarSymbol(tone, name = "") {
   return symbols[tone] || String(name || "A").slice(0, 1).toUpperCase();
 }
 
+function getRightPanelMode() {
+  if (state.status === "failed") return "recovery";
+  if (state.status === "running") return "execution";
+  if (state.status === "completed") return "delivery";
+  return "project";
+}
+
 function renderRightPanel() {
-  const tabs = [
-    ["tasks", "任务", state.tasks.length],
-    ["team", "团队", state.team.length],
-    ["capabilities", "能力", state.capabilityHub?.summary?.total ?? 0],
-    ["metrics", "指标", state.metrics.toolCalls],
-    ["benchmarks", "基准", state.benchmarks.length],
-    ["preferences", "偏好", state.memoryProfile?.preference_count ?? 0],
-  ];
+  const mode = getRightPanelMode();
+  const tabSets = {
+    project: [
+      ["capabilities", "能力", state.capabilityHub?.summary?.total ?? 0],
+      ["team", "团队", state.team.length],
+      ["preferences", "偏好", state.memoryProfile?.preference_count ?? 0],
+    ],
+    execution: [
+      ["tasks", "任务", state.tasks.length],
+      ["team", "团队", state.team.length],
+      ["metrics", "指标", state.metrics.toolCalls],
+    ],
+    delivery: [
+      ["tasks", "任务", state.tasks.length],
+      ["capabilities", "能力", state.capabilityHub?.summary?.total ?? 0],
+      ["preferences", "偏好", state.memoryProfile?.preference_count ?? 0],
+    ],
+    recovery: [
+      ["recovery", "恢复", state.recoveryCenter?.summary?.risk_count ?? 0],
+      ["tasks", "任务", state.tasks.length],
+      ["team", "团队", state.team.length],
+    ],
+  };
+
+  // Always append settings as last tab
+  const tabs = [...(tabSets[mode] || tabSets.project), ["settings", "设置", 0]];
 
   if (state.layout?.rightCollapsed) {
     return `
@@ -1445,6 +1557,8 @@ function renderRightPanel() {
         ${state.rightTab === "metrics" ? renderMetrics() : ""}
         ${state.rightTab === "benchmarks" ? renderBenchmarks() : ""}
         ${state.rightTab === "preferences" ? renderPreferences() : ""}
+        ${state.rightTab === "recovery" ? renderRecovery() : ""}
+        ${state.rightTab === "settings" ? renderWorkspaceSettings() : ""}
       </div>
     </aside>
   `;
@@ -1624,6 +1738,8 @@ function renderTeamMember(member, index = 0) {
 }
 
 function renderCapabilities() {
+  if (state.skillDetail) return renderSkillDetailPanel();
+
   const hub = state.capabilityHub || {};
   const summary = hub.summary || {};
   const groups = hub.groups || [];
@@ -1644,8 +1760,66 @@ function renderCapabilities() {
         <textarea id="skill-content-input" rows="3" placeholder="粘贴 SKILL.md 内容，或写一段用途说明"></textarea>
         <button class="button secondary compact-button" type="submit">导入</button>
       </form>
+      <form class="mcp-config-panel" id="mcp-config-form">
+        <div>
+          <strong>配置 MCP Server</strong>
+          <span>写入当前项目的 .nanocursor/mcp.json；密钥建议使用环境变量名，不直接保存明文。</span>
+        </div>
+        <div class="mcp-config-grid">
+          <input id="mcp-server-name-input" placeholder="server 名称，例如 github" />
+          <input id="mcp-command-input" placeholder="启动命令，例如 npx" />
+        </div>
+        <textarea id="mcp-args-input" rows="2" placeholder="参数：每行一个，例如&#10;-y&#10;@modelcontextprotocol/server-github"></textarea>
+        <input id="mcp-env-input" placeholder="环境变量名，逗号分隔，例如 GITHUB_TOKEN" />
+        <button class="button secondary compact-button" type="submit">保存 MCP 配置</button>
+      </form>
       <div class="capability-groups">
         ${groups.map(renderCapabilityGroup).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSkillDetailPanel() {
+  const skill = state.skillDetail;
+  if (!skill) return "";
+  const isBuiltin = skill.source === "built-in";
+  const isEditing = state.skillEditing;
+  return `
+    <div class="skill-detail-panel">
+      <div class="skill-detail-header">
+        <button class="icon-button subtle" data-action="skill-back" title="返回能力列表" type="button">← 返回</button>
+        <div>
+          <h3>${escapeHtml(skill.name)}</h3>
+          <span class="badge ${escapeHtml(skill.status)}">${capabilityStatusLabel(skill.status)}</span>
+          ${isBuiltin ? `<span class="badge builtin">内置</span>` : ""}
+        </div>
+      </div>
+      <div class="skill-detail-meta">
+        <div><strong>来源</strong><span>${escapeHtml(skill.source || "—")}</span></div>
+        ${skill.agents?.length ? `<div><strong>适用 Agent</strong><span>${skill.agents.map(a => escapeHtml(a)).join(", ")}</span></div>` : ""}
+        ${skill.use_cases?.length ? `<div><strong>适用场景</strong><span>${skill.use_cases.slice(0, 3).map(u => escapeHtml(u)).join(" / ")}</span></div>` : ""}
+      </div>
+      <div class="skill-detail-content">
+        <strong>内容</strong>
+        ${isEditing
+          ? `<textarea id="skill-edit-textarea" class="skill-edit-textarea" rows="14">${escapeHtml(skill.content)}</textarea>`
+          : `<pre>${escapeHtml(skill.content)}</pre>`
+        }
+      </div>
+      <div class="skill-detail-actions">
+        ${isBuiltin
+          ? `<span class="muted-hint">内置 Skill 仅供查看，不可编辑或删除。</span>`
+          : isEditing
+            ? `
+              <button class="button primary compact-button" data-action="skill-save" type="button">保存</button>
+              <button class="button secondary compact-button" data-action="skill-cancel" type="button">取消</button>
+            `
+            : `
+              <button class="button primary compact-button" data-action="skill-edit" type="button">编辑</button>
+              <button class="button danger compact-button" data-action="skill-delete" type="button">删除</button>
+            `
+        }
       </div>
     </div>
   `;
@@ -1684,6 +1858,9 @@ function renderCapabilityCard(item) {
         ${(item.agents || []).slice(0, 3).map((agent) => `<span>${escapeHtml(agent)}</span>`).join("")}
       </div>
       ${renderCapabilityMarketDetails(item)}
+      ${renderMCPFields(item)}
+      ${item.kind === "skill" && item.status === "configured" ? `<button class="button secondary compact-button" data-action="skill-detail" data-skill-id="${escapeHtml(item.id)}" type="button" style="margin-top:6px;">预览 / 编辑</button>` : ""}
+      ${item.kind === "skill" && item.status === "ready" ? `<button class="button secondary compact-button" data-action="skill-detail" data-skill-id="${escapeHtml(item.id)}" type="button" style="margin-top:6px;">查看详情</button>` : ""}
     </article>
   `;
 }
@@ -1711,6 +1888,27 @@ function renderCapabilityMarketDetails(item) {
           `,
         )
         .join("")}
+    </div>
+  `;
+}
+
+function renderMCPFields(item) {
+  if (item.kind !== "mcp") return "";
+  const validation = state.mcpConfig?.validationByServer?.[item.id] || [];
+  const vChecks = validation.filter(c => c.id.startsWith("config_") || c.id.startsWith("command_") || c.id.startsWith("env_"));
+  return `
+    <div class="mcp-fields">
+      <div class="mcp-field"><strong>来源</strong><span>${escapeHtml(item.source || item.setup_source || "未配置")}</span></div>
+      <div class="mcp-field"><strong>命令</strong><code>${escapeHtml(item.command || "—")}</code></div>
+      ${(item.args || []).length ? `<div class="mcp-field"><strong>参数</strong><code>${escapeHtml(item.args.slice(0, 5).join(" "))}</code></div>` : ""}
+      ${(item.env_keys || []).length ? `<div class="mcp-field"><strong>环境变量</strong><span>${item.env_keys.slice(0, 5).map(k => escapeHtml(k)).join(", ")}${item.env_keys.length > 5 ? " …+" + (item.env_keys.length - 5) : ""}</span></div>` : ""}
+      ${item.last_used_run_id ? `<div class="mcp-field"><strong>最近使用</strong><span class="run-link">${escapeHtml(item.last_used_run_id)}</span></div>` : ""}
+      ${item.setup_hint && item.status !== "ready" ? `<div class="mcp-hint">${escapeHtml(item.setup_hint)}</div>` : ""}
+      <div class="mcp-card-actions">
+        <button class="button secondary compact-button" data-action="prepare-mcp-config" data-server-id="${escapeHtml(item.id)}" data-server-name="${escapeHtml(item.name || item.id)}" type="button">${item.status === "planned" ? "填写配置" : "更新配置"}</button>
+        ${item.status !== "planned" ? `<button class="button secondary compact-button" data-action="validate-mcp" data-server-id="${escapeHtml(item.id)}" type="button">验证配置</button>` : ""}
+      </div>
+      ${vChecks.length ? `<div class="mcp-validation">${vChecks.map(c => `<div class="mcp-check ${c.status}"><span class="mcp-check-label">${escapeHtml(c.label)}</span><span class="mcp-check-detail">${escapeHtml(c.detail)}</span></div>`).join("")}</div>` : ""}
     </div>
   `;
 }
@@ -1834,14 +2032,124 @@ function preferenceConfidenceLabel(confidence) {
   return labels[confidence] || confidence || "未知";
 }
 
+function renderWorkspaceSettings() {
+  const settings = state.workspaceSettings || {};
+  const model = settings.model || {};
+  const safety = settings.safety || {};
+  const indexing = settings.indexing || {};
+  return `
+    <div class="settings-panel">
+      <section class="settings-group">
+        <h3>模型</h3>
+        <div class="settings-field">
+          <label>Provider</label>
+          <input id="settings-model-provider" value="${escapeHtml(model.provider || "")}" placeholder="默认（自动检测）" />
+        </div>
+        <div class="settings-field">
+          <label>Planner Model</label>
+          <input id="settings-model-planner" value="${escapeHtml(model.planner_model || "")}" placeholder="继承 Provider" />
+        </div>
+        <div class="settings-field">
+          <label>Coder Model</label>
+          <input id="settings-model-coder" value="${escapeHtml(model.coder_model || "")}" placeholder="继承 Provider" />
+        </div>
+      </section>
+      <section class="settings-group">
+        <h3>安全</h3>
+        <div class="settings-field checkbox">
+          <input type="checkbox" id="settings-safety-shell" ${safety.require_approval_for_shell !== false ? "checked" : ""} />
+          <label for="settings-safety-shell">Shell 执行需要审批</label>
+        </div>
+        <div class="settings-field checkbox">
+          <input type="checkbox" id="settings-safety-delete" ${safety.require_approval_for_file_delete !== false ? "checked" : ""} />
+          <label for="settings-safety-delete">删除文件需要审批</label>
+        </div>
+      </section>
+      <section class="settings-group">
+        <h3>索引</h3>
+        <div class="settings-field">
+          <label>忽略目录</label>
+          <input id="settings-indexing-ignore" value="${escapeHtml((indexing.ignore || []).join(", "))}" placeholder="逗号分隔" />
+        </div>
+        <div class="settings-field">
+          <label>最大文件大小 (KB)</label>
+          <input id="settings-indexing-maxkb" value="${escapeHtml(indexing.max_file_size_kb || 512)}" type="number" />
+        </div>
+      </section>
+      <button class="button primary compact-button" data-action="save-settings" type="button">保存设置</button>
+    </div>
+  `;
+}
+
+async function loadWorkspaceSettings() {
+  try {
+    state.workspaceSettings = await fetchJson("/api/workspace/settings");
+  } catch {
+    state.workspaceSettings = null;
+  }
+}
+
+async function saveWorkspaceSettings() {
+  const model = {
+    provider: document.querySelector("#settings-model-provider")?.value?.trim() || "",
+    planner_model: document.querySelector("#settings-model-planner")?.value?.trim() || "",
+    coder_model: document.querySelector("#settings-model-coder")?.value?.trim() || "",
+  };
+  const safety = {
+    require_approval_for_shell: document.querySelector("#settings-safety-shell")?.checked !== false,
+    require_approval_for_file_delete: document.querySelector("#settings-safety-delete")?.checked !== false,
+  };
+  const ignoreRaw = document.querySelector("#settings-indexing-ignore")?.value || "";
+  const indexing = {
+    ignore: ignoreRaw.split(",").map(s => s.trim()).filter(Boolean),
+    max_file_size_kb: parseInt(document.querySelector("#settings-indexing-maxkb")?.value || "512", 10),
+  };
+  try {
+    state.workspaceSettings = await requestJson("/api/workspace/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, safety, indexing }),
+    });
+    addTimelineEvent({ type: "info", title: "设置已保存", content: "工作区设置已更新。" });
+  } catch (error) {
+    addTimelineEvent({ type: "error", title: "保存设置失败", content: error.message });
+  }
+  render();
+}
+
+async function loadRecentProjects() {
+  try {
+    const result = await fetchJson("/api/workspace/recent");
+    state.recentProjects = result.recent || [];
+    renderRecentProjectsList();
+  } catch {
+    state.recentProjects = [];
+  }
+}
+
+function renderRecentProjectsList() {
+  const container = document.querySelector("#recent-projects-list");
+  if (!container) return;
+  const projects = state.recentProjects || [];
+  if (!projects.length) {
+    container.innerHTML = "<div><span>暂无最近项目</span></div>";
+    return;
+  }
+  container.innerHTML = projects.slice(0, 6).map(p => `
+    <button class="project-mini-item" data-action="open-recent" data-path="${escapeHtml(p.path)}">
+      <strong class="project-mini-title">${escapeHtml(p.name)}</strong>
+      <span class="project-mini-meta">${escapeHtml(p.last_opened_at?.slice(0, 10) || "")}</span>
+    </button>
+  `).join("");
+}
+
 function renderBottomPanel() {
   const tabs = [
-    ["timeline", "时间线"],
-    ["diff", "Diff"],
-    ["artifacts", "交付物"],
-    ["recovery", "恢复"],
-    ["preview", "预览"],
     ["report", "报告"],
+    ["diff", "Diff"],
+    ["timeline", "事件"],
+    ["recovery", "恢复"],
+    ["artifacts", "交付物"],
   ];
   const collapsed = state.layout?.bottomCollapsed;
 
@@ -2009,6 +2317,7 @@ function renderRecovery() {
   const points = center.recovery_points || [];
   const risks = center.risks || [];
   const actions = center.actions || [];
+  const failureGroups = center.failure_groups || [];
   return `
     <div class="recovery-center">
       <section class="recovery-summary">
@@ -2046,6 +2355,24 @@ function renderRecovery() {
           </div>
         </div>
       </section>
+      ${failureGroups.length ? `
+      <section class="recovery-failure-groups">
+        <h3>失败原因分类</h3>
+        <div class="failure-group-list">
+          ${failureGroups.map(g => `
+            <div class="failure-group-chip">
+              <span class="badge ${escapeHtml(g.category)}">${escapeHtml(g.category)}</span>
+              <strong>${escapeHtml(g.count)}</strong>
+            </div>
+          `).join("")}
+        </div>
+      </section>` : ""}
+      <section class="remediation-panel">
+        <h3>创建补救 Run</h3>
+        <p>基于当前失败的 run 证据，自动生成修复提示并启动新的修复运行。</p>
+        <input id="remediation-instruction" placeholder="补充修复指令（可选）" />
+        <button class="button primary compact-button" data-action="create-remediation" type="button">创建补救 Run</button>
+      </section>
     </div>
   `;
 }
@@ -2058,7 +2385,7 @@ function renderRecoveryAction(action) {
         <strong>${escapeHtml(action.title)}</strong>
         <p>${escapeHtml(action.detail || "")}</p>
       </div>
-      <em>${escapeHtml(recoveryPriorityLabel(action.priority))}</em>
+      ${action.enabled ? `<button class="button compact-button ${action.priority === 'high' ? 'primary' : 'secondary'}" data-action="execute-recovery" data-action-id="${escapeHtml(action.id)}" data-target="${escapeHtml(action.target || '')}" data-target-path="${escapeHtml(action.target_path || '')}" type="button">执行</button>` : ""}
     </article>
   `;
 }
@@ -2555,6 +2882,28 @@ function bindEvents() {
     render();
   });
 
+  document.querySelectorAll("[data-action='goto-capabilities']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.rightTab = "capabilities";
+      state.layout.rightCollapsed = false;
+      saveLayoutPreference();
+      render();
+    });
+  });
+
+  document.querySelector("[data-action='save-settings']")?.addEventListener("click", async () => {
+    await saveWorkspaceSettings();
+  });
+
+  document.querySelectorAll("[data-action='open-recent']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const path = button.dataset.path;
+      if (!path) return;
+      state.workspaceInput = path;
+      await openWorkspace();
+    });
+  });
+
   document.querySelectorAll("[data-action='new-session']").forEach((button) => {
     button.addEventListener("click", async () => {
       await startNewSession();
@@ -2652,6 +3001,116 @@ function bindEvents() {
     state.rightTab = "capabilities";
     state.layout.rightCollapsed = false;
     saveLayoutPreference();
+    render();
+  });
+
+  document.querySelectorAll("[data-action='validate-mcp']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const serverId = button.dataset.serverId;
+      await validateMcpConfig(serverId);
+    });
+  });
+
+  document.querySelectorAll("[data-action='prepare-mcp-config']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rawId = button.dataset.serverId || "";
+      const serverName = rawId.startsWith("mcp.") ? rawId.slice(4) : rawId;
+      document.querySelector("#mcp-server-name-input")?.focus();
+      const nameInput = document.querySelector("#mcp-server-name-input");
+      if (nameInput && !nameInput.value.trim()) {
+        nameInput.value = serverName || button.dataset.serverName || "";
+      }
+    });
+  });
+
+  document.querySelector("#mcp-config-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveMcpServerConfig();
+  });
+
+  document.querySelectorAll("[data-action='skill-detail']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const skillId = button.dataset.skillId;
+      await loadSkillDetail(skillId);
+    });
+  });
+
+  document.querySelector("[data-action='skill-back']")?.addEventListener("click", () => {
+    state.skillDetail = null;
+    state.skillEditing = false;
+    render();
+  });
+
+  document.querySelector("[data-action='skill-edit']")?.addEventListener("click", () => {
+    state.skillEditing = true;
+    render();
+  });
+
+  document.querySelector("[data-action='skill-save']")?.addEventListener("click", async () => {
+    await saveSkillContent();
+  });
+
+  document.querySelector("[data-action='skill-cancel']")?.addEventListener("click", () => {
+    cancelSkillEdit();
+  });
+
+  document.querySelector("[data-action='skill-delete']")?.addEventListener("click", async () => {
+    if (state.skillDetail?.id) await deleteSkill(state.skillDetail.id);
+  });
+
+  document.querySelectorAll("[data-action='execute-recovery']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const actionId = button.dataset.actionId;
+      const target = button.dataset.target || "";
+      const targetPath = button.dataset.targetPath || "";
+      const needsConfirm = actionId === "restore-backup" || actionId === "create-remediation-run";
+      const confirmed = needsConfirm ? confirm(`确认执行 "${actionId}" 动作？`) : true;
+      if (!confirmed) return;
+      try {
+        const threadId = state.currentThreadId || "";
+        const result = await requestJson(
+          `/api/runs/${encodeURIComponent(threadId)}/recovery/actions/${encodeURIComponent(actionId)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action_id: actionId, target, target_path: targetPath, confirmed: true }),
+          }
+        );
+        addTimelineEvent({
+          type: "recovery_action_completed",
+          title: `恢复动作: ${actionId}`,
+          content: result.message || result.status,
+          payload: { result },
+        });
+        loadRecoveryCenter();
+      } catch (error) {
+        addTimelineEvent({ type: "error", title: "恢复动作执行失败", content: error.message });
+      }
+      render();
+    });
+  });
+
+  document.querySelector("[data-action='create-remediation']")?.addEventListener("click", async () => {
+    const instruction = document.querySelector("#remediation-instruction")?.value?.trim() || "";
+    const threadId = state.currentThreadId || "";
+    if (!threadId) return;
+    if (!confirm("确认基于当前失败的 run 创建补救 run？")) return;
+    try {
+      const result = await requestJson(`/api/runs/${encodeURIComponent(threadId)}/remediation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction, failure_id: "" }),
+      });
+      addTimelineEvent({
+        type: "remediation_created",
+        title: "补救 Run 已创建",
+        content: `新 run: ${result.thread_id}`,
+        payload: { result },
+      });
+      document.querySelector("#remediation-instruction") && (document.querySelector("#remediation-instruction").value = "");
+    } catch (error) {
+      addTimelineEvent({ type: "error", title: "创建补救 run 失败", content: error.message });
+    }
     render();
   });
 
@@ -3089,7 +3548,16 @@ async function requestJson(path, options = {}) {
     try {
       const response = await fetch(`${base}${path}`, options);
       if (!response.ok) {
-        throw new Error(`${path} HTTP ${response.status}`);
+        // Try to parse unified error format {error: {code, message, hint}}
+        let errorMessage = `${path} HTTP ${response.status}`;
+        try {
+          const body = await response.json();
+          if (body.error && body.error.message) {
+            errorMessage = body.error.message;
+            if (body.error.hint) errorMessage += ` — ${body.error.hint}`;
+          }
+        } catch (_) { /* use fallback message */ }
+        throw new Error(errorMessage);
       }
       activeApiBase = base;
       return response.json();
@@ -3263,6 +3731,12 @@ async function loadWorkspaceState() {
   try {
     const result = await fetchJson("/api/workspaces");
     const current = result.current_workspace || "";
+    state.workspaceMeta = {
+      default_workspace: result.default_workspace || "",
+      workspace_root: result.workspace_root || "",
+      project_root: result.project_root || "",
+      is_default_workspace: Boolean(result.is_default_workspace),
+    };
     if (current) {
       state.workspaceDir = current;
       state.workspaceInput = current;
@@ -3304,12 +3778,12 @@ async function openWorkspace() {
   }
 
   try {
-    const result = await requestJson("/api/workspaces", {
+    const result = await requestJson("/api/workspaces/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dir }),
+      body: JSON.stringify({ path: dir }),
     });
-    state.workspaceDir = result.workspace_dir || dir;
+    state.workspaceDir = result.path || dir;
     state.workspaceInput = state.workspaceDir;
     localStorage.setItem("agenthub_workspace_dir", state.workspaceDir);
     await startNewSession({ announce: false });
@@ -3325,6 +3799,8 @@ async function openWorkspace() {
       loadBenchmarks(),
       loadMemoryProfile(),
       loadRecoveryCenter(),
+      loadWorkspaceSettings(),
+      loadRecentProjects(),
       refreshWorkspaceData({ allowEmpty: true }),
     ]);
     render();
@@ -3733,6 +4209,152 @@ async function loadCapabilities() {
     state.capabilityRecommendation = inferLocalCapabilityRecommendation(state.prompt);
     render();
   }
+}
+
+async function loadMcpConfig() {
+  try {
+    state.mcpConfig = await fetchJson("/api/capabilities/mcp");
+  } catch {
+    state.mcpConfig = state.mcpConfig || { servers: [], config_paths: [], summary: {} };
+  }
+  render();
+}
+
+async function validateMcpConfig(serverId) {
+  try {
+    const result = await requestJson("/api/capabilities/mcp/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ server_id: serverId || null }),
+    });
+    state.mcpConfig = state.mcpConfig || {};
+    state.mcpConfig.validationByServer = {
+      ...(state.mcpConfig.validationByServer || {}),
+      [serverId || "all"]: result.checks || [],
+    };
+  } catch {
+    state.mcpConfig = state.mcpConfig || {};
+    state.mcpConfig.validationByServer = {
+      ...(state.mcpConfig.validationByServer || {}),
+      [serverId || "all"]: [],
+    };
+  }
+  render();
+}
+
+function parseMcpArgs(raw) {
+  const text = (raw || "").trim();
+  if (!text) return [];
+  const lines = text.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  if (lines.length > 1) return lines;
+  return text.split(/\s+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseMcpEnvKeys(raw) {
+  return (raw || "")
+    .split(/[,\n\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function saveMcpServerConfig() {
+  const serverId = document.querySelector("#mcp-server-name-input")?.value.trim();
+  const command = document.querySelector("#mcp-command-input")?.value.trim();
+  const args = parseMcpArgs(document.querySelector("#mcp-args-input")?.value || "");
+  const envKeys = parseMcpEnvKeys(document.querySelector("#mcp-env-input")?.value || "");
+
+  if (!serverId || !command) {
+    addTimelineEvent({
+      type: "error",
+      title: "MCP 配置不完整",
+      content: "请填写 server 名称和启动命令。",
+    });
+    return;
+  }
+
+  try {
+    const result = await requestJson("/api/capabilities/mcp/servers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ server_id: serverId, command, args, env_keys: envKeys }),
+    });
+    state.mcpConfig = result.config || state.mcpConfig;
+    state.capabilityHub = result.hub || state.capabilityHub;
+    await loadWorkspaceOverview();
+    addTimelineEvent({
+      type: "capability_used",
+      title: "MCP Server 已配置",
+      content: `${result.server?.id || serverId} 已写入 .nanocursor/mcp.json。`,
+      payload: {
+        capability_trace: {
+          capability_name: result.server?.name || serverId,
+          capability_id: result.server?.id || `mcp.${serverId}`,
+          kind: "mcp",
+          agent: "Lead",
+        },
+      },
+    });
+  } catch (error) {
+    addTimelineEvent({
+      type: "error",
+      title: "保存 MCP 配置失败",
+      content: error.message,
+    });
+  }
+  render();
+}
+
+async function loadSkillDetail(skillId) {
+  try {
+    state.skillDetail = await fetchJson(`/api/capabilities/skills/${encodeURIComponent(skillId)}`);
+  } catch (error) {
+    state.skillDetail = null;
+    addTimelineEvent({ type: "error", title: "获取 Skill 详情失败", content: error.message });
+  }
+  state.skillEditing = false;
+  state.rightTab = "capabilities";
+  render();
+}
+
+async function saveSkillContent() {
+  const skillId = state.skillDetail?.id;
+  const content = document.querySelector("#skill-edit-textarea")?.value;
+  if (!skillId || content == null) return;
+  try {
+    const result = await requestJson(`/api/capabilities/skills/${encodeURIComponent(skillId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    state.skillDetail = result;
+    state.skillEditing = false;
+    addTimelineEvent({ type: "capability_used", title: "Skill 已更新", content: `${result.name} 内容已保存。` });
+    loadCapabilities();
+    loadWorkspaceOverview();
+  } catch (error) {
+    addTimelineEvent({ type: "error", title: "保存 Skill 失败", content: error.message });
+  }
+  render();
+}
+
+async function deleteSkill(skillId) {
+  if (!confirm("确认删除此 Skill？此操作不可撤销。")) return;
+  try {
+    await requestJson(`/api/capabilities/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+    state.skillDetail = null;
+    state.skillEditing = false;
+    addTimelineEvent({ type: "capability_used", title: "Skill 已删除", content: `${skillId} 已从工作区移除。` });
+    loadCapabilities();
+    loadWorkspaceOverview();
+  } catch (error) {
+    addTimelineEvent({ type: "error", title: "删除 Skill 失败", content: error.message });
+  }
+  render();
+}
+
+function cancelSkillEdit() {
+  state.skillEditing = false;
+  render();
 }
 
 function scheduleCapabilityRecommendation(prompt) {
@@ -4338,6 +4960,10 @@ async function hydrateRunArtifacts(threadId, { refreshWorkspace = true } = {}) {
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/traceability`),
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/artifacts`),
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/recovery`),
+    // R1-R6: delivery, changes, failures
+    fetchJson(`/api/runs/${encodeURIComponent(threadId)}/delivery`),
+    fetchJson(`/api/runs/${encodeURIComponent(threadId)}/changes`),
+    fetchJson(`/api/runs/${encodeURIComponent(threadId)}/failures`),
   ];
   if (refreshWorkspace) {
     requests.push(refreshWorkspaceData({ allowEmpty: true }));
@@ -4345,7 +4971,10 @@ async function hydrateRunArtifacts(threadId, { refreshWorkspace = true } = {}) {
 
   const results = await Promise.allSettled(requests);
 
-  const [diffResult, reportResult, traceabilityResult, artifactsResult, recoveryResult] = results;
+  const [
+    diffResult, reportResult, traceabilityResult, artifactsResult, recoveryResult,
+    deliveryResult, changesResult, failuresResult,
+  ] = results;
 
   if (diffResult.status === "fulfilled") {
     const diffInfo = diffResult.value;
@@ -4381,6 +5010,42 @@ async function hydrateRunArtifacts(threadId, { refreshWorkspace = true } = {}) {
 
   if (recoveryResult.status === "fulfilled") {
     state.recoveryCenter = recoveryResult.value;
+  }
+
+  // R1: delivery contract
+  if (deliveryResult.status === "fulfilled") {
+    const dc = deliveryResult.value;
+    if (dc) {
+      state.report.delivery = dc;
+      state.report.summary = dc.summary || state.report.summary;
+      state.report.changedFiles = (dc.changed_files || []).map((f) => f.path || f);
+      state.report.risks = dc.risks || state.report.risks;
+      state.currentRunStatus = dc.status;
+    }
+  }
+
+  // R2: change set
+  if (changesResult.status === "fulfilled") {
+    const cs = changesResult.value;
+    if (cs && cs.files) {
+      state.diffFiles = cs.files.map((f) => ({
+        path: f.path,
+        changeType: f.change_type,
+        risk: f.risk,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+      state.metrics.files = cs.files.length;
+    }
+  }
+
+  // R4: failure records
+  if (failuresResult.status === "fulfilled") {
+    const failures = failuresResult.value;
+    if (failures && failures.failures) {
+      state.recoveryCenter = state.recoveryCenter || {};
+      state.recoveryCenter.failures = failures.failures;
+    }
   }
 
   render();
@@ -4751,9 +5416,12 @@ loadWorkspaceState().finally(() => {
   loadWorkspaceOverview();
   loadRunHistory();
   loadCapabilities();
+  loadMcpConfig();
   loadBenchmarks();
   loadMemoryProfile();
   loadRecoveryCenter();
+  loadWorkspaceSettings();
+  loadRecentProjects();
   refreshWorkspaceData({ allowEmpty: false }).catch(() => {
     render();
   });

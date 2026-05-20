@@ -1,7 +1,7 @@
 import json
 
 from src.api.services.event_store import EventStore
-from src.api.services.run_history import list_run_history
+from src.api.services.run_history import list_run_history, rebuild_run_index
 
 
 def test_event_store_creates_session_and_events(tmp_path):
@@ -99,6 +99,9 @@ def test_list_run_history_sorts_and_summarizes_artifacts(tmp_path):
     assert runs[0]["changed_files_count"] == 1
     assert runs[0]["has_diff"] is True
     assert runs[0]["has_report"] is True
+    index = json.loads((workspace / ".nanocursor" / "runs" / "index.json").read_text(encoding="utf-8"))
+    assert index["schema_version"] == 1
+    assert [run["thread_id"] for run in index["runs"]] == ["newer", "older"]
 
 
 def test_list_run_history_filters_and_limits(tmp_path):
@@ -112,3 +115,32 @@ def test_list_run_history_filters_and_limits(tmp_path):
 
     assert len(runs) == 1
     assert runs[0]["thread_id"] == "a"
+
+
+def test_run_index_updates_on_session_status_change(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    store.create_session("run-1", "prompt", str(workspace), status="running")
+    store.update_session("run-1", str(workspace), status="completed")
+
+    index = json.loads((workspace / ".nanocursor" / "runs" / "index.json").read_text(encoding="utf-8"))
+    assert index["runs"][0]["thread_id"] == "run-1"
+    assert index["runs"][0]["status"] == "completed"
+
+
+def test_list_run_history_rebuilds_corrupted_index(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("run-1", "prompt", str(workspace), status="completed")
+
+    index_path = workspace / ".nanocursor" / "runs" / "index.json"
+    index_path.write_text("{bad json", encoding="utf-8")
+
+    runs = list_run_history(str(workspace))
+    rebuilt = rebuild_run_index(str(workspace))
+
+    assert runs[0]["thread_id"] == "run-1"
+    assert rebuilt["runs"][0]["thread_id"] == "run-1"

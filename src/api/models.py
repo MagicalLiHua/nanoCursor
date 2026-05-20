@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ============================================================
 # 通用类型定义
@@ -407,6 +407,7 @@ class RollbackRequest(BaseModel):
     """从备份回滚文件"""
     backup_name: str = Field(..., min_length=1)
     target_path: str = Field(..., min_length=1)
+    confirmed: bool = False
 
 
 class RollbackResponse(BaseModel):
@@ -609,3 +610,298 @@ class AgentStateResponse(BaseModel):
     cancelled: bool = False
     # 其他字段作为原始值传递
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+# ============================================================
+# MCP 配置
+# ============================================================
+
+
+class McpServerItem(BaseModel):
+    """MCP server 配置项"""
+    id: str
+    name: str
+    status: str
+    source: str = ""
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env_keys: list[str] = Field(default_factory=list)
+    setup_hint: str = ""
+    last_used_run_id: str | None = None
+
+
+class McpConfigResponse(BaseModel):
+    """MCP 配置详情响应"""
+    workspace_dir: str
+    config_paths: list[str] = Field(default_factory=list)
+    servers: list[McpServerItem] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpValidateRequest(BaseModel):
+    """MCP 配置验证请求"""
+    server_id: str | None = None
+
+
+# ============================================================
+# Skill 详情与编辑
+# ============================================================
+
+
+class SkillDetailResponse(BaseModel):
+    """Skill 详情"""
+    id: str
+    name: str
+    status: str
+    source: str
+    path: str
+    description: str = ""
+    content: str
+    agents: list[str] = Field(default_factory=list)
+    use_cases: list[str] = Field(default_factory=list)
+    last_used_run_id: str | None = None
+
+
+class SkillUpdateRequest(BaseModel):
+    """Skill 内容更新请求"""
+    content: str = Field(..., min_length=1)
+
+
+# ============================================================
+# 恢复动作执行
+# ============================================================
+
+
+class RecoveryActionRequest(BaseModel):
+    """恢复动作执行请求"""
+    action_id: str | None = None
+    target: str = ""
+    target_path: str = ""
+    confirmed: bool = False
+
+
+class RecoveryActionResponse(BaseModel):
+    """恢复动作执行结果"""
+    ok: bool
+    action_id: str
+    status: str
+    message: str
+    event: dict[str, Any] | None = None
+
+
+class RemediationRunRequest(BaseModel):
+    """补救 run 请求"""
+    failure_id: str = ""
+    instruction: str = ""
+
+
+# ============================================================
+# 工作区注册、设置与健康
+# ============================================================
+
+
+class WorkspaceIdentity(BaseModel):
+    """工作区身份"""
+    workspace_id: str
+    name: str
+    path: str
+    trusted: bool = False
+    created_at: str = ""
+    last_opened_at: str = ""
+    nanocursor_version: str = ""
+
+
+class WorkspaceSettings(BaseModel):
+    """工作区设置"""
+    model: dict[str, Any] = Field(default_factory=dict)
+    safety: dict[str, Any] = Field(default_factory=dict)
+    indexing: dict[str, Any] = Field(default_factory=dict)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    runtime: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceHealth(BaseModel):
+    """工作区健康状态"""
+    workspace_id: str = ""
+    path: str
+    exists: bool = True
+    writable: bool = True
+    is_git_repo: bool = False
+    index_status: str = "pending"
+    setting_count: int = 0
+    run_count: int = 0
+    backup_count: int = 0
+
+
+class OpenWorkspaceRequest(BaseModel):
+    """打开工作区请求"""
+    path: str = Field(..., min_length=1)
+
+
+class SetWorkspaceRequest(BaseModel):
+    """切换当前工作区请求（兼容旧前端的 dir 字段）"""
+    dir: str = Field(..., min_length=1)
+
+
+class McpServerUpsertRequest(BaseModel):
+    """MCP Server 配置写入请求"""
+    server_id: str = Field(..., min_length=1, max_length=80)
+    command: str = Field(..., min_length=1, max_length=200)
+    args: list[str] = Field(default_factory=list, max_length=50)
+    env_keys: list[str] = Field(default_factory=list, max_length=50)
+    enabled: bool = True
+    ignored_env_keys: list[str] = Field(default_factory=list, max_length=50)
+
+
+class GitCommitRequest(BaseModel):
+    """Git 提交请求"""
+    message: str = Field(..., min_length=1, max_length=200)
+
+
+class ContextPackRequest(BaseModel):
+    """上下文打包请求"""
+    objective: str = Field(default="", max_length=2000)
+    workspace_dir: str | None = None
+
+
+class EvalSuiteRunRequest(BaseModel):
+    """Eval 套件运行请求"""
+    eval_ids: list[str] = Field(default_factory=list)
+    mode: str = "agent"
+    stop_on_failure: bool = False
+
+
+class EvalScoreRequest(BaseModel):
+    """Eval 重新评分请求"""
+    signals: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceSettingsUpdateRequest(BaseModel):
+    """工作区设置更新请求（支持任意设置字段的部分更新）"""
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_body(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "settings" not in data:
+            return {"settings": data}
+        return data
+
+
+class WorkspaceSettingsValidateRequest(BaseModel):
+    """工作区设置校验请求。为空时校验当前持久化设置。"""
+    settings: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_body(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "settings" not in data:
+            return {"settings": data}
+        return data
+
+
+class ToolApprovalResolveRequest(BaseModel):
+    """工具审批决策请求"""
+    approved: bool = False
+    comment: str = ""
+
+
+class PolicyDecisionRecordRequest(BaseModel):
+    """策略决策记录请求"""
+    decision: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_body(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "decision" not in data:
+            return {"decision": data}
+        return data
+
+
+class McpEnabledRequest(BaseModel):
+    """MCP 服务启停请求"""
+    enabled: bool = True
+
+
+class McpToolCallRequest(BaseModel):
+    """MCP 工具调用请求"""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_body(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "arguments" not in data:
+            return {"arguments": data}
+        return data
+
+
+class ConfirmedActionRequest(BaseModel):
+    """需要确认的操作请求"""
+    confirmed: bool = False
+
+
+# ---------------------------------------------------------------------------
+# R1: Delivery Contract
+# ---------------------------------------------------------------------------
+
+
+class DeliveryFinalizeRequest(BaseModel):
+    """Finalize delivery contract for a run."""
+    force: bool = False
+
+
+class DeliveryRegenerateRequest(BaseModel):
+    """Regenerate delivery contract from run data."""
+    include_markdown: bool = True
+
+
+# ---------------------------------------------------------------------------
+# R2: Change Set
+# ---------------------------------------------------------------------------
+
+
+class ChangeSetCollectRequest(BaseModel):
+    """Collect file changes for a run."""
+    include_untracked: bool = True
+
+
+class ChangeSetReviewRequest(BaseModel):
+    """Review changes with risk rules."""
+    mode: str = "rule_first"  # rule_first | llm_assist
+
+
+class ChangeSetApproveRequest(BaseModel):
+    """Approve or reject the change set."""
+    approved: bool = True
+    comment: str = ""
+
+
+# ---------------------------------------------------------------------------
+# R4: Failure Classification & Remediation
+# ---------------------------------------------------------------------------
+
+
+class RemediationRequest(BaseModel):
+    """Request to remediate a failure."""
+    mode: str = "auto"  # auto | manual
+    confirmed: bool = True
+
+
+# ---------------------------------------------------------------------------
+# R5: Action Policy & Audit
+# ---------------------------------------------------------------------------
+
+
+class ActionCheckRequest(BaseModel):
+    """Pre-flight check for an action."""
+    kind: str           # ActionKind value
+    target: str = ""    # file path, command, or tool name
+    thread_id: str = ""
+
+
+class ActionExecuteRequest(BaseModel):
+    """Execute an action through the unified pipeline."""
+    kind: str
+    target: str = ""
+    payload: dict | None = None
+    thread_id: str = ""

@@ -440,9 +440,10 @@ def emit_demo_run(
     delay: float = 0.35,
     status_callback: Callable[[str], None] | None = None,
     approval_waiter: Callable[[float], str | None] | None = None,
+    artifacts: dict[str, Any] | None = None,
 ) -> None:
     """Emit a complete deterministic AgentHub run."""
-    artifacts = write_demo_artifacts(thread_id, workspace_dir)
+    artifacts = artifacts or write_demo_artifacts(thread_id, workspace_dir)
 
     def emit(event_type: str, title: str, content: str = "", agent: str = "lead", payload=None):
         store.append_event(
