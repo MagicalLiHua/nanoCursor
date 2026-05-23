@@ -31,7 +31,7 @@ http://127.0.0.1:8100
 如果需要改后端地址，在浏览器控制台设置：
 
 ```js
-localStorage.setItem("agenthub_api_base", "http://127.0.0.1:8100")
+localStorage.setItem("nanocursor_api_base", "http://127.0.0.1:8100")
 ```
 
 ## 当前页面
@@ -43,7 +43,7 @@ localStorage.setItem("agenthub_api_base", "http://127.0.0.1:8100")
 
 ## 后续迁移
 
-当前零依赖版本用于快速稳定比赛原型。等后端事件和页面交互稳定后，可以平滑迁移到：
+当前零依赖版本用于快速稳定个人项目展示。等后端事件和页面交互稳定后，可以平滑迁移到：
 
 - React + Vite + TypeScript。
 - Zustand 或 Context 状态管理。

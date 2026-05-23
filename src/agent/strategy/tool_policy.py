@@ -58,7 +58,7 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "small_patch":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                           "list_directory", "task_create", "task_update"],
+                           "list_directory", "task_create", "task_update", "task_list"],
             denied_tools=["delete_file"],
             approval_required=[],
             budgets={"max_tool_calls": 15, "max_file_writes": 3, "max_test_runs": 2},
@@ -67,7 +67,8 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "bug_fix":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                           "list_directory", "bash", "task_create", "task_update", "run_tests"],
+                           "list_directory", "bash", "task_create", "task_update", "task_list",
+                           "run_tests", "git_status", "git_diff"],
             denied_tools=["delete_file"],
             approval_required=["bash"],
             budgets={"max_tool_calls": 30, "max_file_writes": 5, "max_test_runs": 5},
@@ -76,8 +77,8 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "refactor":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                           "list_directory", "bash", "task_create", "task_update",
-                           "run_tests", "project_context"],
+                           "list_directory", "bash", "task_create", "task_update", "task_list",
+                           "run_tests", "project_context", "git_status", "git_diff"],
             denied_tools=["delete_file"],
             approval_required=["bash", "write_file"],
             budgets={"max_tool_calls": 50, "max_file_writes": 12, "max_test_runs": 5},
@@ -86,7 +87,7 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "docs_only":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "list_directory",
-                           "write_file", "task_create", "task_update", "project_context"],
+                           "write_file", "task_create", "task_update", "task_list", "project_context"],
             denied_tools=["bash", "edit_file", "delete_file", "run_tests"],
             approval_required=[],
             budgets={"max_tool_calls": 10, "max_file_writes": 3, "max_test_runs": 0},
@@ -95,7 +96,7 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "analysis_only":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "list_directory",
-                           "project_context", "task_create", "task_update"],
+                           "project_context", "task_create", "task_update", "task_list"],
             denied_tools=["write_file", "edit_file", "bash", "delete_file", "run_tests"],
             approval_required=[],
             budgets={"max_tool_calls": 20, "max_file_writes": 0, "max_test_runs": 0},
@@ -104,10 +105,10 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     # feature_delivery (default)
     return ToolPolicy(
         allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                       "list_directory", "bash", "task_create", "task_update",
-                       "run_tests", "project_context", "add_memory", "recall_memories"],
+                       "list_directory", "bash", "task_create", "task_update", "task_list",
+                       "run_tests", "project_context", "add_memory", "recall_memories", "git_status", "git_diff"],
         denied_tools=["delete_file"],
         approval_required=["bash"],
-        budgets={"max_tool_calls": 40, "max_file_writes": 8, "max_test_runs": 3},
+        budgets={"max_tool_calls": 60, "max_file_writes": 10, "max_test_runs": 8},
         risk_level="medium",
     )

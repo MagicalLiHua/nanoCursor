@@ -1,4 +1,4 @@
-"""Deterministic AgentHub demo run used for stable competition demos."""
+"""Deterministic nanoCursor demo run used for stable local showcases."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ DEMO_TEAM = [
         "name": "Lead",
         "role": "lead",
         "status": "working",
-        "goal": "Coordinate the AgentHub delivery and keep every artifact aligned with the request.",
+        "goal": "Coordinate the nanoCursor delivery and keep every artifact aligned with the request.",
         "tools": ["plan", "delegate", "report"],
         "last_action": "接管用户需求并启动交付流程。",
         "artifacts": ["report", "score"],
@@ -149,13 +149,13 @@ DEMO_FILES = {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AgentHub Todo Demo</title>
+    <title>nanoCursor Todo Demo</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="todo-shell">
       <section class="todo-panel">
-        <p class="eyebrow">AgentHub delivery demo</p>
+        <p class="eyebrow">nanoCursor delivery demo</p>
         <h1>Todo Workspace</h1>
         <form id="todo-form" class="todo-form">
           <input id="todo-input" placeholder="Add a task" autocomplete="off" />
@@ -260,7 +260,7 @@ button {
   text-decoration: line-through;
 }
 """,
-    "demo-todo/app.js": """const STORAGE_KEY = "agenthub-demo-todos";
+    "demo-todo/app.js": """const STORAGE_KEY = "nanocursor-demo-todos";
 
 const form = document.querySelector("#todo-form");
 const input = document.querySelector("#todo-input");
@@ -368,7 +368,7 @@ def write_demo_artifacts(thread_id: str, workspace_dir: str) -> dict[str, Any]:
     team_dir = workspace / ".team"
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
-        json.dumps({"team_name": "agenthub-demo", "members": DEMO_TEAM}, ensure_ascii=False, indent=2),
+        json.dumps({"team_name": "nanocursor-demo", "members": DEMO_TEAM}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -401,7 +401,7 @@ def write_demo_artifacts(thread_id: str, workspace_dir: str) -> dict[str, Any]:
 
 def build_demo_report(thread_id: str, workspace: Path, changed_files: list[dict[str, Any]]) -> str:
     changed_lines = "\n".join(f"- {item['path']} ({item['change_type']})" for item in changed_files)
-    return f"""# AgentHub Demo Delivery Report
+    return f"""# nanoCursor Demo Delivery Report
 
 ## Summary
 
@@ -428,7 +428,7 @@ Delivered a deterministic Todo Web App demo with create, complete, delete, searc
 
 ## Next Steps
 
-- Connect this stable demo flow to the recorded competition script.
+- Keep this stable demo flow aligned with the README showcase path.
 - Add automated browser checks when the preview service is added.
 """
 
@@ -442,7 +442,7 @@ def emit_demo_run(
     approval_waiter: Callable[[float], str | None] | None = None,
     artifacts: dict[str, Any] | None = None,
 ) -> None:
-    """Emit a complete deterministic AgentHub run."""
+    """Emit a complete deterministic nanoCursor run."""
     artifacts = artifacts or write_demo_artifacts(thread_id, workspace_dir)
 
     def emit(event_type: str, title: str, content: str = "", agent: str = "lead", payload=None):
@@ -461,7 +461,7 @@ def emit_demo_run(
     emit(
         "assistant_message",
         "Lead 接管需求",
-        "我将按 AgentHub 演示流程完成 Todo Web App 的需求拆解、实现、验证和报告。",
+        "我将按 nanoCursor 演示流程完成 Todo Web App 的需求拆解、实现、验证和报告。",
         "lead",
     )
     emit(
@@ -514,6 +514,13 @@ def emit_demo_run(
             "planner",
             {"plan_id": "demo-plan", "decision": approval_decision},
         )
+    emit(
+        "approval_resolved",
+        "计划已批准",
+        "Demo 计划已确认，继续进入执行阶段。",
+        "lead",
+        {"plan_id": "demo-plan", "decision": approval_decision},
+    )
     emit("team_updated", "团队状态已更新", "Lead 和 Planner 开始工作。", "lead", {"members": DEMO_TEAM})
 
     for task in DEMO_TASKS:

@@ -2,6 +2,7 @@
 """nanoCursor environment doctor — check if the system is ready to run."""
 
 import os
+import argparse
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,25 @@ def run_cmd(cmd: list[str]) -> tuple[int, str]:
         return -1, ""
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Check whether nanoCursor is ready to run.")
+    parser.add_argument(
+        "--workspace-dir",
+        default="",
+        help="Workspace directory to check. Defaults to .nanocursor/workspaces/default.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     checks: list[dict] = []
     issues = 0
+    workspace_dir = (
+        Path(args.workspace_dir).expanduser().resolve()
+        if args.workspace_dir
+        else PROJECT_ROOT / ".nanocursor" / "workspaces" / "default"
+    )
 
     def add(status: str, name: str, message: str) -> None:
         nonlocal issues
@@ -36,6 +53,7 @@ def main() -> int:
             issues += 1
 
     print("nanoCursor Doctor\n")
+    print(f"Workspace: {workspace_dir}\n")
 
     # Python
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -108,12 +126,11 @@ def main() -> int:
         add("warn", "Git", "not found")
 
     # Writeable workspace
-    ws_dir = PROJECT_ROOT / ".nanocursor" / "workspaces" / "default"
-    ws_dir.mkdir(parents=True, exist_ok=True)
-    if os.access(ws_dir, os.W_OK):
-        add("pass", "Workspace", f"writable ({ws_dir})")
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    if os.access(workspace_dir, os.W_OK):
+        add("pass", "Workspace", f"writable ({workspace_dir})")
     else:
-        add("fail", "Workspace", f"not writable: {ws_dir}")
+        add("fail", "Workspace", f"not writable: {workspace_dir}")
 
     # Playwright
     pw_browsers = Path.home() / "Library" / "Caches" / "ms-playwright"
@@ -131,7 +148,7 @@ def main() -> int:
 
     # MCP config
     mcp_files = [".mcp.json", ".cursor/mcp.json", ".nanocursor/mcp.json"]
-    mcp_found = any((PROJECT_ROOT / f).exists() for f in mcp_files)
+    mcp_found = any((workspace_dir / f).exists() for f in mcp_files)
     if mcp_found:
         add("pass", "MCP Config", "at least one mcp.json found")
     else:

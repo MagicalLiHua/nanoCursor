@@ -180,6 +180,24 @@ def run_bash(command: str) -> str:
         return f"Error: {e}"
 
 
+def run_list_directory(path: str = ".") -> str:
+    """List a workspace-relative directory without shell/platform quirks."""
+    try:
+        target = safe_path(path or ".")
+        if not target.exists():
+            return f"Error: Path not found: {path}"
+        if not target.is_dir():
+            return f"Error: Not a directory: {path}"
+
+        entries = []
+        for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+            suffix = "/" if child.is_dir() else ""
+            entries.append(f"{child.name}{suffix}")
+        return "\n".join(entries) or "(empty directory)"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def run_tests(test_path: str = "", framework: str = "auto") -> str:
     """Run the project's test suite and return results.
 
@@ -579,7 +597,7 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "read_file": _safe_handler(["path"], lambda path, limit=None: run_read(path, limit)),
     "write_file": _safe_handler(["path", "content"], lambda path, content: run_write(path, content)),
     "edit_file": _safe_handler(["path", "new_text"], lambda path, old_text="", new_text="", start_line=None, end_line=None: run_edit(path, old_text, new_text, start_line, end_line)),
-    "list_directory": lambda **kw: run_bash(f'dir /b "{kw.get("path", ".")}" 2>nul'),
+    "list_directory": lambda **kw: run_list_directory(kw.get("path", ".")),
     "run_tests": lambda test_path="", framework="auto", **kw: run_tests(test_path, framework),
 }
 

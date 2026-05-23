@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.strategy.planner import get_strategy_definition, get_tool_policy, select_strategy
+from src.api.services.capability_service import build_mcp_execution_plan
 
 
 ROLE_ALIASES = {
@@ -25,9 +26,9 @@ CAPABILITY_TOOL_MAP = {
     "tool.recovery": ["bash"],
     "skill.frontend-polish": ["read_file", "edit_file", "write_file"],
     "skill.delivery-review": ["bash", "task_update"],
-    "mcp.docs": ["project_context", "search_codebase"],
-    "mcp.figma": ["read_file"],
-    "mcp.github": ["bash"],
+    "mcp.docs": ["mcp_call", "project_context", "search_codebase"],
+    "mcp.figma": ["mcp_call", "read_file"],
+    "mcp.github": ["mcp_call", "bash"],
 }
 
 BASE_RECOMMENDED_TOOLS = ["task_create", "task_update", "task_list"]
@@ -139,7 +140,7 @@ def build_tool_policy(capability_ids: list[str] | None = None) -> dict[str, Any]
     if unmatched:
         notes.append(f"未匹配到工具映射的能力: {', '.join(unmatched[:8])}。")
     if planned_mcp:
-        notes.append(f"MCP 能力 {', '.join(planned_mcp[:5])} 会优先作为上下文约束，未接入时使用本地工具兜底。")
+        notes.append(f"MCP 能力 {', '.join(planned_mcp[:5])} 会优先通过 mcp_call 使用；不可用时再使用本地工具兜底。")
 
     return {
         "mode": "recommend_only",
@@ -310,6 +311,7 @@ def build_execution_plan(
     tool_policy_obj = get_tool_policy(strategy_id)
     tool_policy = {**tool_policy_obj.to_dict(), **build_tool_policy(capability_ids)}
     skill_context = load_skill_context(capability_ids, workspace_dir)
+    mcp_plan = build_mcp_execution_plan(capability_ids, workspace_dir=workspace_dir)
 
     return {
         "prompt": prompt,
@@ -323,12 +325,15 @@ def build_execution_plan(
         "capabilities": capability_ids,
         "tool_policy": tool_policy,
         "skill_context": skill_context,
+        "mcp_plan": mcp_plan,
         "summary": {
             "agent_count": len(members),
             "stage_count": len(stages),
             "capability_count": len(capability_ids),
             "recommended_tool_count": len(tool_policy["recommended_tools"]),
             "skill_context_count": len(skill_context),
+            "mcp_count": len(mcp_plan),
+            "usable_mcp_count": sum(1 for item in mcp_plan if item.get("usable")),
             "risk_count": len(risks),
             "optional_stage_count": sum(1 for stage in stages if not stage.get("required", True)),
         },
@@ -362,6 +367,7 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
     risks = execution_plan.get("risks") if isinstance(execution_plan.get("risks"), list) else []
     tool_policy = execution_plan.get("tool_policy") if isinstance(execution_plan.get("tool_policy"), dict) else {}
     skill_context = execution_plan.get("skill_context") if isinstance(execution_plan.get("skill_context"), list) else []
+    mcp_plan = execution_plan.get("mcp_plan") if isinstance(execution_plan.get("mcp_plan"), list) else []
     members = list(team or [])
 
     lines = [
@@ -410,11 +416,24 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
         for item in skill_context[:4]:
             lines.append(f"  - {item.get('id', 'skill')} ({item.get('source', 'unknown')}): {item.get('content', '')}")
 
+    if mcp_plan:
+        lines.append("- MCP 使用计划:")
+        for item in mcp_plan[:5]:
+            tools = item.get("tools") if isinstance(item.get("tools"), list) else []
+            tool_names = ", ".join(str(tool.get("name", "")) for tool in tools[:5] if isinstance(tool, dict) and tool.get("name"))
+            state = "可用" if item.get("usable") else "不可用/待配置"
+            suffix = f"；可用工具: {tool_names}" if tool_names else ""
+            lines.append(
+                f"  - {item.get('server_id')}: {state}；状态: {item.get('status', 'unknown')}；"
+                f"{item.get('reason', '')}{suffix}"
+            )
+
     lines.extend(
         [
             "- 工具使用策略:",
             "  - 开始实现前，先用 task_create 为每个阶段创建任务。",
             "  - 需要理解项目时优先使用 project_context / search_codebase / list_directory / read_file。",
+            "  - MCP 计划中标记为可用的 server，可以在用户审批后通过 mcp_call 调用；不可用或未配置时不要硬调用。",
             "  - 写代码时优先使用 write_file / edit_file，并保持变更小而可审查。",
             "  - 验证阶段必须尝试运行合适的检查命令；若无法运行，要说明原因和替代验证方式。",
             "  - 如果团队包含 Reviewer，需要在最终回复中单独说明 Diff 风险与复核结论。",

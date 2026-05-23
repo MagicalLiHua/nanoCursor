@@ -16,6 +16,10 @@ from src.api.models import (
     WorkspaceSettingsValidateRequest,
 )
 from src.api.services.observability_service import build_workspace_observability
+from src.api.services.migration_service import (
+    inspect_workspace_migrations,
+    migrate_workspace,
+)
 from src.api.services.workspace_registry_service import (
     list_recent_projects,
     open_project,
@@ -108,6 +112,19 @@ async def validate_workspace_settings(request: WorkspaceSettingsValidateRequest 
 @router.get("/workspace/health")
 async def get_workspace_health(workspace_dir: str | None = None):
     return WorkspaceHealth(**build_workspace_health(workspace_dir or get_active_workspace()))
+
+
+@router.get("/workspace/migration")
+async def inspect_workspace_migration(workspace_dir: str | None = None):
+    return inspect_workspace_migrations(workspace_dir or get_active_workspace())
+
+
+@router.post("/workspace/migrate")
+async def migrate_active_workspace(workspace_dir: str | None = None, dry_run: bool = False):
+    try:
+        return migrate_workspace(workspace_dir or get_active_workspace(), dry_run=dry_run)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/workspaces")

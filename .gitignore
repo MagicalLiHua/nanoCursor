@@ -79,6 +79,11 @@ memory/
 
 # 日志
 *.log
+
+# 文档归档
+# 核心 docs 需要进入 GitHub；历史路线和实施记录保留在本地归档即可。
+docs/archive/
+docs/backend-audit-report.md
 docs/
 
 # 操作系统

@@ -55,20 +55,52 @@ STRATEGY_DEFS: dict[str, dict[str, Any]] = {
 }
 
 
-# Keyword → strategy mapping (checked in order, first match wins)
-STRATEGY_RULES: list[tuple[list[str], str]] = [
-    (["文档", "readme", "readme", "说明", "注释", "doc", "docs", "documentation",
-      "写清楚", "解释"], "docs_only"),
-    (["只分析", "只读", "分析一下", "帮我看看", "检查一下这个项目",
-      "有什么问题", "review the code", "code review", "只查看",
-      "分析.*不.*改", "不.*修改.*只"], "analysis_only"),
-    (["小改", "小修", "一行", "typo", "拼写", "配置", "改个", "修个",
-      "简单", "很快", "就改一个", "调整一下"], "small_patch"),
-    (["bug", "修复", "报错", "错误", "异常", "失败", "崩溃", "fix",
-      "debug", "defect", "regression", "回归"], "bug_fix"),
-    (["重构", "重写", "整理", "拆分", "合并", "refactor", "restructure",
-      "clean up", "清理", "优化结构"], "refactor"),
+ANALYSIS_ONLY_KEYWORDS = [
+    "只分析", "只读", "分析一下", "帮我看看", "检查一下这个项目",
+    "有什么问题", "review the code", "code review", "只查看",
+    "分析.*不.*改", "不.*修改.*只",
 ]
+
+SMALL_PATCH_KEYWORDS = [
+    "小改", "小修", "一行", "typo", "拼写", "配置", "改个", "修个",
+    "简单", "很快", "就改一个", "调整一下",
+]
+
+BUG_FIX_KEYWORDS = [
+    "bug", "修复", "报错", "错误", "异常", "失败", "崩溃", "fix",
+    "debug", "defect", "regression", "回归",
+]
+
+REFACTOR_KEYWORDS = [
+    "重构", "重写", "整理", "拆分", "合并", "refactor", "restructure",
+    "clean up", "清理", "优化结构",
+]
+
+DOCS_ONLY_KEYWORDS = [
+    "文档", "readme", "说明", "注释", "doc", "docs", "documentation",
+    "写清楚", "解释",
+]
+
+FEATURE_INTENT_KEYWORDS = [
+    "创建", "新建", "实现", "开发", "生成", "做一个", "支持", "命令",
+    "测试", "pytest", "unittest", "cli", "api", "接口", "页面", "组件",
+    "工具", "脚本", "保存", "读取", "新增", "删除", "完成",
+]
+
+CODE_ARTIFACT_PATTERNS = [
+    r"\b[\w\-]+\.(py|js|ts|tsx|jsx|html|css|json|yaml|yml|toml|mdx)\b",
+    r"\btests?/",
+    r"\bpytest\b",
+    r"\bunittest\b",
+]
+
+
+def _matches_any(text: str, patterns: list[str]) -> bool:
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def _has_feature_intent(text: str) -> bool:
+    return _matches_any(text, FEATURE_INTENT_KEYWORDS) or _matches_any(text, CODE_ARTIFACT_PATTERNS)
 
 
 def select_strategy(prompt: str) -> str:
@@ -78,10 +110,18 @@ def select_strategy(prompt: str) -> str:
     Falls back to 'feature_delivery' if no keywords match.
     """
     text = (prompt or "").lower()
-    for keywords, strategy_id in STRATEGY_RULES:
-        for kw in keywords:
-            if re.search(kw, text, re.IGNORECASE):
-                return strategy_id
+    if _matches_any(text, ANALYSIS_ONLY_KEYWORDS):
+        return "analysis_only"
+    if _matches_any(text, SMALL_PATCH_KEYWORDS):
+        return "small_patch"
+    if _matches_any(text, BUG_FIX_KEYWORDS):
+        return "bug_fix"
+    if _matches_any(text, REFACTOR_KEYWORDS):
+        return "refactor"
+    if _has_feature_intent(text):
+        return "feature_delivery"
+    if _matches_any(text, DOCS_ONLY_KEYWORDS):
+        return "docs_only"
     return "feature_delivery"
 
 

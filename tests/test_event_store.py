@@ -1,7 +1,9 @@
 import json
 
 from src.api.services.event_store import EventStore
-from src.api.services.run_history import list_run_history, rebuild_run_index
+from src.api.services.run_context import RunContext
+from src.api.services.run_history import list_run_history, list_run_history_with_active, rebuild_run_index
+from src.runtime.run_manager import RunManager
 
 
 def test_event_store_creates_session_and_events(tmp_path):
@@ -144,3 +146,28 @@ def test_list_run_history_rebuilds_corrupted_index(tmp_path):
 
     assert runs[0]["thread_id"] == "run-1"
     assert rebuilt["runs"][0]["thread_id"] == "run-1"
+
+
+def test_list_run_history_with_active_overlays_runtime_state(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("run-1", "prompt", str(workspace), status="created")
+
+    manager = RunManager()
+    manager.register(
+        RunContext(
+            thread_id="run-1",
+            workspace_dir=str(workspace),
+            queue=None,  # type: ignore[arg-type]
+            metadata={"prompt": "prompt", "mode": "agenthub_delivery"},
+        )
+    )
+
+    runs = list_run_history_with_active(manager, str(workspace))
+
+    assert runs[0]["thread_id"] == "run-1"
+    assert runs[0]["status"] == "running"
+    assert runs[0]["is_active"] is True
+    assert runs[0]["is_write_mode"] is True
+    assert runs[0]["source"] == "history+active"

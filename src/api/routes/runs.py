@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from src.api.dependencies import get_workspace, raise_404
 from src.api.models import (
@@ -13,6 +13,10 @@ from src.api.models import (
     ChangeSetReviewRequest,
     DeliveryFinalizeRequest,
     DeliveryRegenerateRequest,
+    EphemeralAgentArchiveRequest,
+    EphemeralAgentCompleteRequest,
+    EphemeralAgentSpawnRequest,
+    EphemeralAgentSuggestRequest,
     RemediationRequest,
 )
 from src.api.services.change_service import (
@@ -95,7 +99,7 @@ async def get_changes(thread_id: str):
     workspace = _workspace_for_run(thread_id, require_session=True)
     cs = load_change_set(thread_id, workspace)
     if cs is None:
-        raise_404(f"No change set found for run {thread_id}. Use POST collect first.")
+        cs = collect_changes(thread_id, workspace)
     return cs.model_dump()
 
 
@@ -235,11 +239,14 @@ async def post_action_execute(thread_id: str, request: ActionExecuteRequest):
     """Execute an action through the unified pipeline."""
     from src.api.services.action_execution_service import execute_action
     workspace = _workspace_for_run(thread_id)
+    payload = dict(request.payload or {})
+    if request.approval_id:
+        payload["approval_id"] = request.approval_id
 
     return execute_action(
         kind=request.kind,
         target=request.target,
-        payload=request.payload or {},
+        payload=payload,
         thread_id=thread_id,
         workspace_dir=workspace,
     )
@@ -252,3 +259,88 @@ async def get_audit_trail(thread_id: str):
     workspace = _workspace_for_run(thread_id)
 
     return get_audit_trail(thread_id, workspace)
+
+
+# ---------------------------------------------------------------------------
+# R6: Ephemeral Agents
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{thread_id}/agents")
+async def get_ephemeral_agents(thread_id: str, include_archived: bool = False):
+    """Return temporary sub-agents for a run."""
+    from src.api.services.ephemeral_agent_service import list_ephemeral_agents
+
+    workspace = _workspace_for_run(thread_id)
+    return list_ephemeral_agents(thread_id, workspace, include_archived=include_archived)
+
+
+@router.post("/{thread_id}/agents/suggest")
+async def post_ephemeral_agents_suggest(thread_id: str, request: EphemeralAgentSuggestRequest):
+    """Suggest task-scoped temporary sub-agents for a run."""
+    from src.api.services.ephemeral_agent_service import suggest_ephemeral_agents
+
+    workspace = _workspace_for_run(thread_id)
+    result = suggest_ephemeral_agents(
+        request.prompt,
+        mcp_plan=request.mcp_plan,
+        workspace_dir=workspace,
+        max_agents=request.max_agents,
+    )
+    return {"thread_id": thread_id, **result}
+
+
+@router.post("/{thread_id}/agents/spawn")
+async def post_ephemeral_agent_spawn(thread_id: str, request: EphemeralAgentSpawnRequest):
+    """Activate one temporary sub-agent for a run."""
+    from src.api.services.ephemeral_agent_service import spawn_ephemeral_agent
+
+    workspace = _workspace_for_run(thread_id)
+    try:
+        agent = spawn_ephemeral_agent(thread_id, request.agent, workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"thread_id": thread_id, "agent": agent, "ok": True}
+
+
+@router.post("/{thread_id}/agents/{agent_id}/complete")
+async def post_ephemeral_agent_complete(
+    thread_id: str,
+    agent_id: str,
+    request: EphemeralAgentCompleteRequest,
+):
+    """Complete and auto-archive one temporary sub-agent."""
+    from src.api.services.ephemeral_agent_service import complete_ephemeral_agent
+
+    workspace = _workspace_for_run(thread_id)
+    try:
+        agent = complete_ephemeral_agent(thread_id, agent_id, request.model_dump(), workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if "不存在" in str(exc) else 400, detail=str(exc)) from exc
+    return {"thread_id": thread_id, "agent": agent, "ok": True}
+
+
+@router.post("/{thread_id}/agents/{agent_id}/archive")
+async def post_ephemeral_agent_archive(
+    thread_id: str,
+    agent_id: str,
+    request: EphemeralAgentArchiveRequest,
+):
+    """Archive one temporary sub-agent."""
+    from src.api.services.ephemeral_agent_service import archive_ephemeral_agent
+
+    workspace = _workspace_for_run(thread_id)
+    try:
+        agent = archive_ephemeral_agent(thread_id, agent_id, request.reason or "用户归档。", workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if "不存在" in str(exc) else 400, detail=str(exc)) from exc
+    return {"thread_id": thread_id, "agent": agent, "ok": True}
+
+
+@router.post("/{thread_id}/agents/cleanup")
+async def post_ephemeral_agents_cleanup(thread_id: str):
+    """Archive expired temporary sub-agents for a run."""
+    from src.api.services.ephemeral_agent_service import cleanup_expired_ephemeral_agents
+
+    workspace = _workspace_for_run(thread_id)
+    return cleanup_expired_ephemeral_agents(thread_id, workspace)

@@ -9,6 +9,7 @@ from src.api.services.capability_usage_service import build_capability_usage
 from src.api.services.diff_service import get_run_diff
 from src.api.services.eval_service import build_aggregate_metrics
 from src.api.services.event_store import get_event_store
+from src.api.services.ephemeral_agent_service import summarize_ephemeral_agent_contributions
 from src.infra import config as config_module
 
 
@@ -60,11 +61,30 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
 
     if report_path.exists():
         markdown = report_path.read_text(encoding="utf-8", errors="replace")
+        agent_contributions = summarize_ephemeral_agent_contributions(thread_id, str(workspace))
+        if (
+            agent_contributions.get("contributions")
+            and "## Temporary Agent Contributions" not in markdown
+        ):
+            lines = ["", "## Temporary Agent Contributions", ""]
+            lines.append("| Agent | Role | Status | Summary | Evidence | Risks |")
+            lines.append("|---|---|---|---|---|---|")
+            for item in agent_contributions["contributions"]:
+                lines.append(
+                    f"| {item.get('name') or item.get('agent_id')} "
+                    f"| {item.get('role') or '-'} "
+                    f"| {item.get('terminal_status') or item.get('status') or '-'} "
+                    f"| {str(item.get('summary') or '-')[:180]} "
+                    f"| {item.get('evidence_count', 0)} "
+                    f"| {item.get('risk_count', 0)} |"
+                )
+            markdown = f"{markdown.rstrip()}\n" + "\n".join(lines) + "\n"
         return {
             "thread_id": thread_id,
             "workspace_dir": str(workspace),
             "summary": "Loaded saved delivery report.",
             "markdown": markdown,
+            "agent_contributions": agent_contributions,
             "source": "run_artifact",
         }
 
@@ -78,6 +98,7 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     assistant_messages = [event.content for event in events if event.type == "assistant_message"]
     tool_events = [event for event in events if event.type == "tool_call_finished"]
     error_events = [event for event in events if event.type == "error"]
+    agent_contributions = summarize_ephemeral_agent_contributions(thread_id, str(workspace))
 
     summary = (
         assistant_messages[-1][:300]
@@ -116,6 +137,27 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     else:
         lines.append("- No changed files detected yet.")
 
+    lines.extend(["", "## Temporary Agent Contributions", ""])
+    contributions = agent_contributions.get("contributions", [])
+    pending_agents = agent_contributions.get("pending_agents", [])
+    if contributions:
+        lines.append("| Agent | Role | Status | Summary | Evidence | Risks |")
+        lines.append("|---|---|---|---|---|---|")
+        for item in contributions:
+            lines.append(
+                f"| {item.get('name') or item.get('agent_id')} "
+                f"| {item.get('role') or '-'} "
+                f"| {item.get('terminal_status') or item.get('status') or '-'} "
+                f"| {str(item.get('summary') or '-')[:180]} "
+                f"| {item.get('evidence_count', 0)} "
+                f"| {item.get('risk_count', 0)} |"
+            )
+    else:
+        lines.append("- No temporary sub-agent contributions recorded.")
+    if pending_agents:
+        names = ", ".join(item.get("name") or item.get("agent_id") for item in pending_agents)
+        lines.append(f"- Pending temporary agents: {names}")
+
     lines.extend(["", "## Tool Calls", ""])
     if tool_events:
         for event in tool_events[-10:]:
@@ -153,14 +195,21 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     lines.extend(["", "## Risks", ""])
     if error_events:
         lines.extend(f"- {event.content}" for event in error_events[-5:])
-    else:
+    if agent_contributions.get("risks"):
+        lines.extend(
+            f"- [{risk.get('agent_name') or risk.get('agent_id')}] {risk.get('description') or risk}"
+            for risk in agent_contributions["risks"][-5:]
+        )
+    if not error_events and not agent_contributions.get("risks"):
         lines.append("- No blocking runtime errors recorded.")
 
+    agent_next_actions = agent_contributions.get("next_actions", [])
     lines.extend(
         [
             "",
             "## Next Steps",
             "",
+            *[f"- {item}" for item in agent_next_actions[:5]],
             "- Connect task/team events to structured Planner, Coder, Reviewer and Tester stages.",
             "- Add preview and test artifacts after the implementation command finishes.",
         ]
@@ -174,7 +223,8 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
         "markdown": markdown,
         "requirements": [prompt] if prompt else [],
         "changed_files": changed_files,
-        "risks": [event.content for event in error_events[-5:]],
+        "risks": [event.content for event in error_events[-5:]] + agent_contributions.get("risks", []),
         "capabilities_used": cap_evidence,
+        "agent_contributions": agent_contributions,
         "source": "generated",
     }

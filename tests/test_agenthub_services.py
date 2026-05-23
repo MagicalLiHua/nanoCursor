@@ -1,10 +1,12 @@
 import json
 
+import pytest
+
 from src.api.services.agenthub_state import add_team_member, infer_task_capabilities, list_task_items, list_team_members
 from src.api.services.artifact_service import build_artifact_center
 from src.api.services.benchmark_service import emit_benchmark_run, get_benchmark, list_benchmarks, write_benchmark_artifacts
-from src.api.services.blueprint_service import build_run_blueprint
 from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
+from src.api.services.mcp_status_service import update_mcp_status
 from src.api.services.conversation_service import (
     create_conversation,
     finalize_conversation_run,
@@ -36,7 +38,13 @@ from src.api.services.recovery_service import _action_risk_level
 from src.runtime.run_events import enrich_event
 from src.runtime.run_manager import RunManager
 from src.runtime.run_state import RunStateMachine, RunStatus
-from src.api.services.mcp_service import list_mcp_servers, upsert_mcp_server_config, validate_mcp_config
+from src.api.services.mcp_service import (
+    install_mcp_server_preset,
+    list_mcp_server_presets,
+    list_mcp_servers,
+    upsert_mcp_server_config,
+    validate_mcp_config,
+)
 from src.api.services.capability_usage_service import build_capability_usage
 from src.api.services.failure_classifier_service import classify_failure
 from src.api.services.recovery_action_service import execute_recovery_action
@@ -228,6 +236,40 @@ def test_recommend_capabilities_matches_frontend_quality_request(tmp_path):
     assert recommendation["summary"]["capability_count"] == len(recommendation["capabilities"])
 
 
+def test_recommend_capabilities_builds_usable_mcp_plan_from_cached_tools(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".nanocursor").mkdir()
+    (workspace / ".nanocursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"github": {"command": "python", "args": ["server.py"]}}}),
+        encoding="utf-8",
+    )
+    update_mcp_status(
+        "mcp.github",
+        {
+            "status": "ready",
+            "tools_cache": {
+                "cached_at": 1000.0,
+                "config_hash": "abc",
+                "tools": [
+                    {"name": "list_issues", "description": "List repository issues"},
+                    {"name": "get_pr", "description": "Read pull request"},
+                ],
+            },
+        },
+        str(workspace),
+    )
+
+    recommendation = recommend_capabilities("帮我查看 GitHub issue 和 PR 状态", str(workspace))
+    plan = next(item for item in recommendation["mcp_plan"] if item["server_id"] == "mcp.github")
+
+    assert plan["configured"] is True
+    assert plan["usable"] is True
+    assert plan["tool_count"] == 2
+    assert plan["tools"][0]["name"] == "list_issues"
+    assert recommendation["summary"]["usable_mcp_count"] == 1
+
+
 def test_create_conversation_persists_recommended_team(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -317,23 +359,6 @@ def test_finalize_conversation_run_updates_record_and_status(tmp_path):
     assert finalized["latest_run"]["status"] == "completed"
     assert finalized["latest_run"]["summary"] == "会话状态已回写。"
     assert finalized["latest_run"]["team"] == [{"name": "Tester", "role": "tester"}]
-
-
-def test_build_run_blueprint_includes_stages_capabilities_and_risks(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    blueprint = build_run_blueprint("帮我打磨前端界面并考虑 GitHub PR 审查", str(workspace))
-
-    stage_ids = [stage["id"] for stage in blueprint["stages"]]
-    capability_ids = [item["id"] for item in blueprint["capabilities"]]
-    assert blueprint["title"] == "AgentHub 执行蓝图"
-    assert "design_review" in stage_ids
-    assert "collaboration_review" in stage_ids
-    assert "skill.frontend-polish" in capability_ids
-    assert "mcp.github" in capability_ids
-    assert blueprint["summary"]["stage_count"] == len(blueprint["stages"])
-    assert blueprint["summary"]["risk_count"] == len(blueprint["risks"])
 
 
 def test_capability_trace_for_tool_maps_tool_to_agent_capability():
@@ -1115,6 +1140,9 @@ def test_list_mcp_servers_includes_templates_when_no_config(tmp_path):
 
     assert len(result["config_paths"]) == 0
     template_ids = [s["id"] for s in result["servers"] if s["status"] == "planned"]
+    assert "mcp.filesystem" in template_ids
+    assert "mcp.memory" in template_ids
+    assert "mcp.sequential-thinking" in template_ids
     assert "mcp.github" in template_ids
     assert "mcp.figma" in template_ids
     assert "mcp.docs" in template_ids
@@ -1157,6 +1185,45 @@ def test_upsert_mcp_server_config_writes_workspace_config(tmp_path):
     assert github["command"] == "npx"
     assert github["args"] == ["-y", "@modelcontextprotocol/server-github"]
     assert "GITHUB_TOKEN" in github["env_keys"]
+
+
+def test_list_mcp_server_presets_marks_installed(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    before = list_mcp_server_presets(str(workspace))
+    filesystem = next(p for p in before["presets"] if p["id"] == "filesystem")
+    assert filesystem["status"] == "available"
+    assert str(workspace) in filesystem["args"]
+
+    installed = install_mcp_server_preset("filesystem", str(workspace))
+    after = list_mcp_server_presets(str(workspace))
+    filesystem_after = next(p for p in after["presets"] if p["id"] == "filesystem")
+    config = json.loads((workspace / ".nanocursor" / "mcp.json").read_text(encoding="utf-8"))
+
+    assert installed["server"]["id"] == "mcp.filesystem"
+    assert filesystem_after["status"] == "configured"
+    assert config["mcpServers"]["filesystem"]["command"] == "npx"
+    assert str(workspace) in config["mcpServers"]["filesystem"]["args"]
+
+
+def test_install_mcp_server_preset_docs_prefers_docs_dir(tmp_path):
+    workspace = tmp_path / "workspace"
+    docs = workspace / "docs"
+    docs.mkdir(parents=True)
+
+    installed = install_mcp_server_preset("docs", str(workspace))
+
+    assert installed["server"]["id"] == "mcp.docs"
+    assert str(docs) in installed["server"]["args"]
+
+
+def test_install_mcp_server_preset_unknown_raises(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError):
+        install_mcp_server_preset("not-a-preset", str(workspace))
 
 
 def test_capability_hub_deduplicates_configured_mcp(tmp_path):
@@ -1626,6 +1693,10 @@ def test_select_strategy_docs_only():
 
 def test_select_strategy_default():
     assert select_strategy("帮我做一个完整的用户登录功能") == "feature_delivery"
+
+
+def test_select_strategy_code_task_with_usage_notes():
+    assert select_strategy("新建 todo.py 和 tests/test_todo.py，运行 pytest，并说明如何使用") == "feature_delivery"
 
 
 def test_tool_policy_check():

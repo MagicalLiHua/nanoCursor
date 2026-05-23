@@ -181,6 +181,44 @@ def collect_changes_fallback(workspace: Path, thread_id: str) -> list[FilePatchS
     return result
 
 
+def collect_changes_from_events(workspace: Path, thread_id: str) -> list[FilePatchSummary]:
+    """Collect file changes from file_changed events recorded during a run."""
+    from src.api.services.event_store import get_event_store
+
+    files_by_path: dict[str, FilePatchSummary] = {}
+    for event in get_event_store().list_events(thread_id, str(workspace)):
+        if event.type != "file_changed" or not isinstance(event.payload, dict):
+            continue
+
+        filepath = str(event.payload.get("path") or "").strip()
+        if not filepath:
+            continue
+
+        output = str(event.payload.get("output") or event.content or "")
+        created = output.startswith("Created ")
+        change_type = "added" if created else str(event.payload.get("change_type") or "modified")
+
+        additions = 0
+        resolved = resolve_workspace_path(workspace, filepath)
+        if change_type in {"added", "created"} and resolved.exists() and resolved.is_file():
+            try:
+                additions = len(resolved.read_text(encoding="utf-8", errors="replace").splitlines())
+            except OSError:
+                additions = 0
+
+        files_by_path[filepath] = FilePatchSummary(
+            path=filepath,
+            change_type="added" if change_type == "created" else change_type,
+            additions=additions,
+            deletions=0,
+            hunks=1,
+            summary=output[:240],
+            risk=_classify_risk(filepath, change_type, additions, 0),
+        )
+
+    return [files_by_path[path] for path in sorted(files_by_path)]
+
+
 def collect_changes(thread_id: str, workspace_dir: str | None = None, include_untracked: bool = True) -> ChangeSet:
     """Collect file changes for a run. Uses git when available."""
     ws = _workspace(workspace_dir)
@@ -190,6 +228,8 @@ def collect_changes(thread_id: str, workspace_dir: str | None = None, include_un
         files = collect_changes_git(ws, include_untracked=include_untracked)
     else:
         files = collect_changes_fallback(ws, thread_id)
+    if not files:
+        files = collect_changes_from_events(ws, thread_id)
 
     total_adds = sum(f.additions for f in files)
     total_dels = sum(f.deletions for f in files)

@@ -35,6 +35,17 @@ class RunBudget:
             reasons.append("max_test_runs")
         return reasons
 
+    def exceeded_for(self, tool_name: str) -> list[str]:
+        """Return budget limits that should block this specific next tool call."""
+        reasons: list[str] = []
+        if self.tool_calls >= self.max_tool_calls:
+            reasons.append("max_tool_calls")
+        if tool_name in WRITE_TOOLS and self.file_writes >= self.max_file_writes:
+            reasons.append("max_file_writes")
+        if tool_name in TEST_TOOLS and self.test_runs >= self.max_test_runs:
+            reasons.append("max_test_runs")
+        return reasons
+
     def to_dict(self) -> dict:
         return {
             "max_tool_calls": self.max_tool_calls,

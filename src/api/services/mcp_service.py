@@ -12,6 +12,76 @@ from src.infra import config as config_module
 from src.infra.path_guard import safe_slug
 from src.api.services.capability_service import MCP_TEMPLATES
 
+MCP_PRESETS = [
+    {
+        "id": "filesystem",
+        "server_id": "mcp.filesystem",
+        "name": "本地文件系统 MCP",
+        "description": "把当前工作区作为 MCP 文件系统上下文，适合读取项目文件、目录和文档。",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "${workspace}"],
+        "env_keys": [],
+        "enabled_default": True,
+        "requires": ["Node.js", "npx"],
+        "security_note": "只把当前 nanoCursor 工作区暴露给 MCP server，不默认访问父目录。",
+    },
+    {
+        "id": "docs",
+        "server_id": "mcp.docs",
+        "name": "文档知识库 MCP",
+        "description": "优先把 docs/ 目录作为文档知识库；没有 docs/ 时退回当前工作区。",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "${docs_or_workspace}"],
+        "env_keys": [],
+        "enabled_default": True,
+        "requires": ["Node.js", "npx"],
+        "security_note": "建议把接口说明、设计文档和运行手册放入 docs/ 后再启用。",
+    },
+    {
+        "id": "memory",
+        "server_id": "mcp.memory",
+        "name": "记忆图谱 MCP",
+        "description": "提供轻量知识图谱记忆，适合沉淀项目事实、偏好和长期上下文。",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "env_keys": [],
+        "enabled_default": True,
+        "requires": ["Node.js", "npx"],
+        "security_note": "适合保存项目事实，不建议写入密钥、Token 或隐私数据。",
+    },
+    {
+        "id": "sequential-thinking",
+        "server_id": "mcp.sequential-thinking",
+        "name": "Sequential Thinking MCP",
+        "description": "提供结构化推理工具，适合复杂规划、排错和方案比较。",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "env_keys": [],
+        "enabled_default": True,
+        "requires": ["Node.js", "npx"],
+        "security_note": "该预设主要增加推理工具，不直接读写项目文件。",
+    },
+    {
+        "id": "github",
+        "server_id": "mcp.github",
+        "name": "GitHub MCP",
+        "description": "接入 GitHub Issue、PR、代码审查和 CI 状态。",
+        "command": "docker",
+        "args": [
+            "run",
+            "-i",
+            "--rm",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "ghcr.io/github/github-mcp-server",
+        ],
+        "env_keys": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "enabled_default": False,
+        "requires": ["Docker", "GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "security_note": "需要用户自行提供最小权限 GitHub Token；默认写入后保持关闭。",
+    },
+]
+
 
 def _workspace(workspace_dir: str | None = None) -> Path:
     root = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
@@ -37,6 +107,54 @@ def _server_slug(server_id: str) -> str:
     if not raw:
         raise ValueError("MCP server 名称不能为空。")
     return safe_slug(raw, max_length=60)
+
+
+def _expand_preset_arg(arg: str, workspace: Path) -> str:
+    docs_dir = workspace / "docs"
+    replacements = {
+        "${workspace}": str(workspace),
+        "${docs_or_workspace}": str(docs_dir if docs_dir.exists() else workspace),
+    }
+    expanded = str(arg)
+    for token, value in replacements.items():
+        expanded = expanded.replace(token, value)
+    return expanded
+
+
+def _find_preset(preset_id: str) -> dict[str, Any] | None:
+    normalized = str(preset_id or "").strip()
+    return next(
+        (
+            preset
+            for preset in MCP_PRESETS
+            if preset["id"] == normalized or preset["server_id"] == normalized
+        ),
+        None,
+    )
+
+
+def _preset_payload(
+    preset: dict[str, Any],
+    workspace: Path,
+    configured_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    configured_ids = configured_ids or set()
+    server_id = preset["server_id"]
+    is_configured = server_id in configured_ids
+    return {
+        "id": preset["id"],
+        "server_id": server_id,
+        "name": preset["name"],
+        "description": preset["description"],
+        "command": preset["command"],
+        "args": [_expand_preset_arg(arg, workspace) for arg in preset.get("args", [])],
+        "env_keys": list(preset.get("env_keys", [])),
+        "enabled_default": bool(preset.get("enabled_default", True)),
+        "requires": list(preset.get("requires", [])),
+        "security_note": preset.get("security_note", ""),
+        "installed": is_configured,
+        "status": "configured" if is_configured else "available",
+    }
 
 
 def _read_config(path: Path) -> dict[str, Any]:
@@ -134,6 +252,56 @@ def upsert_mcp_server_config(
         "env_keys": normalized_env_keys,
         "enabled": bool(enabled),
         "ignored_env_keys": normalized_ignored_env_keys,
+    }
+
+
+def list_mcp_server_presets(workspace_dir: str | None = None) -> dict[str, Any]:
+    """Return installable MCP presets for the active workspace."""
+    workspace = _workspace(workspace_dir)
+    configured_ids = {
+        server["id"]
+        for server in list_mcp_servers(str(workspace)).get("servers", [])
+        if server.get("status") == "configured"
+    }
+    presets = [_preset_payload(preset, workspace, configured_ids) for preset in MCP_PRESETS]
+
+    return {
+        "workspace_dir": str(workspace),
+        "presets": presets,
+        "summary": {
+            "total": len(presets),
+            "configured": sum(1 for preset in presets if preset["installed"]),
+            "available": sum(1 for preset in presets if not preset["installed"]),
+        },
+    }
+
+
+def install_mcp_server_preset(
+    preset_id: str,
+    workspace_dir: str | None = None,
+    *,
+    enabled: bool | None = None,
+) -> dict[str, Any]:
+    """Install a built-in MCP preset into the workspace-local MCP config."""
+    workspace = _workspace(workspace_dir)
+    preset = _find_preset(preset_id)
+    if not preset:
+        raise ValueError(f"未知 MCP 预设: {preset_id}")
+
+    preset_payload = _preset_payload(preset, workspace)
+    server = upsert_mcp_server_config(
+        preset["server_id"],
+        preset["command"],
+        preset_payload["args"],
+        preset.get("env_keys", []),
+        str(workspace),
+        enabled=preset.get("enabled_default", True) if enabled is None else enabled,
+    )
+    return {
+        "preset": _preset_payload(preset, workspace, {preset["server_id"]}),
+        "server": server,
+        "mcp": list_mcp_servers(str(workspace)),
+        "ok": True,
     }
 
 

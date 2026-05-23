@@ -35,7 +35,7 @@ def detect_severity(event_type: str, payload: dict[str, Any] | None = None) -> s
                       "diff_updated", "plan_created", "team_updated", "workspace_opened"):
         return "info"
 
-    if event_type in ("orchestration_applied", "blueprint_generated"):
+    if event_type == "orchestration_applied":
         return "info"
 
     return "info"

@@ -1,4 +1,4 @@
-"""Conversation-scoped orchestration for AgentHub."""
+"""Conversation-scoped orchestration for nanoCursor."""
 
 from __future__ import annotations
 
@@ -149,11 +149,11 @@ def _member_from_agent(agent_name: str, recommendation: dict[str, Any], source: 
         "name": name,
         "role": role,
         "status": "idle",
-        "goal": preset.get("goal") or f"Handle the {name} part of this AgentHub delivery.",
+        "goal": preset.get("goal") or f"Handle the {name} part of this nanoCursor delivery.",
         "tools": [str(item) for item in preset.get("tools", [])],
         "capabilities": _capability_ids_for_agent(name, recommendation),
         "current_task_id": None,
-        "last_action": "由 AgentHub 根据本次需求自动推荐。",
+        "last_action": "由 nanoCursor 根据本次需求自动推荐。",
         "artifacts": [str(item) for item in preset.get("artifacts", [])],
         "last_active_at": None,
         "source": source,
@@ -190,12 +190,15 @@ def recommend_conversation_team(
         "prompt": prompt,
         "members": members,
         "capabilities": recommendation.get("capabilities", []),
+        "mcp_plan": recommendation.get("mcp_plan", []),
         "reasons": recommendation.get("reasons", []),
         "summary": {
             "agent_count": len(members),
             "capability_count": len(recommendation.get("capabilities", [])),
             "ready_count": ready_count,
             "planned_count": len(recommendation.get("capabilities", [])) - ready_count,
+            "mcp_count": len(recommendation.get("mcp_plan", [])),
+            "usable_mcp_count": sum(1 for item in recommendation.get("mcp_plan", []) if item.get("usable")),
         },
     }
 
@@ -246,7 +249,7 @@ def _persist_team(
 
 
 def create_conversation(prompt: str = "", workspace_dir: str | None = None) -> dict[str, Any]:
-    """Create an isolated AgentHub conversation context."""
+    """Create an isolated nanoCursor conversation context."""
     workspace = _workspace(workspace_dir)
     conversation_id = f"conv-{uuid.uuid4()}"
     now = time.time()

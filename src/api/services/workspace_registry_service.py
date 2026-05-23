@@ -51,6 +51,30 @@ def get_workspace_identity(workspace_dir: str | None = None) -> dict[str, Any]:
     return _normalize_identity({}, wdir)
 
 
+def ensure_workspace_manifest(workspace_dir: str | None = None) -> dict[str, Any]:
+    """Create or upgrade <workspace>/.nanocursor/workspace.json without changing active workspace."""
+    wdir = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    wp = _workspace_json_path(wdir)
+    identity: dict[str, Any] = {}
+    if wp.exists():
+        try:
+            loaded = json.loads(wp.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                identity = loaded
+        except (json.JSONDecodeError, OSError):
+            identity = {}
+
+    identity = _normalize_identity(identity, wdir, now=now)
+    identity["nanocursor_version"] = VERSION
+    identity["schema_version"] = SCHEMA_VERSION
+    if not identity.get("created_at"):
+        identity["created_at"] = now
+    identity["last_opened_at"] = identity.get("last_opened_at") or now
+    wp.write_text(json.dumps(identity, ensure_ascii=False, indent=2), encoding="utf-8")
+    return identity
+
+
 def _normalize_identity(identity: dict[str, Any], wdir: Path, now: str | None = None) -> dict[str, Any]:
     current_path = str(wdir)
     previous_path = identity.get("path")

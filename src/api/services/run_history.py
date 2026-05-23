@@ -203,3 +203,86 @@ def list_run_history(
 
     runs.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or 0, reverse=True)
     return runs[: max(limit, 0)]
+
+
+def list_run_history_with_active(
+    run_manager: Any,
+    workspace_dir: str | None = None,
+    status: str | None = None,
+    mode: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return durable run history overlaid with RunManager's active state."""
+    workspace = _workspace(workspace_dir)
+    history = list_run_history(str(workspace), status=status, mode=mode, limit=limit)
+    try:
+        active_runs = run_manager.list_active()
+    except AttributeError:
+        active_runs = []
+
+    active_by_id: dict[str, dict[str, Any]] = {}
+    for item in active_runs:
+        if not isinstance(item, dict) or not item.get("thread_id"):
+            continue
+        item_workspace = Path(item.get("workspace_dir") or workspace).resolve()
+        if item_workspace != workspace:
+            continue
+        active_by_id[str(item["thread_id"])] = item
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for run in history:
+        thread_id = str(run.get("thread_id") or "")
+        active = active_by_id.get(thread_id)
+        if active:
+            run = {
+                **run,
+                "status": active.get("status") or run.get("status"),
+                "workspace_dir": active.get("workspace_dir") or run.get("workspace_dir"),
+                "is_active": True,
+                "is_write_mode": bool(active.get("is_write_mode")),
+                "source": "history+active",
+            }
+        else:
+            run = {
+                **run,
+                "is_active": False,
+                "is_write_mode": False,
+                "source": "history",
+            }
+        if not status or run.get("status") == status:
+            merged.append(run)
+        if thread_id:
+            seen.add(thread_id)
+
+    for thread_id, active in active_by_id.items():
+        if thread_id in seen:
+            continue
+        if status and active.get("status") != status:
+            continue
+        ctx = run_manager.get(thread_id) if hasattr(run_manager, "get") else None
+        metadata = getattr(ctx, "metadata", {}) if ctx else {}
+        if mode and (metadata.get("mode") or getattr(ctx, "mode", "")) != mode:
+            continue
+        merged.append(
+            {
+                "thread_id": thread_id,
+                "workspace_dir": active.get("workspace_dir") or str(workspace),
+                "status": active.get("status") or "running",
+                "prompt": metadata.get("prompt") or getattr(ctx, "prompt", "") or "",
+                "mode": metadata.get("mode") or getattr(ctx, "mode", "agenthub_delivery"),
+                "created_at": metadata.get("created_at"),
+                "updated_at": time.time(),
+                "event_count": 0,
+                "changed_files_count": 0,
+                "has_diff": False,
+                "has_report": False,
+                "last_event_type": None,
+                "is_active": True,
+                "is_write_mode": bool(active.get("is_write_mode")),
+                "source": "active",
+            }
+        )
+
+    merged.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or 0, reverse=True)
+    return merged[: max(limit, 0)]

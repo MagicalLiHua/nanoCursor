@@ -62,7 +62,7 @@ function listen(port) {
   });
 
   server.listen(port, host, () => {
-    console.log(`AgentHub frontend: http://${host}:${port}`);
+    console.log(`nanoCursor frontend: http://${host}:${port}`);
   });
 }
 

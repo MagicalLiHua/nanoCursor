@@ -1,5 +1,7 @@
 """Action policy and audit log tests."""
 
+import json
+import sys
 import uuid
 from pathlib import Path
 
@@ -17,6 +19,54 @@ from src.api.services.action_execution_service import (
     get_audit_trail,
     record_action_result,
 )
+
+
+def write_fake_mcp_server(workspace: Path) -> Path:
+    script = workspace / "fake_mcp_server.py"
+    script.write_text(
+        r'''
+import json
+import sys
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if line == b"":
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode("ascii").partition(":")
+        headers[key.strip().lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])).decode("utf-8"))
+
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    sys.stdout.buffer.flush()
+
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}})
+    elif method == "tools/call":
+        arguments = message.get("params", {}).get("arguments", {})
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": "echo:" + str(arguments.get("text", ""))}]}})
+    else:
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "echo"}]}})
+''',
+        encoding="utf-8",
+    )
+    return script
 
 
 class TestActionKind:
@@ -159,6 +209,50 @@ class TestActionExecutionService:
         )
         assert result["allowed"] is True
         assert result["requires_approval"] is False
+        assert result["result"] == "success"
+        assert result["detail"]["content"] == "ok"
+
+    def test_execute_read_missing_file_records_failure(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        result = execute_action(
+            kind="read_file", target="missing.txt",
+            thread_id="run_read_missing", workspace_dir=str(ws),
+        )
+        assert result["allowed"] is True
+        assert result["result"] == "failure"
+        trail = get_audit_trail("run_read_missing", str(ws))
+        assert trail["records"][0]["result"] == "failure"
+
+    def test_execute_write_file_writes_content_and_checkpoint(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        target = ws / "src" / "main.py"
+        target.parent.mkdir()
+        target.write_text("old", encoding="utf-8")
+        result = execute_action(
+            kind="write_file", target="src/main.py",
+            payload={"content": "new"},
+            thread_id="run_write_real", workspace_dir=str(ws),
+        )
+        assert result["allowed"] is True
+        assert result["result"] == "success"
+        assert target.read_text(encoding="utf-8") == "new"
+        assert result["detail"]["checkpoint"]["filepath"] == "src/main.py"
+        checkpoints = list((ws / ".checkpoints" / "run_write_real").glob("*.meta.json"))
+        assert checkpoints
+
+    def test_execute_write_new_file_has_no_checkpoint(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        result = execute_action(
+            kind="write_file", target="src/new.py",
+            payload={"content": "print('hi')"},
+            thread_id="run_write_new", workspace_dir=str(ws),
+        )
+        assert result["result"] == "success"
+        assert (ws / "src" / "new.py").read_text(encoding="utf-8") == "print('hi')"
+        assert result["detail"]["checkpoint"] is None
 
     def test_execute_writes_audit_to_supplied_workspace(self, tmp_path):
         ws = tmp_path / "workspace"
@@ -195,6 +289,210 @@ class TestActionExecutionService:
         approval = get_tool_approval("run_needs_approval", result["approval_id"], str(ws))
         assert approval is not None
         assert approval["status"] == "pending"
+        assert approval["kind"] == "run_command"
+        assert approval["target"] == "pytest -q"
+
+    def test_approved_run_command_executes_and_records_output(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        pending = execute_action(
+            kind="run_command", target="echo hello",
+            thread_id="run_cmd_approved", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_cmd_approved",
+            pending["approval_id"],
+            approved=True,
+            comment="允许",
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="run_command", target="echo hello",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_cmd_approved", workspace_dir=str(ws),
+        )
+
+        assert result["requires_approval"] is False
+        assert result["result"] == "success"
+        assert result["detail"]["exit_code"] == 0
+        assert "hello" in result["detail"]["stdout"]
+        trail = get_audit_trail("run_cmd_approved", str(ws))
+        assert trail["records"][-1]["decision"] == "approved"
+
+    def test_rejected_run_command_does_not_execute(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        pending = execute_action(
+            kind="run_command", target="echo blocked",
+            thread_id="run_cmd_rejected", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_cmd_rejected",
+            pending["approval_id"],
+            approved=False,
+            comment="不允许",
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="run_command", target="echo blocked",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_cmd_rejected", workspace_dir=str(ws),
+        )
+
+        assert result["allowed"] is False
+        assert result["result"] == "failure"
+        assert "approved" in result["reason"]
+
+    def test_approved_run_command_target_mismatch_is_denied(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        pending = execute_action(
+            kind="run_command", target="echo one",
+            thread_id="run_cmd_mismatch", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_cmd_mismatch",
+            pending["approval_id"],
+            approved=True,
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="run_command", target="echo two",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_cmd_mismatch", workspace_dir=str(ws),
+        )
+
+        assert result["allowed"] is False
+        assert "不匹配" in result["reason"]
+
+    def test_delete_file_without_approval_returns_pending(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        target = ws / "src" / "old.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("old", encoding="utf-8")
+
+        result = execute_action(
+            kind="delete_file", target="src/old.py",
+            thread_id="run_delete_pending", workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "pending"
+        assert result["requires_approval"] is True
+        assert target.exists()
+
+    def test_approved_delete_file_moves_to_trash_and_checkpoint(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        target = ws / "src" / "old.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("old", encoding="utf-8")
+
+        pending = execute_action(
+            kind="delete_file", target="src/old.py",
+            thread_id="run_delete_approved", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_delete_approved",
+            pending["approval_id"],
+            approved=True,
+            comment="允许删除",
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="delete_file", target="src/old.py",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_delete_approved", workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        assert not target.exists()
+        assert result["detail"]["checkpoint"]["filepath"] == "src/old.py"
+        trash_path = Path(result["detail"]["trash_path"])
+        assert trash_path.exists()
+        assert trash_path.read_text(encoding="utf-8") == "old"
+        trail = get_audit_trail("run_delete_approved", str(ws))
+        assert trail["records"][-1]["kind"] == "delete_file"
+        assert trail["records"][-1]["result"] == "success"
+
+    def test_approved_delete_file_rejects_directories(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        (ws / "src").mkdir()
+        pending = execute_action(
+            kind="delete_file", target="src",
+            thread_id="run_delete_dir", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_delete_dir",
+            pending["approval_id"],
+            approved=True,
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="delete_file", target="src",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_delete_dir", workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "failure"
+        assert "普通文件" in result["reason"]
+        assert (ws / "src").is_dir()
+
+    def test_approved_mcp_call_executes_stdio_tool(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        script = write_fake_mcp_server(ws)
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        (nanodir / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"fake": {"command": sys.executable, "args": [str(script)]}}}),
+            encoding="utf-8",
+        )
+
+        pending = execute_action(
+            kind="mcp_call",
+            target="mcp.fake/echo",
+            payload={"server_id": "mcp.fake", "tool_name": "echo", "arguments": {"text": "hello"}},
+            thread_id="run_mcp_approved",
+            workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_mcp_approved",
+            pending["approval_id"],
+            approved=True,
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="mcp_call",
+            target="mcp.fake/echo",
+            payload={
+                "approval_id": pending["approval_id"],
+                "server_id": "mcp.fake",
+                "tool_name": "echo",
+                "arguments": {"text": "hello"},
+            },
+            thread_id="run_mcp_approved",
+            workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        assert result["detail"]["ok"] is True
+        assert result["detail"]["result"]["content"][0]["text"] == "echo:hello"
+        trail = get_audit_trail("run_mcp_approved", str(ws))
+        assert trail["records"][-1]["kind"] == "mcp_call"
 
     def test_record_action_result(self, tmp_path):
         ws = tmp_path / "workspace"
@@ -283,9 +581,10 @@ class TestActionPolicyAPI:
             client = TestClient(app)
             resp = client.post(
                 f"/api/runs/{thread_id}/actions/execute",
-                json={"kind": "write_file", "target": "src/main.py"},
+                json={"kind": "write_file", "target": "src/main.py", "payload": {"content": "hello"}},
             )
             assert resp.status_code == 200
+            assert (ws / "src" / "main.py").read_text(encoding="utf-8") == "hello"
 
             resp2 = client.get(f"/api/runs/{thread_id}/audit")
             assert resp2.status_code == 200
@@ -334,5 +633,37 @@ class TestActionPolicyAPI:
             data = resp.json()
             assert data["requires_approval"] is True
             assert data["approval_id"]
+        finally:
+            cfg.WORKSPACE_DIR = old
+
+    def test_execute_endpoint_runs_command_after_approval(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from api_server import app
+        import src.infra.config as cfg
+        from src.api.services.approval_service import resolve_tool_approval
+
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        old = cfg.WORKSPACE_DIR
+        thread_id = "run_high_risk_api_approved"
+        try:
+            cfg.WORKSPACE_DIR = str(ws)
+            client = TestClient(app, raise_server_exceptions=False)
+            pending_resp = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={"kind": "run_command", "target": "echo api-ok"},
+            )
+            approval_id = pending_resp.json()["approval_id"]
+            resolve_tool_approval(thread_id, approval_id, True, "允许", str(ws))
+
+            exec_resp = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={"kind": "run_command", "target": "echo api-ok", "approval_id": approval_id},
+            )
+
+            assert exec_resp.status_code == 200
+            data = exec_resp.json()
+            assert data["result"] == "success"
+            assert "api-ok" in data["detail"]["stdout"]
         finally:
             cfg.WORKSPACE_DIR = old

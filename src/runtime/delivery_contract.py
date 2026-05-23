@@ -37,6 +37,19 @@ class DeliveryVerification(BaseModel):
     duration_ms: int = 0
 
 
+class DeliveryAgentContribution(BaseModel):
+    agent_id: str
+    name: str = ""
+    role: str = ""
+    status: str = ""
+    terminal_status: str = ""
+    summary: str = ""
+    evidence_count: int = 0
+    risk_count: int = 0
+    artifact_count: int = 0
+    recommended_next_actions: list[str] = Field(default_factory=list)
+
+
 class DeliveryContract(BaseModel):
     thread_id: str
     workspace_dir: str
@@ -44,6 +57,7 @@ class DeliveryContract(BaseModel):
     objective: str = ""
     summary: str = ""
     plan: list[dict[str, Any]] = Field(default_factory=list)
+    agent_contributions: list[DeliveryAgentContribution] = Field(default_factory=list)
     changed_files: list[DeliveryFileChange] = Field(default_factory=list)
     verifications: list[DeliveryVerification] = Field(default_factory=list)
     risks: list[dict[str, Any]] = Field(default_factory=list)

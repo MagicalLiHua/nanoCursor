@@ -55,8 +55,12 @@ def _env_safe_report() -> dict[str, Any]:
     }
 
 
-def _workspace_report() -> dict[str, Any]:
-    ws = Path(config_module.WORKSPACE_DIR).resolve()
+def _workspace_path(workspace_dir: str | None = None) -> Path:
+    return Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
+
+
+def _workspace_report(workspace_dir: str | None = None) -> dict[str, Any]:
+    ws = _workspace_path(workspace_dir)
     info: dict[str, Any] = {
         "path": str(ws),
         "exists": ws.exists(),
@@ -75,17 +79,18 @@ def _workspace_report() -> dict[str, Any]:
     return info
 
 
-def _settings_report() -> dict[str, Any]:
+def _settings_report(workspace_dir: str | None = None) -> dict[str, Any]:
     try:
         from src.api.services.workspace_settings_service import get_effective_settings
-        return get_effective_settings(str(config_module.WORKSPACE_DIR))
+        return get_effective_settings(str(_workspace_path(workspace_dir)))
     except Exception:
         return {}
 
 
-def _runs_report() -> dict[str, Any]:
-    metrics = build_aggregate_metrics()
-    runs_dir = Path(config_module.WORKSPACE_DIR) / ".nanocursor" / "runs"
+def _runs_report(workspace_dir: str | None = None) -> dict[str, Any]:
+    workspace = _workspace_path(workspace_dir)
+    metrics = build_aggregate_metrics(str(workspace))
+    runs_dir = workspace / ".nanocursor" / "runs"
     recent: list[dict[str, Any]] = []
     if runs_dir.exists():
         for d in sorted(runs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)[:5]:
@@ -105,9 +110,12 @@ def _runs_report() -> dict[str, Any]:
     return {"metrics": metrics, "recent_runs": recent}
 
 
-def _mcp_report() -> dict[str, Any]:
+def _mcp_report(workspace_dir: str | None = None) -> dict[str, Any]:
     try:
-        data = list_mcp_servers()
+        workspace = _workspace_path(workspace_dir)
+        if not workspace.exists():
+            return {"total": 0, "configured": 0, "servers": []}
+        data = list_mcp_servers(str(workspace))
         servers = data.get("servers", [])
         return {
             "total": data.get("summary", {}).get("total", 0),
@@ -121,8 +129,8 @@ def _mcp_report() -> dict[str, Any]:
         return {}
 
 
-def _skills_report() -> dict[str, Any]:
-    ws = Path(config_module.WORKSPACE_DIR)
+def _skills_report(workspace_dir: str | None = None) -> dict[str, Any]:
+    ws = _workspace_path(workspace_dir)
     skills_dir = ws / ".nanocursor" / "skills"
     if not skills_dir.exists():
         return {"count": 0, "skills": []}
@@ -137,9 +145,9 @@ def _skills_report() -> dict[str, Any]:
     return {"count": len(skills), "skills": skills}
 
 
-def _errors_report() -> dict[str, Any]:
+def _errors_report(workspace_dir: str | None = None) -> dict[str, Any]:
     """Scan recent runs for error events."""
-    runs_dir = Path(config_module.WORKSPACE_DIR) / ".nanocursor" / "runs"
+    runs_dir = _workspace_path(workspace_dir) / ".nanocursor" / "runs"
     errors: list[dict[str, Any]] = []
     if not runs_dir.exists():
         return {"error_count": 0, "recent_errors": []}
@@ -182,11 +190,11 @@ def build_diagnostic_bundle(workspace_dir: str | None = None) -> dict[str, Any]:
             "pid": os.getpid(),
             "cwd": os.getcwd(),
         },
-        "workspace": _workspace_report(),
-        "settings": _settings_report(),
-        "runs": _runs_report(),
-        "mcp": _mcp_report(),
-        "skills": _skills_report(),
-        "errors": _errors_report(),
+        "workspace": _workspace_report(workspace_dir),
+        "settings": _settings_report(workspace_dir),
+        "runs": _runs_report(workspace_dir),
+        "mcp": _mcp_report(workspace_dir),
+        "skills": _skills_report(workspace_dir),
+        "errors": _errors_report(workspace_dir),
         "env": _env_safe_report(),
     }

@@ -82,7 +82,7 @@ class ToolPolicyRuntime:
             return d
 
         # 3. Budget exceeded
-        exceeded = self.budget.exceeded()
+        exceeded = self.budget.exceeded_for(tool_name)
         if exceeded:
             d = ToolPolicyDecision(
                 tool=tool_name, allowed=False,

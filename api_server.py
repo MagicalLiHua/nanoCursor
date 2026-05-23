@@ -53,6 +53,7 @@ from src.api.models import (
     LLMProviderStatus,
     McpEnabledRequest,
     McpConfigResponse,
+    McpPresetInstallRequest,
     McpServerUpsertRequest,
     McpToolCallRequest,
     McpValidateRequest,
@@ -78,7 +79,6 @@ from src.api.models import (
     WorkspaceIdentity,
     RollbackRequest,
     RollbackResponse,
-    RunBlueprintRequest,
     RunHistoryResponse,
     RunEventsResponse,
     RunRequest,
@@ -190,9 +190,14 @@ from src.agent.state import WorkflowCancelledError
 from src.api.services.agenthub_state import add_team_member, list_task_items, list_team_members
 from src.api.services.artifact_service import build_artifact_center
 from src.api.services.benchmark_service import emit_benchmark_run, get_benchmark, list_benchmarks
-from src.api.services.blueprint_service import build_run_blueprint
 from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
-from src.api.services.mcp_service import list_mcp_servers, upsert_mcp_server_config, validate_mcp_config
+from src.api.services.mcp_service import (
+    install_mcp_server_preset,
+    list_mcp_server_presets,
+    list_mcp_servers,
+    upsert_mcp_server_config,
+    validate_mcp_config,
+)
 from src.api.services.mcp_status_service import get_mcp_server_status, get_mcp_status, set_mcp_enabled, update_mcp_status
 from src.api.services.mcp_runtime_service import probe_mcp_server, list_mcp_tools, call_mcp_tool
 from src.api.services.skill_manifest_service import (
@@ -222,7 +227,7 @@ from src.api.services.preference_service import add_preference_memory, build_mem
 from src.api.services.recovery_action_service import execute_recovery_action
 from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
 from src.api.services.report_service import build_delivery_report
-from src.api.services.run_history import list_run_history
+from src.api.services.run_history import list_run_history_with_active
 from src.api.services.run_context import RunContext
 from src.api.services.score_service import build_delivery_score
 from src.api.services.traceability_service import build_requirement_traceability
@@ -478,7 +483,14 @@ def _run_demo_workflow(thread_id: str, workspace_dir: str, artifacts: dict[str, 
         with runs_lock:
             run_info = active_runs.get(thread_id)
             if run_info:
+                run_info.finalize_lifecycle(final_status)
                 run_info.set_status(final_status)
+                event_store.update_session(
+                    thread_id,
+                    workspace_dir,
+                    status=final_status,
+                    **run_info.session_metadata(),
+                )
         try:
             from src.api.services.delivery_service import finalize_delivery as _finalize_delivery
             _finalize_delivery(thread_id, workspace_dir)
@@ -558,6 +570,7 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         )
 
     pending_policy_decisions = []
+    approved_tools_for_run: set[str] = set()
 
     def _approval_wait_should_abort() -> bool:
         sm = run_manager.get_state_machine(thread_id)
@@ -574,6 +587,10 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
 
     async def on_tool_check(tool_name: str, tool_input: dict):
         decision = policy_runtime.check(tool_name)
+        if decision.allowed and decision.requires_approval and tool_name in approved_tools_for_run:
+            decision.requires_approval = False
+            decision.status = "auto_allowed"
+            decision.reason = f"{tool_name} 已在本次运行中批准，后续同类调用自动放行。"
         pending_policy_decisions.append(decision)
         if not decision.allowed:
             _emit_agenthub_event(
@@ -630,6 +647,7 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             if resolved.get("status") == "approved":
                 decision.allowed = True
                 decision.status = "approved"
+                approved_tools_for_run.add(tool_name)
             else:
                 decision.allowed = False
                 decision.status = "rejected"
@@ -744,6 +762,8 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             on_tool_check=on_tool_check,
             on_tool_call=on_tool_call,
         )
+        if result.lstrip().startswith("Error:"):
+            raise RuntimeError(result.removeprefix("Error:").strip() or result)
         _emit_agenthub_event(
             thread_id=thread_id,
             event_type="assistant_message",
@@ -1279,7 +1299,7 @@ async def start_agenthub_benchmark_run(request: BenchmarkRunRequest):
 
 @app.get("/api/runs")
 async def list_agenthub_runs():
-    return {"runs": list_run_history()}  # FIXME: should use RunManager listing
+    return {"runs": list_run_history_with_active(run_manager, _get_workspace())}
 
 
 @app.get("/api/runs/active")
@@ -1663,8 +1683,16 @@ async def record_policy_decision(thread_id: str, request: PolicyDecisionRecordRe
 
 @app.get("/api/runs/{thread_id}/events")
 async def get_run_events_push(thread_id: str):
-    events = event_store.list_events(thread_id, _workspace_for_thread(thread_id))
-    return {"events": [event.model_dump() for event in events]}
+    workspace_dir = _workspace_for_thread(thread_id)
+    return StreamingResponse(
+        stream_events_push(thread_id, workspace_dir),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/tasks")
@@ -1684,7 +1712,7 @@ async def get_agenthub_capabilities():
 
 @app.post("/api/capabilities/recommend")
 async def recommend_caps(request: CapabilityRecommendRequest):
-    return recommend_capabilities(request.prompt)
+    return recommend_capabilities(request.prompt, _get_workspace())
 
 
 @app.post("/api/capabilities/skills")
@@ -1717,6 +1745,26 @@ async def upsert_mcp_server(request: McpServerUpsertRequest):
         ignored_env_keys=request.ignored_env_keys,
     )
     return result
+
+
+@app.get("/api/capabilities/mcp/presets")
+async def get_mcp_server_presets():
+    return list_mcp_server_presets(_get_workspace())
+
+
+@app.post("/api/capabilities/mcp/presets/{preset_id}/install")
+async def install_mcp_server_preset_route(
+    preset_id: str,
+    request: McpPresetInstallRequest | None = None,
+):
+    try:
+        return install_mcp_server_preset(
+            preset_id,
+            _get_workspace(),
+            enabled=request.enabled if request else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/capabilities/skills/{skill_id}")
@@ -1791,20 +1839,15 @@ async def probe_mcp_server_route(server_id: str):
 
 
 @app.get("/api/capabilities/mcp/{server_id}/tools")
-async def list_mcp_tools_route(server_id: str):
+async def list_mcp_tools_route(server_id: str, refresh: bool = False):
     """List tools exposed by an MCP server."""
-    return list_mcp_tools(server_id, _get_workspace())
+    return list_mcp_tools(server_id, _get_workspace(), force_refresh=refresh)
 
 
 @app.post("/api/capabilities/mcp/{server_id}/tools/{tool_name}/call")
 async def call_mcp_tool_route(server_id: str, tool_name: str, request: McpToolCallRequest | None = None):
     """Call an MCP tool."""
     return call_mcp_tool(server_id, tool_name, request.arguments if request else {}, _get_workspace())
-
-
-@app.post("/api/runs/blueprint")
-async def build_run_blueprint_route(request: RunRequest):
-    return build_run_blueprint(request.prompt, request.workspace_dir or _get_workspace())
 
 
 @app.post("/api/runs/context-pack")

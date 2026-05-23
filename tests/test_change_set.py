@@ -17,6 +17,7 @@ from src.api.services.change_service import (
     review_changes,
     save_change_set,
 )
+from src.api.services.event_store import get_event_store
 
 
 class TestFilePatchSummary:
@@ -193,6 +194,32 @@ class TestCollectChangesGit:
         assert cs.status == ChangeSetStatus.COLLECTED
         # Non-git with no checkpoints returns empty
         assert isinstance(cs.files, list)
+
+    def test_collect_uses_run_events_when_git_cannot_see_ignored_workspace(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        (repo / ".gitignore").write_text(".nanocursor/\n", encoding="utf-8")
+
+        ws = repo / ".nanocursor" / "workspaces" / "demo"
+        ws.mkdir(parents=True)
+        (ws / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        thread_id = "run_event_changes"
+        get_event_store().append_event(
+            thread_id,
+            "file_changed",
+            title="文件变更：calc.py",
+            content="Created calc.py (31 bytes)",
+            agent="coder",
+            payload={"path": "calc.py", "change_type": "modified", "output": "Created calc.py (31 bytes)"},
+            workspace_dir=str(ws),
+        )
+
+        cs = collect_changes(thread_id, str(ws))
+        assert [f.path for f in cs.files] == ["calc.py"]
+        assert cs.files[0].change_type == "added"
+        assert cs.files[0].additions == 2
 
 
 class TestReviewChanges:

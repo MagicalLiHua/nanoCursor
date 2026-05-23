@@ -49,6 +49,23 @@ def test_execution_plan_includes_tool_policy_and_builtin_skill_context(tmp_path)
     assert plan["summary"]["skill_context_count"] == len(plan["skill_context"])
 
 
+def test_execution_plan_recommends_mcp_call_for_mcp_capability(tmp_path):
+    team = [
+        {"name": "Reviewer", "role": "reviewer", "capabilities": ["mcp.github", "skill.delivery-review"]},
+        {"name": "Coder", "role": "coder", "capabilities": ["tool.file_ops"]},
+        {"name": "Tester", "role": "tester", "capabilities": ["skill.delivery-review"]},
+    ]
+
+    plan = build_execution_plan("查看 GitHub PR 并复核代码", team, str(tmp_path))
+    instructions = build_runtime_instructions(plan, team)
+
+    assert "mcp_call" in plan["tool_policy"]["recommended_tools"]
+    assert any(item["server_id"] == "mcp.github" for item in plan["mcp_plan"])
+    assert plan["summary"]["mcp_count"] >= 1
+    assert "MCP 使用计划" in instructions
+    assert "mcp_call" in instructions
+
+
 def test_execution_plan_loads_workspace_skill_context(tmp_path):
     skill_dir = tmp_path / ".nanocursor" / "skills" / "api-review"
     skill_dir.mkdir(parents=True)

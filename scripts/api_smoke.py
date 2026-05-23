@@ -67,6 +67,54 @@ def _assert_json_has(response: Any, *keys: str) -> None:
 def _prepare_workspace(workspace: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("hello from api smoke\n", encoding="utf-8")
+    (workspace / "fake_mcp_server.py").write_text(
+        r'''
+import json
+import sys
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if line == b"":
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode("ascii").partition(":")
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers.get("content-length", "0"))
+    if length <= 0:
+        return None
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    sys.stdout.buffer.flush()
+
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "smoke", "version": "1"}}})
+    elif method == "tools/list":
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "smoke_echo", "description": "Smoke echo", "inputSchema": {"type": "object"}}]}})
+    elif method == "tools/call":
+        arguments = message.get("params", {}).get("arguments", {})
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": "smoke:" + str(arguments.get("text", ""))}]}})
+    else:
+        write_message({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
+''',
+        encoding="utf-8",
+    )
     backup_dir = workspace / ".backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     (backup_dir / "README.md.bak").write_text("restored by api smoke\n", encoding="utf-8")
@@ -119,6 +167,8 @@ def run_smoke() -> list[SmokeResult]:
                 ("GET", "/api/system/doctor", None, (200,)),
                 ("GET", "/api/system/paths", None, (200,)),
                 ("GET", "/api/workspace/health", None, (200,)),
+                ("GET", "/api/workspace/migration", None, (200,)),
+                ("POST", "/api/workspace/migrate?dry_run=true", None, (200,)),
                 ("GET", "/api/workspace/settings", None, (200,)),
                 ("GET", "/api/runs/active", None, (200,)),
                 ("GET", "/api/evals", None, (200,)),
@@ -132,10 +182,10 @@ def run_smoke() -> list[SmokeResult]:
                     "/api/capabilities/mcp/servers",
                     {
                         "server_id": "smoke",
-                        "command": "python",
-                        "args": ["--version"],
+                        "command": sys.executable,
+                        "args": [str(workspace / "fake_mcp_server.py")],
                         "env_keys": [],
-                        "enabled": False,
+                        "enabled": True,
                     },
                     (200,),
                 ),
@@ -193,6 +243,216 @@ def run_smoke() -> list[SmokeResult]:
 
             for method, path, body, expected in checks:
                 results.append(_request(client, method, path, body=body, expected=expected))
+
+            for method, path, body, expected in [
+                ("POST", f"/api/runs/{thread_id}/actions/execute", {"kind": "read_file", "target": "README.md"}, (200,)),
+                (
+                    "POST",
+                    f"/api/runs/{thread_id}/actions/execute",
+                    {"kind": "write_file", "target": "smoke-action.txt", "payload": {"content": "action smoke\n"}},
+                    (200,),
+                ),
+            ]:
+                results.append(_request(client, method, path, body=body, expected=expected))
+
+            pending_command = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={"kind": "run_command", "target": "echo smoke-command"},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/actions/execute run_command pending",
+                pending_command.status_code,
+                pending_command.status_code == 200 and pending_command.json().get("requires_approval") is True,
+                _response_body(pending_command),
+            ))
+            if pending_command.status_code == 200 and pending_command.json().get("approval_id"):
+                from src.api.services.approval_service import resolve_tool_approval
+                approval_id = pending_command.json()["approval_id"]
+                resolve_tool_approval(thread_id, approval_id, True, "smoke approved", str(workspace))
+                command_result = client.post(
+                    f"/api/runs/{thread_id}/actions/execute",
+                    json={"kind": "run_command", "target": "echo smoke-command", "approval_id": approval_id},
+                )
+                ok = (
+                    command_result.status_code == 200
+                    and command_result.json().get("result") == "success"
+                    and "smoke-command" in command_result.json().get("detail", {}).get("stdout", "")
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/actions/execute run_command approved",
+                    command_result.status_code,
+                    ok,
+                    _response_body(command_result),
+                ))
+
+            suggest_agents = client.post(
+                f"/api/runs/{thread_id}/agents/suggest",
+                json={"prompt": "修复后端 API 并补充 pytest", "max_agents": 3},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/agents/suggest",
+                suggest_agents.status_code,
+                suggest_agents.status_code == 200 and bool(suggest_agents.json().get("suggestions")),
+                _response_body(suggest_agents),
+            ))
+            if suggest_agents.status_code == 200 and suggest_agents.json().get("suggestions"):
+                first_agent = suggest_agents.json()["suggestions"][0]
+                spawn_agent = client.post(
+                    f"/api/runs/{thread_id}/agents/spawn",
+                    json={"agent": first_agent},
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/agents/spawn",
+                    spawn_agent.status_code,
+                    spawn_agent.status_code == 200 and spawn_agent.json().get("agent", {}).get("status") == "active",
+                    _response_body(spawn_agent),
+                ))
+                if spawn_agent.status_code == 200 and spawn_agent.json().get("agent", {}).get("agent_id"):
+                    agent_id = spawn_agent.json()["agent"]["agent_id"]
+                    list_agents = client.get(f"/api/runs/{thread_id}/agents")
+                    results.append(SmokeResult(
+                        "GET",
+                        f"/api/runs/{thread_id}/agents",
+                        list_agents.status_code,
+                        list_agents.status_code == 200 and list_agents.json().get("active_count") >= 1,
+                        _response_body(list_agents),
+                    ))
+                    complete_agent = client.post(
+                        f"/api/runs/{thread_id}/agents/{agent_id}/complete",
+                        json={
+                            "summary": "smoke ephemeral agent completed",
+                            "evidence": [{"type": "smoke", "status": "passed"}],
+                            "risks": [],
+                            "artifacts": [],
+                            "recommended_next_actions": [],
+                        },
+                    )
+                    results.append(SmokeResult(
+                        "POST",
+                        f"/api/runs/{thread_id}/agents/{agent_id}/complete",
+                        complete_agent.status_code,
+                        complete_agent.status_code == 200 and complete_agent.json().get("agent", {}).get("status") == "archived",
+                        _response_body(complete_agent),
+                    ))
+                    archived_agents = client.get(f"/api/runs/{thread_id}/agents?include_archived=true")
+                    results.append(SmokeResult(
+                        "GET",
+                        f"/api/runs/{thread_id}/agents?include_archived=true",
+                        archived_agents.status_code,
+                        archived_agents.status_code == 200 and archived_agents.json().get("archived_count") >= 1,
+                        _response_body(archived_agents),
+                    ))
+
+            tools_response = client.get("/api/capabilities/mcp/mcp.smoke/tools")
+            tools_ok = (
+                tools_response.status_code == 200
+                and tools_response.json().get("ok") is True
+                and any(tool.get("name") == "smoke_echo" for tool in tools_response.json().get("tools", []))
+            )
+            results.append(SmokeResult(
+                "GET",
+                "/api/capabilities/mcp/mcp.smoke/tools",
+                tools_response.status_code,
+                tools_ok,
+                _response_body(tools_response),
+            ))
+
+            pending_mcp = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={
+                    "kind": "mcp_call",
+                    "target": "mcp.smoke/smoke_echo",
+                    "payload": {
+                        "server_id": "mcp.smoke",
+                        "tool_name": "smoke_echo",
+                        "arguments": {"text": "ok"},
+                    },
+                },
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/actions/execute mcp_call pending",
+                pending_mcp.status_code,
+                pending_mcp.status_code == 200 and pending_mcp.json().get("requires_approval") is True,
+                _response_body(pending_mcp),
+            ))
+            if pending_mcp.status_code == 200 and pending_mcp.json().get("approval_id"):
+                from src.api.services.approval_service import resolve_tool_approval
+                approval_id = pending_mcp.json()["approval_id"]
+                resolve_tool_approval(thread_id, approval_id, True, "smoke approved mcp", str(workspace))
+                mcp_result = client.post(
+                    f"/api/runs/{thread_id}/actions/execute",
+                    json={
+                        "kind": "mcp_call",
+                        "target": "mcp.smoke/smoke_echo",
+                        "approval_id": approval_id,
+                        "payload": {
+                            "server_id": "mcp.smoke",
+                            "tool_name": "smoke_echo",
+                            "arguments": {"text": "ok"},
+                        },
+                    },
+                )
+                content = (
+                    mcp_result.json()
+                    .get("detail", {})
+                    .get("result", {})
+                    .get("content", [{}])
+                )
+                ok = (
+                    mcp_result.status_code == 200
+                    and mcp_result.json().get("result") == "success"
+                    and content
+                    and content[0].get("text") == "smoke:ok"
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/actions/execute mcp_call approved",
+                    mcp_result.status_code,
+                    ok,
+                    _response_body(mcp_result),
+                ))
+
+            pending_delete = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={"kind": "delete_file", "target": "smoke-action.txt"},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/actions/execute delete_file pending",
+                pending_delete.status_code,
+                (
+                    pending_delete.status_code == 200
+                    and pending_delete.json().get("requires_approval") is True
+                    and (workspace / "smoke-action.txt").exists()
+                ),
+                _response_body(pending_delete),
+            ))
+            if pending_delete.status_code == 200 and pending_delete.json().get("approval_id"):
+                from src.api.services.approval_service import resolve_tool_approval
+                approval_id = pending_delete.json()["approval_id"]
+                resolve_tool_approval(thread_id, approval_id, True, "smoke approved delete", str(workspace))
+                delete_result = client.post(
+                    f"/api/runs/{thread_id}/actions/execute",
+                    json={"kind": "delete_file", "target": "smoke-action.txt", "approval_id": approval_id},
+                )
+                ok = (
+                    delete_result.status_code == 200
+                    and delete_result.json().get("result") == "success"
+                    and not (workspace / "smoke-action.txt").exists()
+                    and Path(delete_result.json().get("detail", {}).get("trash_path", "")).exists()
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/actions/execute delete_file approved",
+                    delete_result.status_code,
+                    ok,
+                    _response_body(delete_result),
+                ))
 
             skill_id = "skill.smoke-skill"
             remediation_response = client.post(

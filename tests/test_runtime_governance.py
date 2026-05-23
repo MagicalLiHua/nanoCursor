@@ -76,6 +76,17 @@ def test_tool_policy_runtime_blocks_budget_exceeded():
     assert "max_tool_calls" in d.budget_exceeded
 
 
+def test_tool_policy_runtime_test_budget_only_blocks_test_tools():
+    budget = RunBudget(max_tool_calls=40, max_file_writes=8, max_test_runs=1)
+    budget.test_runs = 1
+    rt = ToolPolicyRuntime(policy={"allowed_tools": ["read_file", "bash"]}, budget=budget)
+
+    assert rt.check("read_file").allowed is True
+    blocked = rt.check("bash")
+    assert blocked.allowed is False
+    assert blocked.budget_exceeded == ["max_test_runs"]
+
+
 def test_tool_policy_runtime_requires_approval():
     rt = ToolPolicyRuntime(
         policy={"allowed_tools": ["bash"], "approval_required": ["bash"]},

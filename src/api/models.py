@@ -136,11 +136,6 @@ class SkillImportRequest(BaseModel):
     content: str = Field(default="", max_length=8000)
 
 
-class RunBlueprintRequest(BaseModel):
-    """根据用户需求生成运行前执行蓝图"""
-    prompt: str = Field(..., min_length=1, max_length=1000)
-
-
 class ApprovalDecisionRequest(BaseModel):
     """用户对 Agent 计划的审批结果"""
     decision: str = Field(..., min_length=1, description="approved | revise | rejected")
@@ -214,6 +209,9 @@ class RunHistoryItem(RunSessionResponse):
     has_diff: bool = False
     has_report: bool = False
     last_event_type: str | None = None
+    is_active: bool = False
+    is_write_mode: bool = False
+    source: str = "history"
 
 
 class RunHistoryResponse(BaseModel):
@@ -753,6 +751,11 @@ class McpServerUpsertRequest(BaseModel):
     ignored_env_keys: list[str] = Field(default_factory=list, max_length=50)
 
 
+class McpPresetInstallRequest(BaseModel):
+    """内置 MCP 预设安装请求"""
+    enabled: bool | None = None
+
+
 class GitCommitRequest(BaseModel):
     """Git 提交请求"""
     message: str = Field(..., min_length=1, max_length=200)
@@ -905,3 +908,42 @@ class ActionExecuteRequest(BaseModel):
     target: str = ""
     payload: dict | None = None
     thread_id: str = ""
+    approval_id: str = ""
+
+
+# ---------------------------------------------------------------------------
+# R6: Ephemeral Agents
+# ---------------------------------------------------------------------------
+
+
+class EphemeralAgentSuggestRequest(BaseModel):
+    """Suggest temporary sub-agents for a run."""
+    prompt: str = ""
+    max_agents: int = 4
+    mcp_plan: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EphemeralAgentSpawnRequest(BaseModel):
+    """Spawn one temporary sub-agent from a suggestion/spec."""
+    agent: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_plain_spec(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "agent" not in data:
+            return {"agent": data}
+        return data
+
+
+class EphemeralAgentCompleteRequest(BaseModel):
+    """Complete a temporary sub-agent with structured output."""
+    summary: str = ""
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    risks: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_next_actions: list[str] = Field(default_factory=list)
+
+
+class EphemeralAgentArchiveRequest(BaseModel):
+    """Archive a temporary sub-agent."""
+    reason: str = ""

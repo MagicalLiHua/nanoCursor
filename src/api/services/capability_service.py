@@ -1,11 +1,14 @@
-"""Build the AgentHub capability catalog."""
+"""Build the nanoCursor capability catalog."""
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
+
+from src.api.services.mcp_status_service import get_mcp_server_status
 
 
 BUILTIN_CAPABILITIES = [
@@ -32,7 +35,7 @@ BUILTIN_CAPABILITIES = [
         "name": "偏好记忆",
         "kind": "tool",
         "status": "ready",
-        "description": "记录用户风格、技术栈和历史反馈，让 AgentHub 越用越懂项目。",
+        "description": "记录用户风格、技术栈和历史反馈，让 nanoCursor 越用越懂项目。",
         "tags": ["add_memory", "recall_memories"],
         "agents": ["Lead", "Planner"],
     },
@@ -49,6 +52,39 @@ BUILTIN_CAPABILITIES = [
 
 MCP_TEMPLATES = [
     {
+        "id": "mcp.filesystem",
+        "name": "本地文件系统 MCP",
+        "kind": "mcp",
+        "status": "planned",
+        "description": "把当前项目目录作为受控文件系统上下文，适合跨工具读取文件和目录。",
+        "tags": ["filesystem", "local", "project"],
+        "agents": ["Planner", "Coder"],
+        "setup_source": ".nanocursor/mcp.json",
+        "setup_hint": "可使用内置预设一键写入当前工作区的 filesystem MCP 配置。",
+    },
+    {
+        "id": "mcp.memory",
+        "name": "记忆图谱 MCP",
+        "kind": "mcp",
+        "status": "planned",
+        "description": "提供轻量知识图谱记忆，适合沉淀项目事实、偏好和长期上下文。",
+        "tags": ["memory", "knowledge", "graph"],
+        "agents": ["Lead", "Planner"],
+        "setup_source": ".nanocursor/mcp.json",
+        "setup_hint": "可使用内置预设写入 @modelcontextprotocol/server-memory 配置。",
+    },
+    {
+        "id": "mcp.sequential-thinking",
+        "name": "Sequential Thinking MCP",
+        "kind": "mcp",
+        "status": "planned",
+        "description": "为复杂问题提供结构化推理工具，适合规划、排错和方案比较。",
+        "tags": ["reasoning", "planning", "debug"],
+        "agents": ["Planner", "Reviewer"],
+        "setup_source": ".nanocursor/mcp.json",
+        "setup_hint": "可使用内置预设写入 sequential-thinking MCP 配置。",
+    },
+    {
         "id": "mcp.github",
         "name": "GitHub MCP",
         "kind": "mcp",
@@ -57,7 +93,7 @@ MCP_TEMPLATES = [
         "tags": ["issues", "pull_requests", "ci"],
         "agents": ["Lead", "Reviewer"],
         "setup_source": ".mcp.json / .cursor/mcp.json / .nanocursor/mcp.json",
-        "setup_hint": "在项目目录添加 mcpServers.github 配置后会自动变为已配置。",
+        "setup_hint": "可使用内置预设写入官方 GitHub MCP 配置；需要 Docker 和 GITHUB_PERSONAL_ACCESS_TOKEN。",
     },
     {
         "id": "mcp.figma",
@@ -79,7 +115,7 @@ MCP_TEMPLATES = [
         "tags": ["docs", "knowledge", "rag"],
         "agents": ["Planner", "Tester"],
         "setup_source": ".mcp.json / .cursor/mcp.json / .nanocursor/mcp.json",
-        "setup_hint": "配置文档知识库 MCP server 后，可把规范和接口文档纳入交付证据。",
+        "setup_hint": "可使用内置预设把 docs/ 或当前项目目录作为文档知识库。",
     },
 ]
 
@@ -105,7 +141,7 @@ SKILL_TEMPLATES = [
         "description": "从需求覆盖、质量门禁、Diff 风险和恢复点复核一次交付。",
         "tags": ["review", "quality", "traceability"],
         "agents": ["Reviewer", "Tester"],
-        "use_cases": ["交付前验收", "风险复盘", "比赛演示质量检查"],
+        "use_cases": ["交付前验收", "风险复盘", "展示用例质量检查"],
         "inputs": ["任务清单", "Diff 摘要", "测试结果", "交付报告"],
         "outputs": ["覆盖率判断", "风险列表", "下一步修复建议"],
         "risks": ["依赖输入证据完整度，缺少测试结果时只能给出部分结论。"],
@@ -191,7 +227,7 @@ def _read_mcp_config(workspace: Path) -> list[dict[str, Any]]:
                     "name": f"{name} MCP",
                     "kind": "mcp",
                     "status": "configured",
-                    "description": f"已在 {path.name} 中配置，可作为 AgentHub 外部工具能力。",
+                    "description": f"已在 {path.name} 中配置，可作为 nanoCursor 外部工具能力。",
                     "tags": [tag for tag in ["mcp", command] if tag],
                     "agents": ["Lead", "Coder"],
                     "source": str(path.relative_to(workspace)) if path.is_relative_to(workspace) else str(path),
@@ -266,7 +302,7 @@ def import_workspace_skill(
 
 
 def build_capability_hub(workspace_dir: str | None = None) -> dict[str, Any]:
-    """Return AgentHub capabilities grouped for the frontend."""
+    """Return nanoCursor capabilities grouped for the frontend."""
     workspace = _workspace(workspace_dir)
     mcp_by_id = {item["id"]: dict(item) for item in MCP_TEMPLATES}
     for configured in _read_mcp_config(workspace):
@@ -295,6 +331,72 @@ def build_capability_hub(workspace_dir: str | None = None) -> dict[str, Any]:
         "groups": groups,
         "capabilities": capabilities,
     }
+
+
+def build_mcp_execution_plan(
+    capability_ids: list[str],
+    capabilities: list[dict[str, Any]] | None = None,
+    workspace_dir: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build a compact MCP execution plan for recommended/planned capabilities."""
+    if not capability_ids:
+        return []
+
+    workspace = _workspace(workspace_dir)
+    capability_by_id = {item["id"]: item for item in (capabilities or build_capability_hub(str(workspace))["capabilities"])}
+    mcp_ids = [capability_id for capability_id in capability_ids if str(capability_id).startswith("mcp.")]
+    plans: list[dict[str, Any]] = []
+
+    for capability_id in mcp_ids:
+        capability = capability_by_id.get(capability_id, {"id": capability_id, "name": capability_id, "status": "planned"})
+        runtime_status = get_mcp_server_status(capability_id, str(workspace))
+        tools_cache = runtime_status.get("tools_cache") if isinstance(runtime_status.get("tools_cache"), dict) else {}
+        cached_tools = tools_cache.get("tools") if isinstance(tools_cache.get("tools"), list) else []
+        circuit_open_until = float(runtime_status.get("circuit_open_until") or 0)
+        circuit_remaining = max(0, int(circuit_open_until - time.time()))
+        configured = capability.get("status") == "configured"
+        enabled = capability.get("enabled", True) is not False and runtime_status.get("enabled", True) is not False
+        usable = configured and enabled and circuit_remaining == 0
+        status = "circuit_open" if circuit_remaining else runtime_status.get("status") or capability.get("status") or "unknown"
+
+        if usable and cached_tools:
+            reason = f"{capability.get('name', capability_id)} 已配置，缓存中有 {len(cached_tools)} 个工具，可在审批后通过 mcp_call 使用。"
+        elif usable:
+            reason = f"{capability.get('name', capability_id)} 已配置，但尚未缓存工具列表；执行前建议先刷新 tools/list。"
+        elif circuit_remaining:
+            reason = f"{capability.get('name', capability_id)} 当前熔断中，约 {circuit_remaining} 秒后可重试。"
+        elif not configured:
+            reason = f"{capability.get('name', capability_id)} 尚未配置，当前只作为规划提示。"
+        else:
+            reason = f"{capability.get('name', capability_id)} 当前不可用，请检查配置或状态。"
+
+        plans.append({
+            "server_id": capability_id,
+            "name": capability.get("name", capability_id),
+            "status": status,
+            "configured": configured,
+            "enabled": enabled,
+            "usable": usable,
+            "tool_count": len(cached_tools),
+            "tools": [
+                {
+                    "name": str(tool.get("name") or "unnamed"),
+                    "description": str(tool.get("description") or ""),
+                }
+                for tool in cached_tools[:8]
+                if isinstance(tool, dict)
+            ],
+            "cache": {
+                "cached_at": tools_cache.get("cached_at"),
+                "config_hash": tools_cache.get("config_hash", ""),
+            } if tools_cache else {},
+            "failure_count": int(runtime_status.get("failure_count") or 0),
+            "last_error": runtime_status.get("last_error", ""),
+            "circuit_remaining_seconds": circuit_remaining,
+            "reason": reason,
+        })
+
+    return plans
 
 
 def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dict[str, Any]:
@@ -348,6 +450,7 @@ def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dic
             )
 
     ready_count = sum(1 for item in capabilities if item.get("status") in {"ready", "configured"})
+    mcp_plan = build_mcp_execution_plan(capability_ids, capabilities, workspace_dir)
     return {
         "prompt": prompt,
         "summary": {
@@ -355,8 +458,11 @@ def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dic
             "capability_count": len(capabilities),
             "ready_count": ready_count,
             "planned_count": len(capabilities) - ready_count,
+            "mcp_count": len(mcp_plan),
+            "usable_mcp_count": sum(1 for item in mcp_plan if item.get("usable")),
         },
         "agents": agent_names,
         "capabilities": capabilities,
+        "mcp_plan": mcp_plan,
         "reasons": reasons[:3],
     }

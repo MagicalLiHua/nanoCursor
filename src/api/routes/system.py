@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 from fastapi import APIRouter
 
-from src.api.dependencies import get_workspace
 from src.infra import config as config_module
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -29,16 +29,34 @@ async def system_paths():
 
 
 @router.get("/doctor")
-async def system_doctor():
+async def system_doctor(workspace_dir: str | None = None):
     checks: list[dict] = []
+    ws = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
 
     checks.append({"id": "python", "status": "passed",
                    "message": f"Python {sys.version_info.major}.{sys.version_info.minor}"})
 
-    ws = config_module.WORKSPACE_DIR
-    writable = os.access(ws, os.W_OK) if os.path.exists(ws) else False
+    writable = os.access(ws, os.W_OK) if ws.exists() else False
     checks.append({"id": "workspace", "status": "passed" if writable else "warning",
-                   "message": "workspace writable" if writable else "workspace not writable"})
+                   "message": "workspace writable" if writable else "workspace not writable",
+                   "path": str(ws)})
+
+    try:
+        from src.api.services.migration_service import inspect_workspace_migrations
+        migration = inspect_workspace_migrations(str(ws))
+        checks.append({
+            "id": "workspace_migration",
+            "status": "passed" if not migration["actions"] else "warning",
+            "message": "workspace metadata up to date"
+            if not migration["actions"]
+            else f"pending migrations: {', '.join(migration['actions'])}",
+        })
+    except Exception as exc:
+        checks.append({
+            "id": "workspace_migration",
+            "status": "warning",
+            "message": f"migration inspection failed: {exc}",
+        })
 
     checks.append({"id": "env", "status": "passed" if os.path.exists(".env") else "warning",
                    "message": ".env present" if os.path.exists(".env") else ".env missing"})
@@ -49,11 +67,11 @@ async def system_doctor():
                    "message": "LLM configured" if llm_found else "no LLM key found"})
 
     issues = sum(1 for c in checks if c["status"] != "passed")
-    return {"ok": issues == 0, "checks": checks}
+    return {"ok": issues == 0, "workspace_dir": str(ws), "checks": checks}
 
 
 @router.get("/diagnostics")
-async def system_diagnostics():
+async def system_diagnostics(workspace_dir: str | None = None):
     """Build a full diagnostic bundle (no API keys exposed)."""
     from src.api.services.diagnostic_service import build_diagnostic_bundle
-    return build_diagnostic_bundle()
+    return build_diagnostic_bundle(workspace_dir)

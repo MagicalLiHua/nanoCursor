@@ -92,6 +92,19 @@ class TestDiagnostics:
         data = resp.json()
         assert "errors" in data
 
+    def test_diagnostics_respects_workspace_dir(self, tmp_path):
+        from api_server import app
+        workspace = tmp_path / "custom-workspace"
+        workspace.mkdir()
+
+        client = TestClient(app)
+        resp = client.get("/api/system/diagnostics", params={"workspace_dir": str(workspace)})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["workspace"]["path"] == str(workspace.resolve())
+        assert data["runs"]["metrics"]["total_runs"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Doctor endpoint
@@ -106,6 +119,7 @@ class TestDoctor:
         data = resp.json()
         assert "checks" in data
         assert "ok" in data
+        assert "workspace_dir" in data
         check_ids = {c["id"] for c in data["checks"]}
         assert "python" in check_ids
         assert "workspace" in check_ids

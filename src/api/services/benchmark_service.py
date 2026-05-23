@@ -1,4 +1,4 @@
-"""Deterministic benchmark mode for AgentHub competition demos."""
+"""Deterministic benchmark mode for nanoCursor local showcases."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
         "expected_artifacts": ["tasks", "changed_files", "diff_patch", "tests", "report", "score"],
         "files": {
             "benchmarks/python-utils/string_tools.py": "import re\n\n\ndef slugify(value: str) -> str:\n    value = value.strip().lower()\n    value = re.sub(r'[^a-z0-9]+', '-', value)\n    return value.strip('-')\n",
-            "benchmarks/python-utils/test_string_tools.py": "from string_tools import slugify\n\n\ndef test_slugify_basic():\n    assert slugify('Hello, AgentHub!') == 'hello-agenthub'\n",
+            "benchmarks/python-utils/test_string_tools.py": "from string_tools import slugify\n\n\ndef test_slugify_basic():\n    assert slugify('Hello, nanoCursor!') == 'hello-nanocursor'\n",
         },
     },
     "bugfix-cart": {
@@ -205,7 +205,7 @@ def write_benchmark_artifacts(thread_id: str, benchmark_id: str, workspace_dir: 
 def build_benchmark_report(thread_id: str, benchmark: dict[str, Any], changed_files: list[dict[str, Any]]) -> str:
     changed_lines = "\n".join(f"- {item['path']} ({item['change_type']})" for item in changed_files)
     checks = "\n".join(f"- {item}" for item in benchmark["acceptance_criteria"])
-    return f"""# AgentHub Benchmark Report
+    return f"""# nanoCursor Benchmark Report
 
 ## Benchmark
 

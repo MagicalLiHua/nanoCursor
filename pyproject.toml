@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "nanocursor"
 version = "2.0.0"
 description = "Multi-agent software delivery workspace"
-readme = "readme.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [

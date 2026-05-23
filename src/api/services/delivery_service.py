@@ -14,6 +14,7 @@ from typing import Any
 
 from src.api.services.diff_service import get_run_diff
 from src.api.services.event_store import get_event_store
+from src.api.services.ephemeral_agent_service import summarize_ephemeral_agent_contributions
 from src.api.services.quality_service import build_quality_gate
 from src.api.services.report_service import build_delivery_report
 from src.api.services.score_service import build_delivery_score
@@ -25,6 +26,7 @@ def _load_change_set_cached(thread_id: str, workspace_dir: str | None = None) ->
     return load_change_set(thread_id, workspace_dir)
 from src.runtime.delivery_contract import (
     DeliveryContract,
+    DeliveryAgentContribution,
     DeliveryFileChange,
     DeliveryStatus,
     DeliveryVerification,
@@ -177,6 +179,12 @@ def build_delivery_contract(thread_id: str, workspace_dir: str | None = None) ->
 
     # --- risks ---
     report = build_delivery_report(thread_id, ws_str)
+    agent_summary = summarize_ephemeral_agent_contributions(thread_id, ws_str)
+    agent_contributions = [
+        DeliveryAgentContribution(**item)
+        for item in agent_summary.get("contributions", [])
+        if isinstance(item, dict) and item.get("agent_id")
+    ]
     raw_risks: list[dict[str, Any]] = report.get("risks", [])
     risks: list[dict[str, Any]] = []
     if isinstance(raw_risks, list):
@@ -195,6 +203,9 @@ def build_delivery_contract(thread_id: str, workspace_dir: str | None = None) ->
             "description": f"Verification failed: {verification.command or 'unknown command'}",
             "exit_code": verification.exit_code,
         })
+    for agent_risk in agent_summary.get("risks", []):
+        if isinstance(agent_risk, dict):
+            risks.append(agent_risk)
 
     # --- open questions & next actions ---
     open_questions: list[str] = []
@@ -219,6 +230,9 @@ def build_delivery_contract(thread_id: str, workspace_dir: str | None = None) ->
         if not verifications or all(v.status == "not_run" for v in verifications):
             next_actions.append("建议运行测试/构建验证变更")
         next_actions.append("建议人工点击核心流程再验收一次")
+    if agent_summary.get("summary", {}).get("active_count", 0):
+        open_questions.append("仍有临时子 Agent 未完成或未归档，需要确认是否纳入最终交付")
+    next_actions.extend(agent_summary.get("next_actions", []))
 
     # --- summary ---
     summary = report.get("summary", "")
@@ -237,6 +251,7 @@ def build_delivery_contract(thread_id: str, workspace_dir: str | None = None) ->
         objective=prompt,
         summary=str(summary),
         plan=plan,
+        agent_contributions=agent_contributions,
         changed_files=changed_files,
         verifications=verifications,
         risks=risks,
@@ -307,6 +322,21 @@ def render_delivery_markdown(contract: DeliveryContract) -> str:
             lines.append(f"| {cf.path} | {cf.change_type} | {cf.risk} |")
     else:
         lines.append("- No files changed.")
+    lines.append("")
+
+    # Agent contributions
+    lines.extend(["## Temporary Agent Contributions", ""])
+    if contract.agent_contributions:
+        lines.extend(["| Agent | Role | Status | Summary | Evidence | Risks |", "|---|---|---|---|---|---|"])
+        for item in contract.agent_contributions:
+            status = item.terminal_status or item.status or "-"
+            summary = (item.summary or "-").replace("|", "\\|")[:180]
+            lines.append(
+                f"| {item.name or item.agent_id} | {item.role or '-'} | {status} | "
+                f"{summary} | {item.evidence_count} | {item.risk_count} |"
+            )
+    else:
+        lines.append("- No temporary sub-agent contributions recorded.")
     lines.append("")
 
     # Verifications
