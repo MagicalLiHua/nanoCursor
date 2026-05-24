@@ -25,6 +25,41 @@ export function renderCapabilities({ state, isActionBusy }) {
         <div><strong>${escapeHtml(summary.configured ?? 0)}</strong><span>已配置</span></div>
         <div><strong>${escapeHtml(summary.planned ?? 0)}</strong><span>待接入</span></div>
       </section>
+      ${renderCapabilitySetupPanel()}
+      ${renderMcpPresetPanel()}
+      <details class="capability-config-drawer">
+        <summary>
+          <span>手动配置 MCP</span>
+          <strong>连接自定义 Server</strong>
+        </summary>
+        <form class="mcp-config-panel" id="mcp-config-form">
+          <div>
+            <strong>配置 MCP Server</strong>
+            <span>写入当前项目的 .nanocursor/mcp.json；密钥建议使用环境变量名，不直接保存明文。</span>
+          </div>
+          <div class="mcp-config-grid">
+            <input id="mcp-server-name-input" placeholder="server 名称，例如 github" />
+            <input id="mcp-command-input" placeholder="启动命令，例如 npx" />
+          </div>
+          <textarea id="mcp-args-input" rows="2" placeholder="参数：每行一个，例如&#10;-y&#10;@modelcontextprotocol/server-github"></textarea>
+          <input id="mcp-env-input" placeholder="环境变量名，逗号分隔，例如 GITHUB_TOKEN" />
+          <button class="button secondary compact-button" type="submit">保存 MCP 配置</button>
+        </form>
+      </details>
+      <div class="capability-groups">
+        ${groups.map(renderCapabilityGroup).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderCapabilitySetupPanel() {
+  return `
+    <details class="capability-config-drawer">
+      <summary>
+        <span>自定义 Skill</span>
+        <strong>导入项目能力</strong>
+      </summary>
       <form class="skill-import-panel" id="skill-import-form">
         <div>
           <strong>导入自定义 Skill</strong>
@@ -34,24 +69,7 @@ export function renderCapabilities({ state, isActionBusy }) {
         <textarea id="skill-content-input" rows="3" placeholder="粘贴 SKILL.md 内容，或写一段用途说明"></textarea>
         <button class="button secondary compact-button" type="submit">导入</button>
       </form>
-      ${renderMcpPresetPanel()}
-      <form class="mcp-config-panel" id="mcp-config-form">
-        <div>
-          <strong>配置 MCP Server</strong>
-          <span>写入当前项目的 .nanocursor/mcp.json；密钥建议使用环境变量名，不直接保存明文。</span>
-        </div>
-        <div class="mcp-config-grid">
-          <input id="mcp-server-name-input" placeholder="server 名称，例如 github" />
-          <input id="mcp-command-input" placeholder="启动命令，例如 npx" />
-        </div>
-        <textarea id="mcp-args-input" rows="2" placeholder="参数：每行一个，例如&#10;-y&#10;@modelcontextprotocol/server-github"></textarea>
-        <input id="mcp-env-input" placeholder="环境变量名，逗号分隔，例如 GITHUB_TOKEN" />
-        <button class="button secondary compact-button" type="submit">保存 MCP 配置</button>
-      </form>
-      <div class="capability-groups">
-        ${groups.map(renderCapabilityGroup).join("")}
-      </div>
-    </div>
+    </details>
   `;
 }
 
@@ -59,18 +77,23 @@ function renderMcpPresetPanel() {
   const presets = viewState.mcpConfig?.presets || [];
   if (!presets.length) return "";
   return `
-    <section class="mcp-preset-panel">
-      <div class="mcp-preset-head">
-        <div>
-          <strong>推荐 MCP 预设</strong>
-          <span>一键写入当前项目配置，后续仍可在下方手动微调。</span>
+    <details class="capability-config-drawer mcp-preset-drawer">
+      <summary>
+        <span>MCP 预设</span>
+        <strong>${escapeHtml(viewState.mcpConfig?.presetSummary?.configured || 0)} 已启用</strong>
+      </summary>
+      <section class="mcp-preset-panel">
+        <div class="mcp-preset-head">
+          <div>
+            <strong>推荐 MCP 预设</strong>
+            <span>一键写入当前项目配置，后续仍可在下方手动微调。</span>
+          </div>
         </div>
-        <span>${escapeHtml(viewState.mcpConfig?.presetSummary?.configured || 0)} 已启用</span>
-      </div>
-      <div class="mcp-preset-list">
-        ${presets.map(renderMcpPresetCard).join("")}
-      </div>
-    </section>
+        <div class="mcp-preset-list">
+          ${presets.map(renderMcpPresetCard).join("")}
+        </div>
+      </section>
+    </details>
   `;
 }
 

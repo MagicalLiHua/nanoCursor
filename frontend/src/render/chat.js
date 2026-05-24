@@ -1,12 +1,27 @@
-import { approvalDecisionLabel, escapeHtml } from "../core/format.js";
+import { approvalDecisionLabel, escapeHtml, shortId } from "../core/format.js";
 
 export function renderChat({ state, isActionBusy }) {
   const running = state.status === "running";
+  const taskCount = state.tasks?.length || 0;
+  const fileCount = state.files?.length || 0;
+  const sessionLabel =
+    state.currentThreadId && state.currentThreadId !== "pending"
+      ? shortId(state.currentThreadId, "Draft")
+      : state.currentConversationId
+        ? shortId(state.currentConversationId, "Draft")
+        : "Draft";
   return `
     <section class="panel chat-panel">
-      <div class="panel-header">
-        <h2 class="panel-title">IM 协作区</h2>
-        <span class="panel-subtitle">Lead / Planner / Coder / Tester</span>
+      <div class="panel-header chat-workbar">
+        <div class="chat-title-block">
+          <h2 class="panel-title">工作会话</h2>
+          <span class="panel-subtitle">${escapeHtml(sessionLabel)}</span>
+        </div>
+        <div class="chat-workbar-meta">
+          <span>${escapeHtml(taskCount)} tasks</span>
+          <span>${escapeHtml(fileCount)} files</span>
+          <span>${escapeHtml(state.team?.length || 0)} agents</span>
+        </div>
       </div>
       <div class="chat-body">
         <div class="message-list" id="message-list">
@@ -17,14 +32,14 @@ export function renderChat({ state, isActionBusy }) {
         <form class="prompt-box" id="prompt-form">
           <div class="composer-toolbar">
             <div class="composer-modes" aria-label="任务模式">
-              <span class="composer-mode active">交付任务</span>
-              <span class="composer-mode">代码修改</span>
-              <span class="composer-mode">审查复核</span>
+              <span class="composer-mode active">Agent</span>
+              <span class="composer-mode">Edit</span>
+              <span class="composer-mode">Review</span>
             </div>
             <span class="composer-hint">Cmd/Ctrl + Enter 运行</span>
           </div>
-          <textarea class="prompt-input" id="prompt-input" rows="2" placeholder="输入需求，启动一次 nanoCursor 交付流程" title="Cmd/Ctrl + Enter 运行">${escapeHtml(state.prompt)}</textarea>
-          <button class="button ${isActionBusy("run-prompt") ? "loading" : ""}" type="submit" ${running || isActionBusy("run-prompt") ? "disabled" : ""}>${running ? "运行中" : isActionBusy("run-prompt") ? "连接中" : "开始运行"}</button>
+          <textarea class="prompt-input" id="prompt-input" rows="2" placeholder="描述你想让 nanoCursor 完成的代码任务" title="Cmd/Ctrl + Enter 运行">${escapeHtml(state.prompt)}</textarea>
+          <button class="button ${isActionBusy("run-prompt") ? "loading" : ""}" type="submit" ${running || isActionBusy("run-prompt") ? "disabled" : ""}>${running ? "运行中" : isActionBusy("run-prompt") ? "连接中" : "发送"}</button>
         </form>
       </div>
     </section>
@@ -33,6 +48,7 @@ export function renderChat({ state, isActionBusy }) {
 
 function renderCapabilityRecommendation(state) {
   if (state.capabilityRecommendationDismissed || state.capabilityRecommendationMuted) return "";
+  if (!String(state.prompt || "").trim()) return "";
 
   const recommendation = state.capabilityRecommendation || {};
   const capabilities = recommendation.capabilities || [];

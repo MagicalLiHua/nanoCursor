@@ -48,8 +48,11 @@ export function renderSidebar({ state, tabs, content }) {
         <div class="side-tabs">
           ${tabs
             .map(
-              ([id, label]) =>
-                `<button class="tab-button ${state.leftTab === id ? "active" : ""}" data-action="left-tab" data-tab="${id}">${escapeHtml(label)}</button>`,
+              ([id, label, count]) =>
+                `<button class="tab-button ${state.leftTab === id ? "active" : ""}" data-action="left-tab" data-tab="${id}">
+                  <span>${escapeHtml(label)}</span>
+                  ${count ? `<strong>${escapeHtml(count)}</strong>` : ""}
+                </button>`,
             )
             .join("")}
         </div>

@@ -1,177 +1,149 @@
 # nanoCursor
 
-> 本地优先的 AI Coding Agent 工作台原型，用来探索多 Agent 编排、工具审批审计、工作区隔离、MCP/Skill 扩展和可恢复运行机制。
+> Local-first AI coding agent workbench. 用一个可运行的前后端系统，把 AI Coding Agent 背后的工作区隔离、Agent 编排、工具审批、事件追踪、MCP/Skills、交付证据和恢复机制显式展示出来。
 
-nanoCursor 不是 Claude Code、Codex 或 Cursor 的替代品。它更适合作为一个完整的个人工程作品：把 AI Coding Agent 背后的运行状态、工具安全、交付证据、恢复机制和前后端工作台做成一个可运行、可测试、可展示的系统原型。
+nanoCursor 不是 Claude Code、Codex 或 Cursor 的替代品。它更像一个面向工程能力展示的个人项目：我把“AI 帮我改代码”这件事拆成可观察、可审批、可恢复、可复盘的产品化流程。
 
-## 项目定位
+![nanoCursor workbench](docs/assets/nanocursor-workbench.png)
 
-nanoCursor 关注的问题不是“再造一个代码生成聊天框”，而是：
+## 为什么做它
 
-- 用户打开一个本地项目目录后，运行数据如何和源码目录隔离。
-- 一次 AI 编程任务如何拆成计划、执行、验证、交付和复盘。
-- 文件写入、命令执行、MCP 调用等高风险动作如何审批、审计和回滚。
-- Run 事件、工具调用、变更集、交付报告、失败恢复如何形成可追踪证据。
-- MCP server、Skills、自定义 Agent 能力如何接入一个本地工作台。
-- 一个个人项目如何通过 pytest、API smoke、backend audit 和前端检查保持可维护。
+普通 AI 编程 Demo 很容易停留在“聊天框 + 代码生成”。nanoCursor 更关心真实工具会遇到的问题：
 
-## 当前状态
+- 用户打开一个本地目录后，运行数据不能污染项目根目录。
+- 一次任务不应该只有一段回答，还需要计划、执行、验证、报告和恢复入口。
+- 文件写入、命令执行、MCP 调用这类高风险动作需要策略检查和审批记录。
+- 前端要能实时看到事件流、任务状态、工具证据、Diff、报告和失败诊断。
+- MCP Server、Skills、自定义 Agent 能力应该能作为工作台能力中心管理。
 
-项目处于作品化收束阶段。核心后端能力、前端工作台、MCP/Skill 配置、工具审批、交付报告、恢复中心和接口检查已经具备雏形；后续重点是稳定性、文档、演示流程和 GitHub 展示。
+## 真实任务验证
 
-建议用下面的命令确认当前本地状态：
+我用 nanoCursor 跑过一个真实小任务，而不是只放静态 Demo：
 
-```bash
-python scripts/check_all.py
+```text
+工作区: demo-workspaces/readme-showcase
+任务: 在当前 JavaScript 小项目中新增 completionRate(summary) 函数；
+      更新 test.mjs 覆盖 2/3 -> 67%、0/0 -> 0%、3/3 -> 100%、1/4 -> 25%；
+      运行 npm test 验证。
+Run: 5083a639-ed64-458e-b04c-2f9d2b544fb5
+结果: completed
+事件: 71 条
+质量门禁: passed
+交付评分: 100
+验证命令: npm test -> tests passed
 ```
 
-`check_all.py` 会依次运行：
+实际修改了：
 
-- Python 编译检查
-- pytest 后端测试
-- 后端路由审计
-- API smoke 测试
-- 前端语法检查
+- `app.js`: 新增 `completionRate(summary)`。
+- `test.mjs`: 新增 4 个边界和常规测试。
+- `package.json`: 添加 `"type": "module"`，消除 ESM warning。
 
-GitHub Actions 已配置同样的检查链路，推送或提交 PR 时会自动运行。
+![completed run](docs/assets/nanocursor-run-completed.png)
+
+运行过程中的 SSE 事件流会被保留下来，前端可以重放和复盘：
+
+![event stream](docs/assets/nanocursor-event-stream.png)
+
+交付报告会汇总质量门禁、变更文件、风险和原始 Markdown 报告：
+
+![report drawer](docs/assets/nanocursor-report-drawer.png)
+
+## 核心能力
+
+- **工作区隔离**：用户项目目录、运行记录、checkpoint、trash、eval workspace、MCP 配置和 Skills 按 workspace 隔离。
+- **多 Agent 工作台**：支持 Lead / Planner / Coder / Tester / Reviewer 等角色，运行前可推荐团队，运行中可沉淀任务和证据。
+- **Execution Plan**：把用户需求拆成阶段、负责人、能力约束、验收标准和工具证据。
+- **实时事件流**：FastAPI + SSE 输出运行状态、阶段变化、工具调用、审批、文件变更、报告生成和错误事件。
+- **工具审批与审计**：`bash`、文件写入、删除、MCP 调用等高风险动作走策略检查、用户审批、台账记录和恢复建议。
+- **Project Index**：扫描入口文件、源码目录、配置、测试和最近修改文件，为 Agent 构造更靠谱的上下文。
+- **MCP / Skills 能力中心**：提供 MCP 预设、自定义 MCP Server 配置、自定义 Skill 导入和能力推荐。
+- **交付证据链**：报告、Diff、traceability、quality gate、delivery contract、recovery center 统一展示。
+- **前后端分离**：后端 FastAPI，前端 Vanilla JS 模块化工作台，便于快速迭代和演示。
+
+## 架构
+
+```mermaid
+flowchart TD
+    A["Open Workspace"] --> B["Create Conversation"]
+    B --> C["Recommend Team / Capabilities"]
+    C --> D["Build Execution Plan"]
+    D --> E["Agent Runtime"]
+    E --> F{"Risky Tool?"}
+    F -- "Yes" --> G["Policy Check + Approval"]
+    F -- "No" --> H["Execute Tool"]
+    G --> H
+    H --> I["EventStore / Tool Ledger"]
+    I --> J["Diff / Quality / Report / Recovery"]
+    J --> K["Frontend Workbench"]
+```
 
 ## 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-# Python，建议 3.10+
 pip install -r requirements.txt
 
-# 前端
 cd frontend
 npm install
 ```
 
-### 2. 配置环境变量
+建议使用 Python 3.10+ 和 Node.js 18+。
+
+### 2. 配置模型
 
 ```bash
 cp .env.example .env
 ```
 
-按需配置任一模型供应商：
-
-| 供应商 | 环境变量 |
-| --- | --- |
-| Anthropic | `ANTHROPIC_API_KEY` |
-| DeepSeek | `DEEPSEEK_API_KEY` |
-| MiniMax | `MINIMAX_API_KEY` |
-| OpenAI | `OPENAI_API_KEY` |
-| Ollama | `OLLAMA_BASE_URL` |
-
-### 3. 环境诊断
+按需配置其中一种供应商：
 
 ```bash
-python scripts/doctor.py
-# 或检查指定工作区
-python scripts/doctor.py --workspace-dir /path/to/your/project
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+DEEPSEEK_API_KEY=...
+MINIMAX_API_KEY=...
+OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-该脚本会检查 Python、Node、npm、依赖、`.env`、LLM 配置、Git、端口、Playwright、工作区可写性和工作区内的 MCP 配置。
+不要把 `.env` 提交到 GitHub。
 
-### 4. 启动开发环境
+### 3. 启动
+
+一键启动：
 
 ```bash
 python scripts/dev.py
 ```
 
-也可以分别启动：
+或者前后端分开启动：
 
 ```bash
-# 后端: http://127.0.0.1:8100
 python scripts/dev_backend.py
-
-# 前端: http://127.0.0.1:5173
 python scripts/dev_frontend.py
 ```
 
-打开 `http://127.0.0.1:5173` 使用前端工作台。
+默认地址：
 
-## 核心能力
+- Frontend: `http://127.0.0.1:5173`
+- Backend: `http://127.0.0.1:8100`
 
-- **工作区隔离**：用户项目、运行数据、checkpoint、trash、eval workspace 和配置文件按 workspace 隔离。
-- **多 Agent 编排原型**：支持团队推荐、运行期计划事件、临时子 Agent 建议和会话级团队配置。
-- **工具审批与审计**：`write_file`、`delete_file`、`run_command`、`mcp_call` 等高风险动作走统一 check、approve、execute、audit 流程。
-- **可恢复运行记录**：Run session、events、tool ledger、changeset、delivery、failures、audit 和 artifacts 持久化到 `.nanocursor/`。
-- **MCP/Skill 扩展**：扫描 MCP 配置，支持 stdio MCP tools/list 与 tools/call，提供工具缓存、失败熔断和 Skill 导入。
-- **交付证据链**：交付报告、质量分、traceability、diff、任务卡和恢复建议能在前端工作台查看。
-- **工程检查**：通过 pytest、API smoke、backend audit、frontend check 降低接口漂移和回归风险。
+### 4. 打开项目并运行任务
 
-## 系统流程
-
-```mermaid
-flowchart TD
-    A["打开本地工作区"] --> B["新建会话或运行任务"]
-    B --> C["生成团队建议与运行期计划"]
-    C --> D["构建 Context Pack"]
-    D --> E["执行 Agent Loop"]
-    E --> F{"需要高风险工具?"}
-    F -- "是" --> G["策略检查与用户审批"]
-    F -- "否" --> H["执行只读或低风险动作"]
-    G --> I["执行文件、命令或 MCP 工具"]
-    H --> J["记录事件与工具台账"]
-    I --> J
-    J --> K["收集变更与质量信号"]
-    K --> L["生成交付报告"]
-    L --> M["前端展示复盘、恢复和证据"]
-```
-
-## 数据目录
-
-用户打开的项目目录下会生成 `.nanocursor/`：
+1. 在顶部 Project 入口打开一个本地项目目录。
+2. 点击「新会话」。
+3. 输入任务，例如：
 
 ```text
-<workspace>/.nanocursor/
-  workspace.json
-  settings.json
-  runs/<thread_id>/
-    session.json
-    events.jsonl
-    tools.jsonl
-    steps.json
-    approvals/
-    changes.json
-    delivery.json
-    delivery.md
-    failures.json
-    audit.jsonl
-    ephemeral_agents.json
-    ephemeral_agent_events.jsonl
-  checkpoints/
-  trash/
-  skills/
-  evals/
+请在当前 JavaScript 小项目中新增 completionRate(summary) 函数，返回完成比例的百分数字符串；
+同时更新测试，并运行 npm test 验证。
 ```
 
-## 项目结构
+4. 如果出现工具审批，确认命令和工作区后再批准。
+5. 在底部 Evidence Drawer 查看报告、Diff、事件、恢复和交付物。
 
-```text
-nanoCursor/
-  api_server.py                 # FastAPI 后端入口和兼容路由
-  cli.py                        # CLI 入口
-  frontend/                     # Vanilla JS 前端工作台
-  src/
-    agent/                      # Agent loop、prompt、策略
-    api/
-      app.py                    # FastAPI 应用工厂
-      models.py                 # Pydantic 请求/响应模型
-      routes/                   # 模块化 API 路由
-      services/                 # 工作区、MCP、运行、审批等服务层
-    infra/                      # 配置、日志、路径 guard
-    runtime/                    # 状态机、事件、台账、变更、交付、审计
-    tools/                      # 文件、bash、git、memory、project、todo 工具
-  tests/                        # pytest 测试
-  evals/                        # 评测任务和 fixture workspace
-  scripts/                      # doctor、dev、check_all、backend_audit、api_smoke
-  docs/                         # 面向 GitHub 的核心文档
-```
-
-## 常用命令
+## 常用检查
 
 ```bash
 # 全量检查
@@ -186,27 +158,87 @@ python scripts/backend_audit.py
 # API smoke
 python scripts/api_smoke.py
 
-# 前端检查
-cd frontend && npm run check
+# 前端语法检查
+npm --prefix frontend run check
 ```
+
+本次 README 更新前已验证：
+
+```bash
+pytest tests/test_agenthub_services.py -q
+npm --prefix frontend run check
+cd demo-workspaces/readme-showcase && npm test
+```
+
+## 项目结构
+
+```text
+nanoCursor/
+  api_server.py                 # FastAPI 兼容入口和主要 API
+  frontend/                     # 前端工作台
+    src/actions/                # API action 层
+    src/controllers/            # 会话、运行、能力、布局等控制器
+    src/events/                 # DOM 事件绑定
+    src/render/                 # UI 渲染模块
+    src/services/               # 前端领域服务
+  src/
+    agent/                      # Agent loop、prompt、策略
+    api/
+      app.py                    # FastAPI app
+      routes/                   # 模块化路由
+      services/                 # workspace、run、MCP、report、quality 等服务
+    infra/                      # 配置、日志、路径 guard
+    runtime/                    # 运行状态、工具台账、交付契约
+    tools/                      # 文件、bash、git、memory、project、todo 工具
+  tests/                        # pytest 测试
+  evals/                        # 评测任务
+  scripts/                      # dev、doctor、check_all、api_smoke、backend_audit
+  docs/                         # 架构、契约、演示和截图
+```
+
+## 运行数据
+
+每个用户工作区下会生成 `.nanocursor/`：
+
+```text
+<workspace>/.nanocursor/
+  workspace.json
+  settings.json
+  runs/<thread_id>/
+    session.json
+    events.jsonl
+    tools.jsonl
+    approvals/
+    changes.json
+    delivery.json
+    delivery.md
+    failures.json
+    audit.jsonl
+  checkpoints/
+  trash/
+  skills/
+  evals/
+```
+
+这些是本地运行数据，通常不应该提交到业务项目仓库。
 
 ## 文档
 
-- [长期开发路线](docs/nanoCursor个人项目长期开发路线.md)
 - [架构说明](docs/architecture.md)
-- [安全与审计设计](docs/security-and-audit.md)
-- [演示脚本](docs/demo-script.md)
 - [API 契约](docs/api-contract.md)
 - [事件契约](docs/event-contract.md)
 - [运行状态契约](docs/run-state-contract.md)
+- [安全与审计设计](docs/security-and-audit.md)
+- [演示脚本](docs/demo-script.md)
+- [前端进化计划](docs/frontend-evolution-plan.md)
 
 ## 当前边界
 
-- 单机单用户，没有认证和多租户设计。
-- 不是成熟 AI 编程工具，不承诺替代 Claude Code、Codex 或 Cursor。
-- 前端使用 Vanilla JS，适合展示工作台原型，不追求大型前端工程复杂度。
-- 真实 Agent 执行能力仍以安全可控和可展示为优先，不追求长期自治。
-- Windows 路径做了兼容性修正，但仍建议在 macOS/Linux 下优先开发和演示。
+- 单机单用户，没有做账号、多租户和权限系统。
+- 不是成熟商业 AI IDE，不承诺替代 Claude Code、Codex 或 Cursor。
+- 真实 Agent 能力以安全可控和可展示为优先，长期自治能力仍有限。
+- 前端是轻量 Vanilla JS 模块化工作台，不追求大型 React 应用复杂度。
+- MCP 预设和 Skills 已具备入口，但不同 MCP Server 的真实可用性取决于本机环境和凭据配置。
 
 ## License
 

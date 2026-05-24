@@ -22,7 +22,7 @@ export function renderTopbar({
         <div class="brand-mark">NC</div>
         <div>
           <strong>nanoCursor</strong>
-          <span>AI 工作台</span>
+          <span>Local agent workbench</span>
         </div>
       </div>
       <div class="topbar-main">
@@ -37,18 +37,18 @@ export function renderTopbar({
           <span class="pill status-pill"><span class="status-dot ${dotClass}"></span><strong>${statusLabel(state.status)}</strong></span>
           <details class="runtime-details">
             <summary>运行信息</summary>
-            <div class="runtime-popover">
-              <div><span>API</span><strong title="${escapeHtml(apiBase)}">${escapeHtml(displayApiBase)}</strong></div>
-              <div><span>Conversation</span><strong title="${escapeHtml(state.currentConversationId || "未创建")}">${escapeHtml(shortId(state.currentConversationId))}</strong></div>
-              <div><span>Thread</span><strong title="${escapeHtml(state.currentThreadId)}">${escapeHtml(shortId(state.currentThreadId, "未创建"))}</strong></div>
-            </div>
-          </details>
+        <div class="runtime-popover">
+          <div><span>API</span><strong title="${escapeHtml(apiBase)}">${escapeHtml(displayApiBase)}</strong></div>
+          <div><span>Conversation</span><strong title="${escapeHtml(state.currentConversationId || "未创建")}">${escapeHtml(shortId(state.currentConversationId))}</strong></div>
+          <div><span>Thread</span><strong title="${escapeHtml(state.currentThreadId)}">${escapeHtml(shortId(state.currentThreadId, "未创建"))}</strong></div>
+        </div>
+      </details>
         </div>
       </div>
       <div class="topbar-actions">
-        <button class="button secondary command-trigger" data-action="open-command-palette" type="button" title="打开命令面板">⌘K</button>
-        <button class="button ${isActionBusy("new-session") ? "loading" : ""}" data-action="new-session" ${isActionBusy("new-session") ? "disabled" : ""}>新会话</button>
-        <button class="button secondary ${isActionBusy("sync-data") ? "loading" : ""}" data-action="sync-data" ${isActionBusy("sync-data") ? "disabled" : ""}>${isActionBusy("sync-data") ? "同步中" : "同步"}</button>
+        <button class="button secondary command-trigger" data-action="open-command-palette" type="button" title="打开命令面板">⌘ K</button>
+        <button class="button primary ${isActionBusy("new-session") ? "loading" : ""}" data-action="new-session" ${isActionBusy("new-session") ? "disabled" : ""}>新会话</button>
+        <button class="button secondary ${isActionBusy("sync-data") ? "loading" : ""}" data-action="sync-data" ${isActionBusy("sync-data") ? "disabled" : ""}>${isActionBusy("sync-data") ? "同步中" : "刷新"}</button>
         <button class="button secondary ${isActionBusy("copy-report") ? "loading" : ""}" data-action="copy-report" ${isActionBusy("copy-report") ? "disabled" : ""}>复制报告</button>
       </div>
     </header>

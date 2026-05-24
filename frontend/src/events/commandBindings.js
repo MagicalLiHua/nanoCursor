@@ -2,8 +2,7 @@ export function bindCommandEvents(context) {
   const {
     openCommandPalette,
     closeCommandPalette,
-    ensureUiState,
-    render,
+    setCommandQuery,
     filteredCommandItems,
     executeCommand,
   } = context;
@@ -21,8 +20,7 @@ export function bindCommandEvents(context) {
   });
 
   document.querySelector("#command-input")?.addEventListener("input", (event) => {
-    ensureUiState().commandQuery = event.target.value;
-    render();
+    setCommandQuery(event.target.value);
   });
 
   document.querySelector("#command-input")?.addEventListener("keydown", (event) => {

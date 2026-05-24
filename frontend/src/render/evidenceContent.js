@@ -116,7 +116,16 @@ function renderReplayControls(replay) {
   `;
 }
 
-export function renderPreview(previewUrl = "localhost:5173/demo-todo") {
+export function renderPreview(previewUrl = "") {
+  if (!previewUrl) {
+    return `
+      <div class="preview-empty">
+        <strong>尚未启动预览</strong>
+        <span>运行任务后，如果后端提供预览地址，这里会显示可检查的前端页面。</span>
+      </div>
+    `;
+  }
+
   return `
     <div class="preview-frame">
       <div class="preview-surface">
@@ -127,12 +136,7 @@ export function renderPreview(previewUrl = "localhost:5173/demo-todo") {
           <span class="panel-subtitle">${escapeHtml(previewUrl)}</span>
         </div>
         <div class="preview-body">
-          <input class="preview-input" value="搜索任务：localStorage" readonly />
-          <div class="preview-list">
-            <div class="preview-row"><span class="badge completed">完成</span><span>新增 Todo 输入框</span><button class="button secondary">删除</button></div>
-            <div class="preview-row"><span class="badge completed">完成</span><span>保存到 localStorage</span><button class="button secondary">删除</button></div>
-            <div class="preview-row"><span class="badge pending">待处理</span><span>补充自动化测试</span><button class="button secondary">删除</button></div>
-          </div>
+          <span class="panel-subtitle">预览服务已就绪，可在后续接入 iframe 或外部浏览器打开。</span>
         </div>
       </div>
     </div>

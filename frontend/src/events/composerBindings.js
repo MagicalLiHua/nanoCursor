@@ -1,10 +1,11 @@
 export function bindComposerEvents(context) {
   const {
     state,
-    recommendationMutedKey,
     render,
     withBusyAction,
-    scheduleCapabilityRecommendation,
+    dismissRecommendation,
+    toggleRecommendationDetail,
+    markRecommendationTyping,
     resizePromptInput,
     runPrompt,
     createCustomAgent,
@@ -16,16 +17,11 @@ export function bindComposerEvents(context) {
   } = context;
 
   document.querySelector("[data-action='dismiss-recommendation']")?.addEventListener("click", () => {
-    state.capabilityRecommendationDismissed = true;
-    state.capabilityRecommendationMuted = true;
-    sessionStorage.setItem(recommendationMutedKey, "1");
-    render();
+    dismissRecommendation();
   });
 
   document.querySelector("[data-action='toggle-recommendation-detail']")?.addEventListener("click", () => {
-    state.ui = state.ui || { busyActions: {}, toast: null, workspacePickerOpen: false, recommendationExpanded: false };
-    state.ui.recommendationExpanded = !state.ui.recommendationExpanded;
-    render();
+    toggleRecommendationDetail();
   });
 
   document.querySelector("[data-action='toggle-completed-tasks']")?.addEventListener("click", () => {
@@ -36,10 +32,7 @@ export function bindComposerEvents(context) {
   document.querySelector("#prompt-input")?.addEventListener("input", (event) => {
     state.prompt = event.target.value;
     resizePromptInput(event.target);
-    if (!state.capabilityRecommendationMuted) {
-      state.capabilityRecommendationDismissed = false;
-    }
-    scheduleCapabilityRecommendation(state.prompt);
+    markRecommendationTyping();
   });
 
   document.querySelector("#prompt-input")?.addEventListener("keydown", (event) => {

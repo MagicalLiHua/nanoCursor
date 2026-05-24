@@ -57,8 +57,11 @@ export function bindWorkspaceEvents(context) {
   });
 
   document.querySelectorAll("[data-action='select-run']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await restoreRun(button.dataset.runId);
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showToast("success", "正在恢复运行", shortPath(button.dataset.runId || "历史会话"));
+      await restoreRun(button.dataset.runId, { force: true });
     });
   });
 

@@ -74,8 +74,11 @@ export function renderRightPanel({ state, tabs, activeTab, content }) {
       <div class="right-tabs">
         ${tabs
           .map(
-            ([id, label]) =>
-              `<button class="tab-button ${activeTab === id ? "active" : ""}" data-action="right-tab" data-tab="${id}">${label}</button>`,
+            ([id, label, count]) =>
+              `<button class="tab-button ${activeTab === id ? "active" : ""}" data-action="right-tab" data-tab="${id}">
+                <span>${escapeHtml(label)}</span>
+                ${count ? `<strong>${escapeHtml(count)}</strong>` : ""}
+              </button>`,
           )
           .join("")}
       </div>

@@ -640,6 +640,60 @@ def test_quality_gate_warns_when_recommended_test_missing(tmp_path):
     assert "tests_finished" in warning_ids
 
 
+def test_quality_gate_accepts_tool_based_verification_and_delivery_markdown(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    store.create_session("tool-verified-run", "Prompt", str(workspace), status="completed")
+    store.append_event("tool-verified-run", "plan_created", workspace_dir=str(workspace))
+    store.append_event(
+        "tool-verified-run",
+        "task_created",
+        payload={"task_id": "t1"},
+        workspace_dir=str(workspace),
+    )
+    store.append_event(
+        "tool-verified-run",
+        "task_updated",
+        payload={"task_id": "t1", "status": "completed"},
+        workspace_dir=str(workspace),
+    )
+    store.append_event("tool-verified-run", "file_changed", workspace_dir=str(workspace))
+    store.append_event("tool-verified-run", "diff_updated", workspace_dir=str(workspace))
+    store.append_event(
+        "tool-verified-run",
+        "tool_call_finished",
+        payload={
+            "tool": "bash",
+            "input": {"command": "npm test"},
+            "output": "> test\n> node test.mjs\n\ntests passed",
+        },
+        workspace_dir=str(workspace),
+    )
+    store.append_event(
+        "tool-verified-run",
+        "assistant_message",
+        content="## 最终交付报告\n\nnpm test passed.",
+        workspace_dir=str(workspace),
+    )
+    store.append_event(
+        "tool-verified-run",
+        "done",
+        payload={"status": "completed"},
+        workspace_dir=str(workspace),
+    )
+    run_dir = store.run_dir("tool-verified-run", str(workspace))
+    (run_dir / "diff.patch").write_text("diff", encoding="utf-8")
+    (run_dir / "delivery.md").write_text("# delivery", encoding="utf-8")
+
+    quality = build_quality_gate("tool-verified-run", str(workspace))
+
+    assert quality["status"] == "passed"
+    assert quality["failed_count"] == 0
+    passed_ids = {check["id"] for check in quality["checks"] if check["status"] == "passed"}
+    assert {"tests_finished", "report_ready"} <= passed_ids
+
+
 def test_quality_gate_checks_execution_stage_lifecycle(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

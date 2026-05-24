@@ -1,4 +1,9 @@
 import { STORAGE_KEYS, getStorageValue, loadLayoutPreference } from "../core/storage.js";
+import {
+  blankArtifactCenter,
+  blankRecoveryCenter,
+  blankReport,
+} from "./runDefaults.js";
 
 const RECOMMENDATION_MUTED_KEY = STORAGE_KEYS.recommendationMuted;
 
@@ -7,7 +12,7 @@ export const demoState = {
   activeTab: "report",
   leftTab: "runs",
   rightTab: "tasks",
-  currentThreadId: "demo-run",
+  currentThreadId: "pending",
   currentConversationId: "",
   workspaceDir: getStorageValue("workspaceDir") || "",
   workspaceInput: getStorageValue("workspaceDir") || "",
@@ -65,8 +70,7 @@ export const demoState = {
     layoutMode: getStorageValue("layoutMode") || "workbench",
   },
   layout: loadLayoutPreference(),
-  prompt:
-    "帮我做一个 Todo Web App，要求支持新增、完成、删除、搜索和本地存储，并给出测试说明。",
+  prompt: "",
   replay: {
     events: [],
     index: 0,
@@ -85,78 +89,18 @@ export const demoState = {
     decision: "",
     comment: "",
   },
-  runs: [
-    {
-      id: "demo-run",
-      title: "Todo Web App 交付",
-      status: "completed",
-      time: "14:20",
-    },
-    {
-      id: "python-feature",
-      title: "Python 工具补测试",
-      status: "review",
-      time: "昨天",
-    },
-  ],
+  runs: [],
   conversations: [],
   messages: [
     {
-      role: "user",
-      author: "用户",
-      time: "14:20",
-      content:
-        "帮我做一个 Todo Web App，要求支持新增、完成、删除、搜索和本地存储，并给出测试说明。",
-    },
-    {
       role: "assistant",
       author: "Lead Agent",
-      time: "14:20",
+      time: "",
       content:
-        "我会按 nanoCursor 交付流程执行：先拆解需求，再由 Coder 生成前端实现，Tester 验证交互和本地存储，最后给出交付报告。",
-    },
-    {
-      role: "assistant",
-      author: "Reviewer Agent",
-      time: "14:24",
-      content:
-        "实现已覆盖核心验收标准。建议下一轮补充键盘快捷操作和空状态文案，当前版本可以作为稳定展示用例。",
+        "打开一个项目目录，或直接描述你想完成的代码任务。nanoCursor 会为当前会话组织 Agent、记录证据，并在 Review Drawer 中沉淀 Diff、报告和恢复信息。",
     },
   ],
-  tasks: [
-    {
-      id: "task-001",
-      title: "需求整理与验收标准",
-      description: "明确新增、完成、删除、搜索、本地存储和测试说明。",
-      status: "completed",
-      owner: "Planner",
-      capabilities: ["tool.project_index"],
-    },
-    {
-      id: "task-002",
-      title: "实现 Todo 交互界面",
-      description: "构建列表、输入框、过滤搜索和状态切换。",
-      status: "completed",
-      owner: "Coder",
-      capabilities: ["tool.file_ops", "tool.project_index", "skill.frontend-polish"],
-    },
-    {
-      id: "task-003",
-      title: "接入本地存储",
-      description: "使用 localStorage 保存任务数据和完成状态。",
-      status: "completed",
-      owner: "Coder",
-      capabilities: ["tool.file_ops", "tool.project_index"],
-    },
-    {
-      id: "task-004",
-      title: "验证和交付报告",
-      description: "检查核心流程并生成面向用户的交付摘要。",
-      status: "in_progress",
-      owner: "Tester",
-      capabilities: ["skill.delivery-review", "tool.recovery"],
-    },
-  ],
+  tasks: [],
   team: [
     {
       name: "Lead",
@@ -203,51 +147,14 @@ export const demoState = {
       artifacts: ["tests", "quality"],
     },
   ],
-  events: [
-    {
-      type: "run_started",
-      title: "任务已启动",
-      content: "创建 nanoCursor 交付会话，并初始化任务板。",
-      time: "14:20",
-    },
-    {
-      type: "plan_created",
-      title: "Planner 生成方案",
-      content: "拆解为需求整理、界面实现、本地存储、验证报告四个任务。",
-      time: "14:21",
-    },
-    {
-      type: "tool_call_finished",
-      title: "工具调用：write_file",
-      content: "写入 src/App.tsx 和 src/styles.css。",
-      time: "14:22",
-    },
-    {
-      type: "tool_call_finished",
-      title: "工具调用：bash",
-      content: "执行前端构建检查，返回成功。",
-      time: "14:23",
-    },
-    {
-      type: "done",
-      title: "交付报告已生成",
-      content: "变更文件、验证结果和下一步建议已归档。",
-      time: "14:24",
-    },
-  ],
-  files: [
-    { path: "demo-todo/index.html", type: "html", active: false },
-    { path: "demo-todo/src/App.tsx", type: "tsx", active: true },
-    { path: "demo-todo/src/styles.css", type: "css", active: false },
-    { path: "demo-todo/package.json", type: "json", active: false },
-    { path: "workspace/.nanocursor/runs/demo-run/report.md", type: "md", active: false },
-  ],
+  events: [],
+  files: [],
   metrics: {
-    tasks: 4,
-    files: 4,
-    toolCalls: 9,
-    tokens: "12.8k",
-    tests: "3/3",
+    tasks: 0,
+    files: 0,
+    toolCalls: 0,
+    tokens: "--",
+    tests: "--",
   },
   capabilityHub: {
     summary: {
@@ -421,141 +328,12 @@ export const demoState = {
       acceptance_criteria: ["reject negative quantity", "preserve total calculation", "regression test"],
     },
   ],
-  previewUrl: "localhost:5173/demo-todo",
+  previewUrl: "",
   selectedDiffFile: "",
   diffFiles: [],
-  diff: `diff --git a/demo-todo/src/App.tsx b/demo-todo/src/App.tsx
-new file mode 100644
---- /dev/null
-+++ b/demo-todo/src/App.tsx
-@@
-+function TodoApp() {
-+  const [items, setItems] = useLocalStorage("todos", []);
-+  const [query, setQuery] = useState("");
-+
-+  const visibleItems = items.filter((item) =>
-+    item.title.toLowerCase().includes(query.toLowerCase())
-+  );
-+
-+  return (
-+    <main className="todo-shell">
-+      <TodoComposer onCreate={createItem} />
-+      <TodoSearch value={query} onChange={setQuery} />
-+      <TodoList items={visibleItems} onToggle={toggleItem} onDelete={deleteItem} />
-+    </main>
-+  );
-+}`,
-  report: {
-    summary:
-      "本次交付完成了一个支持新增、完成、删除、搜索和本地存储的 Todo Web App，并补充了手动测试说明。",
-    markdown: "",
-    requirements: [
-      "支持创建任务并即时展示。",
-      "支持完成状态切换和删除。",
-      "支持按关键字搜索任务。",
-      "刷新页面后保留任务数据。",
-    ],
-    changedFiles: [
-      "demo-todo/src/App.tsx",
-      "demo-todo/src/styles.css",
-      "demo-todo/index.html",
-      "demo-todo/package.json",
-    ],
-    risks: ["当前演示版本未接入自动化端到端测试。", "部署流程仍为本地预览，正式发布需要补充构建配置。"],
-    traceability: {
-      source: "demo",
-      coverageRate: 1,
-      totalCount: 4,
-      coveredCount: 4,
-      partialCount: 0,
-      missingCount: 0,
-      requirements: [
-        {
-          id: "REQ-001",
-          title: "创建 Todo",
-          status: "covered",
-          tasks: ["task-002"],
-          files: ["demo-todo/src/App.tsx"],
-          tests: ["create"],
-        },
-        {
-          id: "REQ-002",
-          title: "完成和删除 Todo",
-          status: "covered",
-          tasks: ["task-002"],
-          files: ["demo-todo/src/App.tsx"],
-          tests: ["complete", "delete"],
-        },
-        {
-          id: "REQ-003",
-          title: "搜索 Todo",
-          status: "covered",
-          tasks: ["task-002"],
-          files: ["demo-todo/src/App.tsx"],
-          tests: ["search"],
-        },
-        {
-          id: "REQ-004",
-          title: "本地持久化",
-          status: "covered",
-          tasks: ["task-003"],
-          files: ["demo-todo/src/App.tsx"],
-          tests: ["localStorage"],
-        },
-      ],
-    },
-  },
-  artifactCenter: {
-    status: "ready",
-    summary: {
-      artifact_count: 9,
-      ready_count: 8,
-      warning_count: 1,
-      missing_count: 0,
-      score: 92,
-      coverage_rate: 1,
-    },
-    artifacts: [
-      {
-        id: "requirements",
-        kind: "requirements",
-        label: "需求摘要",
-        status: "ready",
-        summary: "4 / 4 个需求已覆盖",
-        count: 4,
-      },
-      {
-        id: "tasks",
-        kind: "tasks",
-        label: "任务清单",
-        status: "warning",
-        summary: "3 / 4 个任务已完成",
-        count: 4,
-      },
-      {
-        id: "changed_files",
-        kind: "files",
-        label: "变更文件",
-        status: "ready",
-        summary: "4 个文件发生变化",
-        count: 4,
-      },
-      {
-        id: "diff_patch",
-        kind: "diff",
-        label: "Diff Patch",
-        status: "ready",
-        summary: "Diff 来源：demo",
-      },
-      {
-        id: "report",
-        kind: "report",
-        label: "交付报告",
-        status: "ready",
-        summary: "已生成面向评审的交付摘要",
-      },
-    ],
-  },
+  diff: "",
+  report: blankReport(),
+  artifactCenter: blankArtifactCenter("idle"),
   memoryProfile: {
     total_memories: 3,
     preference_count: 3,
@@ -586,36 +364,7 @@ new file mode 100644
       },
     ],
   },
-  recoveryCenter: {
-    status: "safe",
-    summary: {
-      snapshot_count: 1,
-      backup_count: 3,
-      risk_count: 0,
-      high_risk_count: 0,
-      has_recovery_points: true,
-    },
-    recovery_points: [
-      {
-        id: "demo-snapshot",
-        kind: "snapshot",
-        label: "执行前快照",
-        status: "available",
-        reason: "before_demo_run",
-        detail: "捕获 Demo Run 前的工作区状态。",
-      },
-      {
-        id: "demo-todo_app.js.bak",
-        kind: "backup",
-        label: "demo-todo_app.js.bak",
-        status: "available",
-        target_path: "demo-todo/app.js",
-        size: 2048,
-        detail: "文件备份可用于指定路径回滚。",
-      },
-    ],
-    risks: [],
-  },
+  recoveryCenter: blankRecoveryCenter("safe"),
   mcpConfig: {
     servers: [],
     presets: [],

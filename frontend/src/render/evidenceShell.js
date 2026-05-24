@@ -8,9 +8,9 @@ export function renderBottomPanel({ state, tabs, summary, content }) {
       ${
         collapsed
           ? ""
-          : `<div class="review-head">
+            : `<div class="review-head">
               <div>
-                <span>Review Drawer</span>
+                <span>Evidence Drawer</span>
                 <strong>${escapeHtml(activeTabLabel(state.activeTab, tabs))}</strong>
               </div>
               <button class="button secondary compact-button bottom-collapse-button" data-action="toggle-bottom" type="button" title="收起证据区">收起</button>
@@ -20,11 +20,11 @@ export function renderBottomPanel({ state, tabs, summary, content }) {
         ${tabs
           .map(
             ([id, label]) =>
-              `<button class="tab-button ${state.activeTab === id ? "active" : ""}" data-action="bottom-tab" data-tab="${id}">${label}</button>`,
+                `<button class="tab-button ${state.activeTab === id ? "active" : ""}" data-action="bottom-tab" data-tab="${id}">${label}</button>`,
           )
           .join("")}
         ${collapsed ? `<div class="bottom-summary compact">${summary}</div>` : ""}
-        ${collapsed ? `<button class="button secondary compact-button bottom-collapse-button" data-action="toggle-bottom" type="button" title="展开证据区">展开审查</button>` : ""}
+        ${collapsed ? `<button class="button secondary compact-button bottom-collapse-button" data-action="toggle-bottom" type="button" title="展开证据区">展开</button>` : ""}
       </div>
       ${
         collapsed

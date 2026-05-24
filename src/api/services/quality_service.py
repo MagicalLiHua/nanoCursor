@@ -81,6 +81,41 @@ def _stage_evidence_count(stages: list[dict[str, Any]]) -> int:
     return count
 
 
+def _has_verification_evidence(events: list[AgentEvent]) -> bool:
+    for event in events:
+        if event.type == "test_finished":
+            return True
+        if event.type != "tool_call_finished":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        tool = str(payload.get("tool") or "").lower()
+        input_data = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+        command = str(input_data.get("command") or "").lower()
+        output = str(payload.get("output") or event.content or "").lower()
+        ran_test_command = (
+            tool in {"bash", "run_command"}
+            and any(marker in command for marker in ("npm test", "pytest", "pnpm test", "yarn test"))
+        )
+        passed_output = any(marker in output for marker in ("tests passed", "passed", " ok", "success"))
+        failed_output = any(marker in output for marker in ("tests failed", "failed", "error:", "traceback"))
+        if ran_test_command and passed_output and not failed_output:
+            return True
+    return False
+
+
+def _has_report_evidence(events: list[AgentEvent], run_dir: Path) -> bool:
+    if any((run_dir / name).exists() for name in ("report.md", "delivery.md", "delivery.json")):
+        return True
+    for event in events:
+        if event.type == "report_ready":
+            return True
+        if event.type == "assistant_message":
+            content = str(event.content or "")
+            if any(marker in content for marker in ("最终交付报告", "Delivery Report", "交付报告")):
+                return True
+    return False
+
+
 def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
     """Build a deterministic quality gate result for a run."""
     workspace = _workspace(workspace_dir)
@@ -107,7 +142,8 @@ def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict
 
     done_events = [event for event in events if event.type == "done"]
     session_status = session.get("status") if session else None
-    report_exists = (run_dir / "report.md").exists()
+    has_verification = _has_verification_evidence(events)
+    has_report = _has_report_evidence(events, run_dir)
     diff_exists = (run_dir / "diff.patch").exists()
 
     checks = [
@@ -186,20 +222,20 @@ def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict
         _check(
             "tests_finished",
             "Verification finished",
-            "test_finished" in types,
+            has_verification,
             "recommended",
-            "A test_finished event exists.",
-            "No test_finished event was found.",
-            {"has_test_finished": "test_finished" in types},
+            "Verification evidence is available.",
+            "No verification evidence was found.",
+            {"has_test_finished": "test_finished" in types, "inferred_from_tool": has_verification and "test_finished" not in types},
         ),
         _check(
             "report_ready",
             "Delivery report is ready",
-            "report_ready" in types or report_exists,
+            has_report,
             "required",
             "A delivery report is available.",
             "No delivery report was found.",
-            {"has_report_file": report_exists},
+            {"has_report_file": any((run_dir / name).exists() for name in ("report.md", "delivery.md", "delivery.json"))},
         ),
     ]
 
