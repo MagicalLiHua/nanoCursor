@@ -1,4 +1,4 @@
-"""Requirement traceability matrix generation for AgentHub runs."""
+"""Requirement traceability matrix generation for nanoCursor runs."""
 
 from __future__ import annotations
 

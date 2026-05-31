@@ -15,14 +15,20 @@ export async function loadRunSession({ fetchJson, threadId }) {
   return fetchJson(`/api/runs/${encodeURIComponent(threadId)}`);
 }
 
-export async function startRun({ requestJson, conversationId, prompt, workspaceDir, demo = false }) {
+export async function startRun({ requestJson, conversationId, prompt, workspaceDir, messages = [], demo = false }) {
   const endpoint = demo
     ? "/api/runs/demo"
     : `/api/conversations/${encodeURIComponent(conversationId)}/runs`;
   return requestJson(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, workspace_dir: workspaceDir || undefined }),
+    body: JSON.stringify({ prompt, workspace_dir: workspaceDir || undefined, messages }),
+  });
+}
+
+export async function cancelRun({ requestJson, threadId }) {
+  return requestJson(`/api/runs/${encodeURIComponent(threadId)}/cancel`, {
+    method: "POST",
   });
 }
 
@@ -38,6 +44,7 @@ export async function loadWorkspaceDataSnapshot({ fetchJson, includeRunState = t
 
 export async function loadRunArtifactsBundle({ fetchJson, threadId, includeArchived = false }) {
   const results = await Promise.allSettled([
+    fetchJson(`/api/runs/${encodeURIComponent(threadId)}/outcome`),
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/diff`),
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/report`),
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/traceability`),
@@ -49,6 +56,7 @@ export async function loadRunArtifactsBundle({ fetchJson, threadId, includeArchi
     fetchJson(`/api/runs/${encodeURIComponent(threadId)}/agents?include_archived=${includeArchived ? "true" : "false"}`),
   ]);
   const [
+    outcomeResult,
     diffResult,
     reportResult,
     traceabilityResult,
@@ -60,6 +68,7 @@ export async function loadRunArtifactsBundle({ fetchJson, threadId, includeArchi
     agentsResult,
   ] = results;
   return {
+    outcomeResult,
     diffResult,
     reportResult,
     traceabilityResult,

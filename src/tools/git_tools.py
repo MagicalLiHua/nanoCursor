@@ -1,5 +1,5 @@
 """
-Git integration tools for nanoCursor AgentHub.
+Git integration tools for nanoCursor nanoCursor.
 
 Provides:
 - git_status: Working tree status
@@ -55,7 +55,7 @@ def ensure_git_repo(workspace: Path) -> str:
     if code != 0:
         return f"Error: Failed to init git repo: {stderr}"
     # Configure user if not set
-    _run_git(["config", "user.name", "nanoCursor AgentHub"], workspace)
+    _run_git(["config", "user.name", "nanoCursor nanoCursor"], workspace)
     _run_git(["config", "user.email", "agenthub@nanocursor.local"], workspace)
     # Create .gitignore if it doesn't exist
     gitignore = workspace / ".gitignore"
@@ -67,7 +67,7 @@ def ensure_git_repo(workspace: Path) -> str:
             encoding="utf-8"
         )
         _run_git(["add", ".gitignore"], workspace)
-        _run_git(["commit", "-m", "Initial commit (nanoCursor AgentHub)"], workspace)
+        _run_git(["commit", "-m", "Initial commit (nanoCursor nanoCursor)"], workspace)
     return f"Git repo initialized at {workspace}"
 
 

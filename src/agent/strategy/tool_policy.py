@@ -12,6 +12,11 @@ class ToolPolicy:
     allowed_tools: list[str] = field(default_factory=list)
     denied_tools: list[str] = field(default_factory=list)
     approval_required: list[str] = field(default_factory=list)
+    approval_required_levels: list[str] = field(default_factory=lambda: [
+        "risky_write",
+        "shell_risky",
+        "external_risky",
+    ])
     budgets: dict = field(default_factory=lambda: {
         "max_tool_calls": 40,
         "max_file_writes": 8,
@@ -48,6 +53,7 @@ class ToolPolicy:
             "allowed_tools": self.allowed_tools,
             "denied_tools": self.denied_tools,
             "approval_required": self.approval_required,
+            "approval_required_levels": self.approval_required_levels,
             "budgets": self.budgets,
             "risk_level": self.risk_level,
         }
@@ -58,7 +64,7 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "small_patch":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                           "list_directory", "task_create", "task_update", "task_list"],
+                           "list_directory", "task_create", "task_update", "task_list", "spawn_agent"],
             denied_tools=["delete_file"],
             approval_required=[],
             budgets={"max_tool_calls": 15, "max_file_writes": 3, "max_test_runs": 2},
@@ -68,9 +74,9 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
                            "list_directory", "bash", "task_create", "task_update", "task_list",
-                           "run_tests", "git_status", "git_diff"],
+                           "run_tests", "git_status", "git_diff", "spawn_agent"],
             denied_tools=["delete_file"],
-            approval_required=["bash"],
+            approval_required=[],
             budgets={"max_tool_calls": 30, "max_file_writes": 5, "max_test_runs": 5},
             risk_level="medium",
         )
@@ -78,16 +84,16 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
                            "list_directory", "bash", "task_create", "task_update", "task_list",
-                           "run_tests", "project_context", "git_status", "git_diff"],
+                           "run_tests", "project_context", "git_status", "git_diff", "spawn_agent"],
             denied_tools=["delete_file"],
-            approval_required=["bash", "write_file"],
+            approval_required=[],
             budgets={"max_tool_calls": 50, "max_file_writes": 12, "max_test_runs": 5},
             risk_level="medium",
         )
     if strategy_id == "docs_only":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "list_directory",
-                           "write_file", "task_create", "task_update", "task_list", "project_context"],
+                           "write_file", "task_create", "task_update", "task_list", "project_context", "spawn_agent"],
             denied_tools=["bash", "edit_file", "delete_file", "run_tests"],
             approval_required=[],
             budgets={"max_tool_calls": 10, "max_file_writes": 3, "max_test_runs": 0},
@@ -96,7 +102,7 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "analysis_only":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "list_directory",
-                           "project_context", "task_create", "task_update", "task_list"],
+                           "project_context", "task_create", "task_update", "task_list", "spawn_agent"],
             denied_tools=["write_file", "edit_file", "bash", "delete_file", "run_tests"],
             approval_required=[],
             budgets={"max_tool_calls": 20, "max_file_writes": 0, "max_test_runs": 0},
@@ -106,9 +112,9 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     return ToolPolicy(
         allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
                        "list_directory", "bash", "task_create", "task_update", "task_list",
-                       "run_tests", "project_context", "add_memory", "recall_memories", "git_status", "git_diff"],
+                       "run_tests", "project_context", "add_memory", "recall_memories", "git_status", "git_diff", "spawn_agent"],
         denied_tools=["delete_file"],
-        approval_required=["bash"],
+        approval_required=[],
         budgets={"max_tool_calls": 60, "max_file_writes": 10, "max_test_runs": 8},
         risk_level="medium",
     )

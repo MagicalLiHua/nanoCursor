@@ -5,7 +5,12 @@ import asyncio
 import pytest
 
 from src.runtime.run_budget import RunBudget
-from src.runtime.tool_policy_runtime import ToolPolicyDecision, ToolPolicyRuntime
+from src.runtime.tool_policy_runtime import (
+    ToolPolicyDecision,
+    ToolPolicyRuntime,
+    classify_shell_command,
+    classify_tool_permission,
+)
 from src.agent.strategy.tool_policy import policy_for_strategy
 from src.agent.engine import _call_tool_check
 
@@ -95,6 +100,51 @@ def test_tool_policy_runtime_requires_approval():
     d = rt.check("bash")
     assert d.allowed is True
     assert d.requires_approval is True
+
+
+def test_shell_safe_command_auto_allowed_by_permission_level():
+    rt = ToolPolicyRuntime(
+        policy={
+            "allowed_tools": ["bash"],
+            "approval_required_levels": ["risky_write", "shell_risky"],
+        },
+        budget=RunBudget(),
+    )
+    d = rt.check("bash", {"command": "pytest tests/test_runtime_governance.py -q"})
+    assert d.allowed is True
+    assert d.requires_approval is False
+    assert d.permission_level == "shell_safe"
+
+
+def test_shell_risky_command_requires_approval_by_permission_level():
+    rt = ToolPolicyRuntime(
+        policy={
+            "allowed_tools": ["bash"],
+            "approval_required_levels": ["risky_write", "shell_risky"],
+        },
+        budget=RunBudget(),
+    )
+    d = rt.check("bash", {"command": "pip install requests"})
+    assert d.allowed is True
+    assert d.requires_approval is True
+    assert d.permission_level == "shell_risky"
+
+
+def test_large_edit_is_risky_write():
+    assert classify_tool_permission("edit_file", {"new_text": "x" * 13000}) == "risky_write"
+
+
+def test_shell_classifier_distinguishes_safe_and_risky():
+    assert classify_shell_command("npm run lint") == "shell_safe"
+    assert classify_shell_command("python --version 2>&1") == "shell_safe"
+    assert classify_shell_command('cd /tmp/workspace && git status 2>&1 || echo "Not a git repo"') == "shell_safe"
+    assert classify_shell_command("cd /tmp/workspace && python -m unittest test_sorting.py -v 2>&1") == "shell_safe"
+    assert classify_shell_command("python sorting_algorithms.py") == "shell_safe"
+    assert classify_shell_command("cd /tmp/workspace && python benchmark.py --quick 2>&1") == "shell_safe"
+    assert classify_shell_command("cd /tmp/workspace && timeout 120 python benchmark.py 2>&1") == "shell_safe"
+    assert classify_shell_command("cd /tmp/workspace && python sorting_algorithms.py") == "shell_safe"
+    assert classify_shell_command("git reset --hard") == "shell_risky"
+    assert classify_shell_command("python -c 'import os; os.remove(\"README.md\")'") == "shell_risky"
 
 
 def test_agent_loop_tool_check_accepts_async_callback():

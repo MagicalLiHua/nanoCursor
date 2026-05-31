@@ -53,6 +53,60 @@ def _stage_lines(session: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def _execution_strategy(session: dict[str, Any] | None) -> str:
+    if not session:
+        return ""
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    return str(plan.get("strategy") or "")
+
+
+def _plain_assistant_summary(content: str) -> str:
+    """Convert a final assistant message into a compact plain summary."""
+    lines: list[str] = []
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = line.lstrip("#").strip()
+        line = line.lstrip("-*").strip()
+        line = line.replace("`", "")
+        if line and line.lower() not in {"summary", "final", "最终交付报告", "delivery report"}:
+            lines.append(line)
+        if len(" ".join(lines)) >= 220:
+            break
+    return " ".join(lines)[:300]
+
+
+def _generated_summary(
+    *,
+    prompt: str,
+    assistant_messages: list[str],
+    changed_files: list[dict[str, Any]],
+    status: str,
+) -> str:
+    if changed_files:
+        return f"本次运行完成 {len(changed_files)} 个文件变更，状态为 {status}。"
+    if assistant_messages:
+        summary = _plain_assistant_summary(assistant_messages[-1])
+        if summary:
+            return summary
+    if prompt:
+        return f"本次运行已处理请求：{prompt[:180]}"
+    return "nanoCursor run has not produced a final assistant message yet."
+
+
+def _report_not_applicable(
+    *,
+    session: dict[str, Any] | None,
+    changed_files: list[dict[str, Any]],
+    tool_events: list[Any],
+    agent_contributions: dict[str, Any],
+) -> bool:
+    if _execution_strategy(session) != "lead_direct_reply":
+        return False
+    return not changed_files and not tool_events and not agent_contributions.get("contributions")
+
+
 def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
     """Read or generate a delivery report for the run."""
     workspace = _workspace(workspace_dir)
@@ -100,12 +154,32 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     error_events = [event for event in events if event.type == "error"]
     agent_contributions = summarize_ephemeral_agent_contributions(thread_id, str(workspace))
 
-    summary = (
-        assistant_messages[-1][:300]
-        if assistant_messages
-        else "nanoCursor run has not produced a final assistant message yet."
-    )
     status = _status_text(session)
+    if _report_not_applicable(
+        session=session,
+        changed_files=changed_files,
+        tool_events=tool_events,
+        agent_contributions=agent_contributions,
+    ):
+        return {
+            "thread_id": thread_id,
+            "workspace_dir": str(workspace),
+            "summary": "轻量对话未涉及代码交付，因此未生成交付报告。",
+            "markdown": "",
+            "requirements": [prompt] if prompt else [],
+            "changed_files": [],
+            "risks": [],
+            "capabilities_used": [],
+            "agent_contributions": agent_contributions,
+            "source": "not_applicable",
+        }
+
+    summary = _generated_summary(
+        prompt=prompt,
+        assistant_messages=assistant_messages,
+        changed_files=changed_files,
+        status=status,
+    )
 
     lines = [
         "# nanoCursor Delivery Report",

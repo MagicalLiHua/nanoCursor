@@ -9,8 +9,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from src.api.services.agenthub_state import DEFAULT_TEAM
+from src.api.services.agent_state import DEFAULT_TEAM
 from src.api.services.capability_service import recommend_capabilities
+from src.api.services.intent_router import classify_user_intent
 from src.infra import config as config_module
 
 
@@ -20,6 +21,30 @@ AGENT_PRESETS: dict[str, dict[str, Any]] = {
 
 AGENT_PRESETS.update(
     {
+        "planner": {
+            "name": "Planner",
+            "role": "planner",
+            "goal": "Clarify task scope, split work into stages, and define acceptance criteria.",
+            "tools": ["project_context", "search_codebase", "task_create", "task_update"],
+            "capabilities": ["tool.project_index", "tool.memory"],
+            "artifacts": ["plan", "acceptance_criteria"],
+        },
+        "coder": {
+            "name": "Coder",
+            "role": "coder",
+            "goal": "Implement focused workspace changes and keep diffs reviewable.",
+            "tools": ["read_file", "write_file", "edit_file", "list_directory"],
+            "capabilities": ["tool.file_ops", "tool.project_index"],
+            "artifacts": ["changed_files", "diff_summary"],
+        },
+        "tester": {
+            "name": "Tester",
+            "role": "tester",
+            "goal": "Run appropriate checks, collect evidence, and identify regressions.",
+            "tools": ["run_tests", "bash", "read_file"],
+            "capabilities": ["skill.delivery-review", "tool.recovery"],
+            "artifacts": ["test_results", "quality_notes"],
+        },
         "designer": {
             "name": "Designer",
             "role": "designer",
@@ -43,6 +68,22 @@ AGENT_PRESETS.update(
             "tools": ["bash", "environment_check"],
             "capabilities": ["tool.recovery", "mcp.github"],
             "artifacts": ["build_logs", "deployment_notes"],
+        },
+        "security": {
+            "name": "Security",
+            "role": "security",
+            "goal": "Review high-risk actions, secrets, permission boundaries, and data safety.",
+            "tools": ["read_file", "search_codebase", "git_diff"],
+            "capabilities": ["tool.project_index", "skill.delivery-review"],
+            "artifacts": ["security_risks", "permission_notes"],
+        },
+        "migration": {
+            "name": "Migration",
+            "role": "migration",
+            "goal": "Assess data/schema/config migration risk and backward compatibility.",
+            "tools": ["read_file", "search_codebase", "project_context"],
+            "capabilities": ["tool.project_index", "tool.recovery"],
+            "artifacts": ["migration_plan", "rollback_notes"],
         },
     }
 )
@@ -120,6 +161,23 @@ def _unique(items: list[str]) -> list[str]:
     return result
 
 
+def _build_conversation_summary(conversation: dict[str, Any]) -> str:
+    """Build a compact, deterministic summary for future runs in this conversation."""
+    records = conversation.get("run_records") if isinstance(conversation.get("run_records"), list) else []
+    if not records:
+        return str(conversation.get("prompt", "") or "")[:800]
+
+    lines = []
+    for record in records[-6:]:
+        if not isinstance(record, dict):
+            continue
+        prompt = " ".join(str(record.get("prompt", "") or "").split())[:100]
+        summary = " ".join(str(record.get("summary", "") or record.get("error", "") or "").split())[:220]
+        status = record.get("status", "unknown")
+        lines.append(f"Run#{record.get('run_index', '?')} [{status}] {prompt} -> {summary}")
+    return "\n".join(lines)[:1600]
+
+
 def _capability_ids_for_agent(agent_name: str, recommendation: dict[str, Any]) -> list[str]:
     preset = AGENT_PRESETS.get(agent_name.lower(), {})
     preset_ids = [str(item) for item in preset.get("capabilities", [])]
@@ -138,6 +196,114 @@ def _capability_ids_for_agent(agent_name: str, recommendation: dict[str, Any]) -
             if item.get("id")
         ]
     return _unique([*preset_ids, *matched_ids])[:6]
+
+
+def assess_task_complexity(prompt: str) -> dict[str, Any]:
+    """Classify how much Agent structure this run actually needs (keyword-only)."""
+    intent = classify_user_intent(prompt)
+    return {
+        "level": "high_risk" if intent["level"] == "high_risk" else intent["level"],
+        "rationale": intent["rationale"],
+        "indicators": intent["signals"],
+        "intent": intent["intent"],
+        "route": intent["route"],
+        "requires_workspace_write": intent["requires_workspace_write"],
+        "requires_execution": intent["requires_execution"],
+        "confidence": intent["confidence"],
+    }
+
+
+async def assess_task_complexity_async(prompt: str) -> dict[str, Any]:
+    """Classify task complexity with LLM assistance."""
+    from src.api.services.intent_router import classify_user_intent_async
+    intent = await classify_user_intent_async(prompt)
+    return {
+        "level": "high_risk" if intent["level"] == "high_risk" else intent["level"],
+        "rationale": intent["rationale"],
+        "indicators": intent["signals"],
+        "intent": intent["intent"],
+        "route": intent["route"],
+        "requires_workspace_write": intent["requires_workspace_write"],
+        "requires_execution": intent["requires_execution"],
+        "confidence": intent["confidence"],
+    }
+
+
+def compose_runtime_team(
+    prompt: str,
+    workspace_dir: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    """Compose a minimal runtime team from task complexity (keyword-only)."""
+    complexity = assess_task_complexity(prompt)
+    return _build_team_from_complexity(prompt, complexity, workspace_dir, conversation_id)
+
+
+async def compose_runtime_team_async(
+    prompt: str,
+    workspace_dir: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    """Compose a minimal runtime team with LLM-assisted classification."""
+    complexity = await assess_task_complexity_async(prompt)
+    return _build_team_from_complexity(prompt, complexity, workspace_dir, conversation_id)
+
+
+def _build_team_from_complexity(
+    prompt: str,
+    complexity: dict[str, Any],
+    workspace_dir: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    """Build team members from a complexity assessment."""
+    level = complexity["level"]
+    roles_by_level = {
+        "simple": ["Lead"],
+        "small_code": ["Lead", "Coder"],
+        "medium": ["Lead", "Planner", "Coder", "Reviewer"],
+        "high_risk": ["Lead", "Planner", "Coder", "Reviewer", "Tester"],
+    }
+    agent_names = list(roles_by_level.get(level, ["Lead"]))
+    text = str(prompt or "").lower()
+    if level == "high_risk" and any(word in text for word in ["安全", "权限", "认证", "鉴权", "secret", "token"]):
+        agent_names.append("Security")
+    if level == "high_risk" and any(word in text for word in ["迁移", "数据库", "schema", "兼容", "回滚"]):
+        agent_names.append("Migration")
+
+    should_recommend = level != "simple" or complexity.get("route") != "lead_direct_reply"
+    recommendation = recommend_capabilities(prompt, str(_workspace(workspace_dir))) if should_recommend else {
+        "agents": ["Lead"],
+        "capabilities": [],
+        "mcp_plan": [],
+        "reasons": [],
+    }
+    if level == "simple" and complexity.get("route") != "lead_direct_reply":
+        agent_names = _unique(["Lead", *[str(agent) for agent in recommendation.get("agents", [])]])
+    recommendation["agents"] = agent_names
+
+    members = [_member_from_agent(name, recommendation, source="runtime_composed") for name in agent_names]
+    for member in members:
+        member["lifetime"] = "run_snapshot"
+        member["last_action"] = "按本轮任务复杂度临时加入；运行结束后不会写入永久团队。"
+
+    return {
+        "conversation_id": conversation_id,
+        "prompt": prompt,
+        "complexity": complexity,
+        "members": members,
+        "capabilities": recommendation.get("capabilities", []),
+        "mcp_plan": recommendation.get("mcp_plan", []),
+        "reasons": [
+            complexity["rationale"],
+            "Agent 数量按需收敛：简单任务少 Agent，高风险任务才增加复核角色。",
+        ],
+        "summary": {
+            "agent_count": len(members),
+            "complexity_level": level,
+            "persistent": False,
+            "temporary": True,
+        },
+    }
 
 
 def _member_from_agent(agent_name: str, recommendation: dict[str, Any], source: str) -> dict[str, Any]:
@@ -160,12 +326,43 @@ def _member_from_agent(agent_name: str, recommendation: dict[str, Any], source: 
     }
 
 
+def lead_only_team(conversation_id: str | None = None, prompt: str = "") -> dict[str, Any]:
+    """Return the minimal starting team: one Lead that can expand later."""
+    recommendation = {
+        "agents": ["Lead"],
+        "capabilities": [],
+        "mcp_plan": [],
+        "reasons": ["新会话先由 Lead 接收上下文，复杂任务再临时拉起子 Agent。"],
+    }
+    member = _member_from_agent("Lead", recommendation, source="lead_only")
+    member["last_action"] = "等待用户输入；必要时会为任务创建子 Agent。"
+    return {
+        "conversation_id": conversation_id,
+        "prompt": prompt,
+        "members": [member],
+        "capabilities": [],
+        "mcp_plan": [],
+        "reasons": recommendation["reasons"],
+        "summary": {
+            "agent_count": 1,
+            "capability_count": 0,
+            "ready_count": 0,
+            "planned_count": 0,
+            "mcp_count": 0,
+            "usable_mcp_count": 0,
+        },
+    }
+
+
 def recommend_conversation_team(
     prompt: str,
     workspace_dir: str | None = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """Recommend a task-specific agent team for a prompt."""
+    if not str(prompt or "").strip():
+        return lead_only_team(conversation_id, prompt)
+
     recommendation = recommend_capabilities(prompt, str(_workspace(workspace_dir)))
     agent_names = list(recommendation.get("agents", []))
     if "Lead" not in agent_names:
@@ -263,17 +460,18 @@ def create_conversation(prompt: str = "", workspace_dir: str | None = None) -> d
         "current_thread_id": None,
         "run_ids": [],
         "run_records": [],
+        "conversation_summary": "",
         "created_at": now,
         "updated_at": now,
     }
     _write_json(_conversation_path(conversation_id, str(workspace)), conversation)
 
-    recommendation = recommend_conversation_team(prompt, str(workspace), conversation_id)
+    recommendation = lead_only_team(conversation_id, prompt)
     _persist_team(
         conversation_id,
         recommendation["members"],
         str(workspace),
-        source="recommended",
+        source="lead_only",
         recommendation=recommendation,
     )
     return get_conversation(conversation_id, str(workspace)) or conversation
@@ -454,6 +652,8 @@ def finalize_conversation_run(
         "last_run_status": status,
         "last_run_summary": summary[:500],
     }
+    summary_seed = {**conversation, "run_records": run_records}
+    changes["conversation_summary"] = _build_conversation_summary(summary_seed)
     if conversation.get("current_thread_id") == thread_id:
         changes["status"] = status
 

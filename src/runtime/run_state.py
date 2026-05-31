@@ -34,8 +34,8 @@ class RunMode(str, Enum):
 
 ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.CREATED:          {RunStatus.PLANNING, RunStatus.RUNNING, RunStatus.CANCELLED},
-    RunStatus.PLANNING:         {RunStatus.WAITING_APPROVAL, RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLED},
-    RunStatus.WAITING_APPROVAL: {RunStatus.RUNNING, RunStatus.PLANNING, RunStatus.CANCELLED, RunStatus.FAILED},
+    RunStatus.PLANNING:         {RunStatus.WAITING_APPROVAL, RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.CANCELLED},
+    RunStatus.WAITING_APPROVAL: {RunStatus.RUNNING, RunStatus.PLANNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED},
     RunStatus.RUNNING:          {RunStatus.VALIDATING, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.INTERRUPTED},
     RunStatus.VALIDATING:       {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.INTERRUPTED},
     RunStatus.CANCELLING:       {RunStatus.CANCELLED, RunStatus.FAILED},

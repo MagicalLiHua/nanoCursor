@@ -18,12 +18,19 @@ Architecture:
 
 import json
 import os
-import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
+
+from src.tools.bash import run_bash as _run_bash_impl
+from src.tools.file_ops import (
+    run_edit as _run_edit_impl,
+    run_list_directory as _run_list_dir_impl,
+    run_read as _run_read_impl,
+    run_write as _run_write_impl,
+)
 
 from dotenv import load_dotenv
 
@@ -215,119 +222,23 @@ def _build_role_prompt(role: str, name: str, team_name: str) -> str:
 
 
 # ========== Local tool implementations (workspace-scoped) ==========
+# All tool implementations are now imported from src.tools.*
+# Wrappers below pass WORKDIR to the shared implementations.
 
 def _run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return f"Error: Dangerous command blocked"
-    try:
-        r = subprocess.run(command, shell=True, cwd=WORKDIR, capture_output=True, timeout=120)
-        try:
-            out = r.stdout.decode('gbk', errors='replace') + r.stderr.decode('gbk', errors='replace')
-        except:
-            out = (r.stdout or b'') + (r.stderr or b'')
-            if isinstance(out, bytes):
-                out = out.decode('utf-8', errors='replace')
-        return out.strip()[:50000] or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_bash_impl(command, WORKDIR)
 
 def _run_read(path: str, limit: int = None) -> str:
-    try:
-        fp = (WORKDIR / path).resolve()
-        if not str(fp).startswith(str(WORKDIR)):
-            return f"Error: Path escapes workspace"
-        content = fp.read_text(encoding="utf-8")
-        if limit:
-            lines = content.splitlines()
-            if len(lines) > limit:
-                content = "\n".join(lines[:limit]) + f"\n... ({len(lines) - limit} more lines)"
-        return content[:50000]
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_read_impl(path, WORKDIR, limit)
 
 def _run_write(path: str, content: str) -> str:
-    try:
-        fp = (WORKDIR / path).resolve()
-        if not str(fp).startswith(str(WORKDIR)):
-            return f"Error: Path escapes workspace"
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} bytes to {path}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_write_impl(path, content, WORKDIR)
 
 def _run_edit(path: str, old_text: str = "", new_text: str = "", start_line: int = None, end_line: int = None) -> str:
-    """Edit file - supports line-based (preferred) and legacy string-based replacement."""
-    import difflib
-    try:
-        fp = (WORKDIR / path).resolve()
-        if not str(fp).startswith(str(WORKDIR)):
-            return f"Error: Path escapes workspace"
-        if not fp.exists():
-            return f"Error: File not found: {path}"
-
-        content = fp.read_text(encoding="utf-8")
-        lines = content.splitlines(keepends=True)
-
-        if start_line is not None and end_line is not None:
-            if start_line < 1 or end_line > len(lines) or start_line > end_line:
-                return f"Error: Invalid line range {start_line}-{end_line} (file has {len(lines)} lines)"
-            old_slice = "".join(lines[start_line-1:end_line])
-            new_lines_list = new_text.splitlines(keepends=True)
-            if new_lines_list and not new_lines_list[-1].endswith("\n"):
-                new_lines_list[-1] += "\n"
-            new_content = "".join(lines[:start_line-1] + new_lines_list + lines[end_line:])
-            loc = f"lines {start_line}-{end_line}"
-            new_slice = "".join(new_lines_list)
-        elif old_text:
-            if old_text not in content:
-                return f"Error: Text not found in file. Try using start_line/end_line for line-based edits (read the file first to get line numbers)."
-            old_slice = old_text
-            new_slice = new_text
-            new_content = content.replace(old_text, new_text, 1)
-            loc = "matched text"
-        else:
-            return "Error: Provide either (old_text, new_text) or (start_line, end_line, new_text)"
-
-        fp.write_text(new_content, encoding="utf-8")
-
-        diff_lines = list(difflib.unified_diff(
-            old_slice.splitlines(keepends=True),
-            new_slice.splitlines(keepends=True),
-            fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="",
-        ))
-        diff_text = "\n".join(diff_lines[:30])
-        added = len(new_slice) - len(old_slice)
-        change = f"+{added}" if added >= 0 else str(added)
-        return f"Edited {path} ({loc}, {change} chars)\n```diff\n{diff_text}\n```"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_edit_impl(path, WORKDIR, old_text, new_text, start_line, end_line)
 
 def _run_list_dir(path: str = ".") -> str:
-    try:
-        fp = (WORKDIR / path).resolve()
-        if not str(fp).startswith(str(WORKDIR)):
-            return f"Error: Path escapes workspace"
-        items = list(fp.iterdir())
-        lines = []
-        for item in sorted(items, key=lambda x: (not x.is_dir(), x.name)):
-            suffix = "/" if item.is_dir() else ""
-            size = ""
-            if item.is_file():
-                try:
-                    size = f" ({item.stat().st_size} bytes)"
-                except OSError:
-                    pass
-            name = item.name
-            if name.startswith("."):
-                continue
-            lines.append(f"{name}{suffix}{size}")
-        return "\n".join(lines) if lines else "(empty directory)"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_list_dir_impl(path, WORKDIR)
 
 
 # ========== Directories ==========

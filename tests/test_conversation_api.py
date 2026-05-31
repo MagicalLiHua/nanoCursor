@@ -8,12 +8,23 @@ def test_conversation_run_persists_execution_plan_and_events(tmp_path, monkeypat
     workspace.mkdir()
     client = TestClient(api_server.app)
 
-    async def fake_agent_loop(**kwargs):
-        assert "AgentHub 动态执行编排" in kwargs["system"]
+    async def fake_agent_loop_stream(**kwargs):
+        assert "nanoCursor 动态执行编排" in kwargs["system"]
         assert "Diff 风险" in kwargs["system"]
-        return "fake delivery completed"
+        yield ("token", "fake delivery completed")
+        yield ("metrics", 100, 50)
+        yield ("done", "fake delivery completed")
 
-    monkeypatch.setattr(api_server, "agent_loop", fake_agent_loop)
+    async def fake_parallel_briefing(**kwargs):
+        return {
+            "enabled": True,
+            "results": [],
+            "contributions": {"contributions": [], "summary": {"completed_count": 0}},
+            "briefing": "",
+        }
+
+    monkeypatch.setattr(api_server, "agent_loop_stream", fake_agent_loop_stream)
+    monkeypatch.setattr(api_server, "run_parallel_agent_briefing", fake_parallel_briefing)
 
     created = client.post(
         "/api/conversations",
@@ -74,7 +85,8 @@ def test_conversation_api_respects_explicit_workspace(tmp_path):
     conversation = created.json()["conversation"]
     conversation_id = conversation["conversation_id"]
     assert conversation["workspace_dir"] == str(workspace.resolve())
-    assert len(conversation["team"]["members"]) >= 2
+    assert conversation["team"]["source"] == "lead_only"
+    assert [member["name"] for member in conversation["team"]["members"]] == ["Lead"]
 
     updated = client.put(
         f"/api/conversations/{conversation_id}/team",
@@ -96,3 +108,110 @@ def test_conversation_api_respects_explicit_workspace(tmp_path):
     listed = client.get("/api/conversations", params={"workspace_dir": str(workspace)})
     assert listed.status_code == 200
     assert listed.json()["conversations"][0]["conversation_id"] == conversation_id
+
+
+def test_lead_only_conversation_uses_runtime_team_without_persisting_it(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(api_server.app)
+
+    async def fake_agent_loop_stream(**kwargs):
+        yield ("token", "runtime team completed")
+        yield ("metrics", 100, 50)
+        yield ("done", "runtime team completed")
+
+    async def fake_parallel_briefing(**kwargs):
+        return {
+            "enabled": True,
+            "results": [],
+            "contributions": {"contributions": [], "summary": {"completed_count": 0}},
+            "briefing": "",
+        }
+
+    monkeypatch.setattr(api_server, "agent_loop_stream", fake_agent_loop_stream)
+    monkeypatch.setattr(api_server, "run_parallel_agent_briefing", fake_parallel_briefing)
+
+    created = client.post(
+        "/api/conversations",
+        json={"prompt": "帮我修复前端和后端 API bug 并补测试", "workspace_dir": str(workspace)},
+    )
+    assert created.status_code == 200
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    assert [member["name"] for member in created.json()["conversation"]["team"]["members"]] == ["Lead"]
+
+    started = client.post(
+        f"/api/conversations/{conversation_id}/runs",
+        json={"prompt": "帮我修复前端和后端 API bug 并补测试", "workspace_dir": str(workspace)},
+    )
+    assert started.status_code == 200
+    body = started.json()
+    thread_id = body["run"]["thread_id"]
+    assert body["runtime_team"]["source"] == "runtime_composed"
+    assert len(body["runtime_team"]["members"]) > 1
+    assert body["conversation"]["team"]["source"] == "lead_only"
+    assert [member["name"] for member in body["conversation"]["team"]["members"]] == ["Lead"]
+
+    thread = api_server.active_runs[thread_id].thread
+    thread.join(timeout=3)
+
+    session = api_server.event_store.get_session(thread_id, str(workspace))
+    assert session["runtime_team_source"] == "runtime_composed"
+    assert session["runtime_composition"]["complexity"]["level"] in {"small_code", "medium", "high_risk"}
+    assert len(session["team"]) > 1
+
+
+def test_short_python_generation_prompt_is_not_lead_direct_reply():
+    assert api_server._is_simple_lead_message("你好，你是什么模型") is True
+    assert api_server._is_simple_lead_message("帮我用python写常见的排序算法并比较性能") is False
+
+
+def test_lead_agent_route_creates_permanent_and_temporary_agents(tmp_path):
+    import src.infra.config as cfg
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_workspace = cfg.WORKSPACE_DIR
+    client = TestClient(api_server.app)
+    thread_id = "run-lead-agent-route"
+
+    try:
+        api_server._set_active_workspace(str(workspace))
+        api_server.event_store.create_session(thread_id, "修复后端并补测试", str(workspace), status="running")
+
+        permanent = client.post(
+            "/api/lead/agents",
+            json={
+                "name": "Security Reviewer",
+                "role": "security reviewer",
+                "goal": "复核高风险文件修改。",
+                "tools": ["diff", "risk_review"],
+                "capabilities": ["skill.delivery-review"],
+                "lifetime": "permanent",
+            },
+        )
+        assert permanent.status_code == 200
+        assert permanent.json()["lifetime"] == "permanent"
+        assert permanent.json()["agent"]["source"] == "lead"
+
+        temporary = client.post(
+            "/api/lead/agents",
+            json={
+                "name": "Backend Temp",
+                "role": "backend_temp",
+                "goal": "本轮只检查 FastAPI 路由。",
+                "tools": ["read_file", "run_command"],
+                "capabilities": ["tool.project_index"],
+                "lifetime": "temporary",
+                "thread_id": thread_id,
+                "task_scope": {"include": ["src/api"], "exclude": ["frontend"]},
+                "expected_output": {"summary_required": True, "tests_required": True},
+            },
+        )
+        assert temporary.status_code == 200
+        agent = temporary.json()["agent"]
+        assert temporary.json()["lifetime"] == "temporary"
+        assert agent["thread_id"] == thread_id
+        assert agent["tools"] == ["read_file", "run_command"]
+        assert agent["task_scope"]["allowed_actions"] == ["read_file", "run_command"]
+    finally:
+        api_server._set_active_workspace(old_workspace)

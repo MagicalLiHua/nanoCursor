@@ -1,4 +1,4 @@
-"""Project-level overview aggregation for AgentHub workspaces."""
+"""Project-level overview aggregation for nanoCursor workspaces."""
 
 from __future__ import annotations
 

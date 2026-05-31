@@ -1,4 +1,4 @@
-"""Memory Profile service for AgentHub user preferences."""
+"""Memory Profile service for nanoCursor user preferences."""
 
 from __future__ import annotations
 

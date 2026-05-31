@@ -1,126 +1,206 @@
 # nanoCursor
 
-> Local-first AI coding agent workbench. 用一个可运行的前后端系统，把 AI Coding Agent 背后的工作区隔离、Agent 编排、工具审批、事件追踪、MCP/Skills、交付证据和恢复机制显式展示出来。
+> 一个本地运行的 AI 编程工作台。  
+> 我想做的不是“再包一层聊天框”，而是把 Agent 修改代码时的过程、风险和结果都摊开给用户看。
 
-nanoCursor 不是 Claude Code、Codex 或 Cursor 的替代品。它更像一个面向工程能力展示的个人项目：我把“AI 帮我改代码”这件事拆成可观察、可审批、可恢复、可复盘的产品化流程。
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/) [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/) [![React](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61dafb.svg)](https://vitejs.dev/) [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-![nanoCursor workbench](docs/assets/nanocursor-workbench.png)
+![nanoCursor welcome](images/readme-01-welcome.png)
 
-## 为什么做它
+## 这是什么
 
-普通 AI 编程 Demo 很容易停留在“聊天框 + 代码生成”。nanoCursor 更关心真实工具会遇到的问题：
+nanoCursor 是我用来探索 AI 编程工具的一套小系统。它可以打开一个本地目录，让 AI 在这个目录里读文件、改代码、运行测试，并把整个过程显示在前端。
 
-- 用户打开一个本地目录后，运行数据不能污染项目根目录。
-- 一次任务不应该只有一段回答，还需要计划、执行、验证、报告和恢复入口。
-- 文件写入、命令执行、MCP 调用这类高风险动作需要策略检查和审批记录。
-- 前端要能实时看到事件流、任务状态、工具证据、Diff、报告和失败诊断。
-- MCP Server、Skills、自定义 Agent 能力应该能作为工作台能力中心管理。
+这个项目最开始只是一个多 Agent Demo，后来越做越发现，真正难的不是“让模型写几行代码”，而是这些更麻烦的问题：
 
-## 真实任务验证
+- 模型到底准备改什么，用户能不能提前知道？
+- 它执行了哪些命令、改了哪些文件，能不能追踪？
+- 高风险操作要不要先问用户？
+- 一个任务失败了，能不能知道失败在哪个阶段？
+- 多轮对话以后，怎么给模型合适的上下文，而不是把历史全塞进去？
 
-我用 nanoCursor 跑过一个真实小任务，而不是只放静态 Demo：
+所以现在的 nanoCursor 更像一个本地 AI Coding 工作台原型。它还不是成熟产品，但已经把很多真实工具里会遇到的问题拆出来做了：Agent 编排、项目索引、工具权限、SSE 事件流、Diff、交付报告、恢复记录、MCP/Skills 配置等。
+
+## 一次真实运行
+
+下面这组截图不是静态 Mock，是我直接用前端跑的一次任务。任务大概是：
 
 ```text
-工作区: demo-workspaces/readme-showcase
-任务: 在当前 JavaScript 小项目中新增 completionRate(summary) 函数；
-      更新 test.mjs 覆盖 2/3 -> 67%、0/0 -> 0%、3/3 -> 100%、1/4 -> 25%；
-      运行 npm test 验证。
-Run: 5083a639-ed64-458e-b04c-2f9d2b544fb5
-结果: completed
-事件: 71 条
-质量门禁: passed
-交付评分: 100
-验证命令: npm test -> tests passed
+帮我在当前工作区实现一个 Python 算法题“接雨水”，并补充测试。
 ```
 
-实际修改了：
+运行过程中，前端会显示当前 Agent 在做什么、工具调用结果、文件变更和最后的交付报告。
 
-- `app.js`: 新增 `completionRate(summary)`。
-- `test.mjs`: 新增 4 个边界和常规测试。
-- `package.json`: 添加 `"type": "module"`，消除 ESM warning。
+![nanoCursor running](images/readme-02-running.png)
 
-![completed run](docs/assets/nanocursor-run-completed.png)
+![nanoCursor completed chat](images/readme-03-completed-chat.png)
 
-运行过程中的 SSE 事件流会被保留下来，前端可以重放和复盘：
+![nanoCursor report](images/readme-04-report.png)
 
-![event stream](docs/assets/nanocursor-event-stream.png)
+## 主要功能
 
-交付报告会汇总质量门禁、变更文件、风险和原始 Markdown 报告：
+### 多 Agent，但不是一上来就全开
 
-![report drawer](docs/assets/nanocursor-report-drawer.png)
+nanoCursor 默认只有一个 Lead Agent。它会先判断任务是不是复杂，再决定要不要创建临时子 Agent。
 
-## 核心能力
+比如：
 
-- **工作区隔离**：用户项目目录、运行记录、checkpoint、trash、eval workspace、MCP 配置和 Skills 按 workspace 隔离。
-- **多 Agent 工作台**：支持 Lead / Planner / Coder / Tester / Reviewer 等角色，运行前可推荐团队，运行中可沉淀任务和证据。
-- **Execution Plan**：把用户需求拆成阶段、负责人、能力约束、验收标准和工具证据。
-- **实时事件流**：FastAPI + SSE 输出运行状态、阶段变化、工具调用、审批、文件变更、报告生成和错误事件。
-- **工具审批与审计**：`bash`、文件写入、删除、MCP 调用等高风险动作走策略检查、用户审批、台账记录和恢复建议。
-- **Project Index**：扫描入口文件、源码目录、配置、测试和最近修改文件，为 Agent 构造更靠谱的上下文。
-- **MCP / Skills 能力中心**：提供 MCP 预设、自定义 MCP Server 配置、自定义 Skill 导入和能力推荐。
-- **交付证据链**：报告、Diff、traceability、quality gate、delivery contract、recovery center 统一展示。
-- **前后端分离**：后端 FastAPI，前端 Vanilla JS 模块化工作台，便于快速迭代和演示。
+- 普通问答：Lead 自己回复。
+- 小改动：Lead 直接叫一个 Coder 处理。
+- 稍微复杂的开发任务：再加 Planner、Reviewer 或 Tester。
+- 高风险任务：可以引入安全检查或恢复相关的 Agent。
+
+我不太想把它做成“角色越多越高级”的样子。很多时候一个 Agent 就够了，只有任务真的需要拆分时，子 Agent 才有意义。
+
+### 执行计划
+
+对于复杂任务，系统会先生成一个执行计划。里面会写清楚：
+
+- 这次任务准备分几步做
+- 每一步由哪个 Agent 负责
+- 预计会改哪些范围
+- 用什么方式验证
+- 哪些工具调用可能有风险
+
+这一步的目的很简单：不要让模型一上来就闷头改项目。
+
+### 实时运行状态
+
+后端用 FastAPI + SSE 给前端推事件。用户可以在页面上看到：
+
+- 当前 Agent 正在做什么
+- 调用了什么工具
+- 哪些文件发生了变化
+- 是否需要用户审批
+- 测试结果和质量检查
+- 最后的报告、Diff 和交付物
+
+这部分是我觉得比较重要的地方。AI 工具如果运行时完全黑盒，用户很容易觉得它卡住了，或者不敢相信它真的做了正确的事。
+
+### 项目上下文
+
+nanoCursor 会为当前工作区建立一个简单的项目索引，比如入口文件、源码目录、测试文件、配置文件和最近改动。
+
+后续给模型上下文时，会尽量只放和当前任务有关的信息，比如：
+
+- 用户这次的请求
+- 最近对话摘要
+- 当前执行计划
+- 相关文件片段
+- 最近变更
+- 用户偏好和 Skills
+
+这块还在继续打磨。我的目标是让它少做无意义搜索，也少因为上下文太乱而乱改。
+
+### 工具权限和恢复
+
+项目里把工具调用按风险分了几类：
+
+- `read_only`：读文件、搜索、查看项目索引
+- `safe_write`：在工作区内写文件
+- `risky_write`：删除、移动、大规模替换
+- `shell_safe`：测试、lint、`ls`、`cat` 这类命令
+- `shell_risky`：安装依赖、网络请求、Git 操作、删除文件等
+
+高风险操作会进入审批流程。文件修改前也会尽量留下备份和记录，方便后面查看、回滚或分析失败原因。
+
+### MCP / Skills
+
+前端有一个能力配置入口，可以管理 MCP Server 和自定义 Skills。这个功能现在还比较早期，但方向是让用户把自己的工具、知识库、项目规则接进来，而不是每次都靠一段很长的 prompt。
 
 ## 架构
 
 ```mermaid
 flowchart TD
-    A["Open Workspace"] --> B["Create Conversation"]
-    B --> C["Recommend Team / Capabilities"]
-    C --> D["Build Execution Plan"]
-    D --> E["Agent Runtime"]
-    E --> F{"Risky Tool?"}
-    F -- "Yes" --> G["Policy Check + Approval"]
-    F -- "No" --> H["Execute Tool"]
-    G --> H
-    H --> I["EventStore / Tool Ledger"]
-    I --> J["Diff / Quality / Report / Recovery"]
-    J --> K["Frontend Workbench"]
+    User["用户"] --> Frontend["React + Vite 前端"]
+    Frontend --> REST["REST API"]
+    Frontend --> SSE["SSE 事件流"]
+    REST --> API["FastAPI 后端"]
+    SSE --> API
+    API --> RunManager["运行管理"]
+    RunManager --> Lead["Lead Agent"]
+    Lead --> Coder["临时 Coder"]
+    Lead --> Reviewer["临时 Reviewer"]
+    Lead --> Tester["临时 Tester"]
+    RunManager --> Policy["工具权限 / 审批"]
+    Policy --> Tools["文件 / Shell / Git / MCP / Skills"]
+    Tools --> Workspace["用户工作区"]
+    RunManager --> Store["事件和运行记录"]
+    Store --> Frontend
 ```
+
+## 技术栈
+
+- 后端：Python, FastAPI, Pydantic, SSE, SQLite/EventStore
+- 前端：React, Vite, Zustand, lucide-react
+- Agent：Lead-first runtime, dynamic sub-agents, tool policy, project index
+- 工程工具：pytest, Ruff, Playwright
+- 扩展能力：MCP Server presets, custom Skills
 
 ## 快速开始
 
-### 1. 安装依赖
+### 环境要求
+
+- Python 3.10+
+- Node.js 18+
+- 一个可用的 LLM Provider，或者本地 Ollama
+
+### 安装依赖
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
 cd frontend
 npm install
+cd ..
 ```
 
-建议使用 Python 3.10+ 和 Node.js 18+。
-
-### 2. 配置模型
+### 配置模型
 
 ```bash
 cp .env.example .env
 ```
 
-按需配置其中一种供应商：
+按需填写一种模型配置：
 
 ```bash
-OPENAI_API_KEY=...
-ANTHROPIC_API_KEY=...
+# OpenAI-compatible
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4.1
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-3-5-sonnet-latest
+
+# DeepSeek
 DEEPSEEK_API_KEY=...
-MINIMAX_API_KEY=...
+DEEPSEEK_MODEL=deepseek-chat
+
+# Ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5-coder
 ```
 
-不要把 `.env` 提交到 GitHub。
+具体字段以 `.env.example` 和 `src/infra/llm_config.py` 为准。
 
-### 3. 启动
+### 启动
 
-一键启动：
+一键启动前后端：
 
 ```bash
 python scripts/dev.py
 ```
 
-或者前后端分开启动：
+也可以分开启动：
 
 ```bash
+# Terminal 1
 python scripts/dev_backend.py
+
+# Terminal 2
 python scripts/dev_frontend.py
 ```
 
@@ -129,116 +209,77 @@ python scripts/dev_frontend.py
 - Frontend: `http://127.0.0.1:5173`
 - Backend: `http://127.0.0.1:8100`
 
-### 4. 打开项目并运行任务
+## 怎么用
 
-1. 在顶部 Project 入口打开一个本地项目目录。
-2. 点击「新会话」。
-3. 输入任务，例如：
+1. 打开前端页面。
+2. 选择一个本地工作目录。
+3. 新建会话。
+4. 输入任务，比如“帮我给这个 Python 项目补一个 CLI 工具和测试”。
+5. 运行时可以在聊天区看 Agent 动态，在底部面板看报告、Diff、事件和交付物。
+6. 如果出现高风险操作，先看清楚再批准。
 
-```text
-请在当前 JavaScript 小项目中新增 completionRate(summary) 函数，返回完成比例的百分数字符串；
-同时更新测试，并运行 npm test 验证。
-```
-
-4. 如果出现工具审批，确认命令和工作区后再批准。
-5. 在底部 Evidence Drawer 查看报告、Diff、事件、恢复和交付物。
-
-## 常用检查
+## 开发命令
 
 ```bash
-# 全量检查
-python scripts/check_all.py
+# 前端构建检查
+npm --prefix frontend run check
 
 # 后端测试
-pytest -q
+pytest
 
-# 后端路由审计
-python scripts/backend_audit.py
+# 基础语法检查
+python -m py_compile api_server.py src/agent/engine.py
 
-# API smoke
+# API smoke test
 python scripts/api_smoke.py
-
-# 前端语法检查
-npm --prefix frontend run check
-```
-
-本次 README 更新前已验证：
-
-```bash
-pytest tests/test_agenthub_services.py -q
-npm --prefix frontend run check
-cd demo-workspaces/readme-showcase && npm test
 ```
 
 ## 项目结构
 
 ```text
 nanoCursor/
-  api_server.py                 # FastAPI 兼容入口和主要 API
-  frontend/                     # 前端工作台
-    src/actions/                # API action 层
-    src/controllers/            # 会话、运行、能力、布局等控制器
-    src/events/                 # DOM 事件绑定
-    src/render/                 # UI 渲染模块
-    src/services/               # 前端领域服务
+  api_server.py                 # FastAPI 后端入口
+  cli.py                        # CLI 入口
+  frontend/
+    src/
+      App.jsx                   # 前端主视图
+      actions/                  # 前端业务动作
+      core/                     # API、Markdown、Diff、格式化等基础能力
+      hooks/                    # 启动和 SSE 订阅
+      services/                 # 前端服务封装
+      state/                    # 状态映射和选择器
+      store/                    # Zustand store
+      styles/                   # 分模块样式
   src/
-    agent/                      # Agent loop、prompt、策略
-    api/
-      app.py                    # FastAPI app
-      routes/                   # 模块化路由
-      services/                 # workspace、run、MCP、report、quality 等服务
-    infra/                      # 配置、日志、路径 guard
-    runtime/                    # 运行状态、工具台账、交付契约
-    tools/                      # 文件、bash、git、memory、project、todo 工具
-  tests/                        # pytest 测试
-  evals/                        # 评测任务
-  scripts/                      # dev、doctor、check_all、api_smoke、backend_audit
-  docs/                         # 架构、契约、演示和截图
+    agent/                      # Agent Runtime、上下文压缩、技能运行
+    agent/strategy/             # 意图分类、计划生成、工具策略
+    api/routes/                 # FastAPI 路由
+    api/services/               # 会话、运行、审批、Diff、报告、MCP 等服务
+    indexer/                    # 项目索引
+    infra/                      # 配置、日志、路径防护、LLM 配置
+    memory/                     # 记忆管理
+    runtime/                    # 运行状态、事件、审计、交付契约
+    tasks/                      # 任务管理
+    tools/                      # 工具实现
+  tests/                        # 后端测试
+  docs/                         # 设计文档和开发计划
+  images/                       # README 截图
 ```
 
-## 运行数据
+## 现在做到哪儿了
 
-每个用户工作区下会生成 `.nanocursor/`：
+这个项目还是个人项目，不是成熟商业工具。它现在能跑真实小任务，也能展示比较完整的运行过程，但还有很多地方需要继续磨，比如上下文压缩、任务评测、权限策略、前端交互和 MCP/Skills 的使用体验。
 
-```text
-<workspace>/.nanocursor/
-  workspace.json
-  settings.json
-  runs/<thread_id>/
-    session.json
-    events.jsonl
-    tools.jsonl
-    approvals/
-    changes.json
-    delivery.json
-    delivery.md
-    failures.json
-    audit.jsonl
-  checkpoints/
-  trash/
-  skills/
-  evals/
-```
+我做它的主要原因，是想把 AI 编程工具里那些平时看不见的东西拆开研究：Agent 怎么分工，工具怎么管，失败怎么恢复，上下文怎么组织，用户怎么知道系统不是在乱改。
 
-这些是本地运行数据，通常不应该提交到业务项目仓库。
+## 接下来想做的事
 
-## 文档
-
-- [架构说明](docs/architecture.md)
-- [API 契约](docs/api-contract.md)
-- [事件契约](docs/event-contract.md)
-- [运行状态契约](docs/run-state-contract.md)
-- [安全与审计设计](docs/security-and-audit.md)
-- [演示脚本](docs/demo-script.md)
-- [前端进化计划](docs/frontend-evolution-plan.md)
-
-## 当前边界
-
-- 单机单用户，没有做账号、多租户和权限系统。
-- 不是成熟商业 AI IDE，不承诺替代 Claude Code、Codex 或 Cursor。
-- 真实 Agent 能力以安全可控和可展示为优先，长期自治能力仍有限。
-- 前端是轻量 Vanilla JS 模块化工作台，不追求大型 React 应用复杂度。
-- MCP 预设和 Skills 已具备入口，但不同 MCP Server 的真实可用性取决于本机环境和凭据配置。
+- 把上下文管理继续做细：对话摘要、执行摘要、文件 outline、最近变更分层注入。
+- 继续收紧工具权限：命令白名单、危险参数识别、批量修改审批、审计回放。
+- 改进异步 Agent：并行执行、结果合并、冲突检测、临时 Agent 自动归档。
+- 完善 MCP/Skills：预设模板、健康检查、导入向导、使用统计。
+- 做一套更稳定的评测：用真实仓库任务看成功率、修改正确率和恢复能力。
+- 继续打磨前端：让运行状态更清楚，长回复更好读，底部证据面板更顺手。
 
 ## License
 

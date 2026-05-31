@@ -96,6 +96,7 @@ def _emit_agent_event(
         "status": agent.get("status", ""),
         "goal": agent.get("goal", ""),
         "reason": agent.get("reason", ""),
+        "tools": agent.get("tools", []),
         "capabilities": agent.get("capabilities", []),
         "mcp_servers": agent.get("mcp_servers", []),
     }
@@ -193,7 +194,7 @@ def suggest_ephemeral_agents(
 
     if _contains_any(text, ["前端", "界面", "ui", "样式", "交互", "页面", "组件", "frontend"]):
         suggestions.append(_suggestion(
-            "Frontend Worker",
+            "Frontend Action Agent",
             "frontend_worker",
             "实现或修复前端界面、交互和状态展示。",
             "检测到前端、界面或交互需求，需要独立前端执行者。",
@@ -204,7 +205,7 @@ def suggest_ephemeral_agents(
 
     if _contains_any(text, ["接口", "api", "服务", "数据库", "状态", "路由", "fastapi", "后端", "backend"]):
         suggestions.append(_suggestion(
-            "Backend Worker",
+            "Backend Action Agent",
             "backend_worker",
             "实现后端服务、路由、数据模型和相关测试。",
             "检测到后端接口、状态或服务层需求，需要独立后端执行者。",
@@ -215,7 +216,7 @@ def suggest_ephemeral_agents(
 
     if _contains_any(text, ["测试", "验证", "回归", "覆盖", "pytest", "smoke", "质量"]):
         suggestions.append(_suggestion(
-            "Test Worker",
+            "Test Action Agent",
             "test_worker",
             "补齐测试、运行验证命令并整理质量证据。",
             "检测到测试或质量验证需求，需要单独测试执行者。",
@@ -226,7 +227,7 @@ def suggest_ephemeral_agents(
 
     if _contains_any(text, ["readme", "文档", "说明", "计划", "接口文档", "docs"]):
         suggestions.append(_suggestion(
-            "Docs Worker",
+            "Docs Action Agent",
             "docs_worker",
             "更新文档、接口说明、开发计划或交付说明。",
             "检测到文档或说明需求，需要独立文档执行者。",
@@ -278,7 +279,7 @@ def suggest_ephemeral_agents(
 
     if not suggestions:
         suggestions.append(_suggestion(
-            "Implementation Worker",
+            "Action Agent",
             "implementation_worker",
             "完成本轮主要实现并提交结构化结果。",
             "未检测到专门领域，按通用实现任务创建一个临时执行者。",
@@ -332,6 +333,12 @@ def _normalise_agent_spec(
 ) -> dict[str, Any]:
     now = _now()
     role = str(spec.get("role") or "worker").strip() or "worker"
+    tools = _unique([str(item) for item in spec.get("tools", []) if item])
+    task_scope = spec.get("task_scope") if isinstance(spec.get("task_scope"), dict) else None
+    if task_scope is None:
+        task_scope = _scope(["."], [], tools or None)
+    elif tools and not task_scope.get("allowed_actions"):
+        task_scope = {**task_scope, "allowed_actions": tools}
     agent_id = str(spec.get("agent_id") or spec.get("id") or "").strip()
     if not agent_id:
         agent_id = _make_agent_id(role, existing_ids)
@@ -347,11 +354,12 @@ def _normalise_agent_spec(
         "status": status,
         "goal": str(spec.get("goal") or ""),
         "reason": str(spec.get("reason") or ""),
+        "tools": tools,
         "capabilities": _unique([str(item) for item in spec.get("capabilities", []) if item]),
         "mcp_servers": _unique([str(item) for item in spec.get("mcp_servers", []) if item]),
         "blocked_capabilities": _unique([str(item) for item in spec.get("blocked_capabilities", []) if item]),
         "risk_level": str(spec.get("risk_level") or "medium"),
-        "task_scope": spec.get("task_scope") if isinstance(spec.get("task_scope"), dict) else _scope(["."], []),
+        "task_scope": task_scope,
         "expected_output": spec.get("expected_output") if isinstance(spec.get("expected_output"), dict) else _expected(),
         "created_at": now,
         "started_at": now if status in {"active", "working"} else 0,
@@ -429,6 +437,7 @@ def summarize_ephemeral_agent_contributions(thread_id: str, workspace_dir: str) 
             "evidence_count": len(evidence),
             "risk_count": len(agent_risks),
             "artifact_count": len(artifacts),
+            "artifacts": artifacts[:12],
             "recommended_next_actions": [str(item) for item in recommended if item],
         }
         if contribution["summary"] or contribution["terminal_status"] or contribution["status"] in ARCHIVED_STATUSES:
@@ -477,6 +486,33 @@ def _find_agent(agents: list[dict[str, Any]], agent_id: str) -> dict[str, Any] |
         if agent.get("agent_id") == agent_id:
             return agent
     return None
+
+
+def update_ephemeral_agent_status(
+    thread_id: str,
+    agent_id: str,
+    status: str,
+    workspace_dir: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Update one temporary agent status and emit a progress event."""
+    state = _read_state(thread_id, workspace_dir)
+    agent = _find_agent(state["agents"], agent_id)
+    if agent is None:
+        raise ValueError(f"临时子 Agent 不存在: {agent_id}")
+    if agent.get("status") in ARCHIVED_STATUSES:
+        raise ValueError(f"临时子 Agent 已归档: {agent_id}")
+
+    now = _now()
+    agent["status"] = str(status or agent.get("status") or "active")
+    agent["last_active_at"] = now
+    if agent["status"] in {"active", "working"} and not agent.get("started_at"):
+        agent["started_at"] = now
+    if reason:
+        agent["last_action"] = reason
+    _write_state(thread_id, workspace_dir, state)
+    _emit_agent_event(thread_id, workspace_dir, "ephemeral_agent_updated", agent, reason)
+    return agent
 
 
 def complete_ephemeral_agent(

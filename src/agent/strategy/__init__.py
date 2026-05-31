@@ -1,1 +1,1 @@
-"""Pluggable execution strategies for AgentHub runs."""
+"""Pluggable execution strategies for nanoCursor runs."""

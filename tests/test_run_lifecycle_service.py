@@ -213,6 +213,26 @@ class TestLifecycleAPI:
         resp = client.get("/api/runs/nonexistent_xyz/lifecycle")
         assert resp.status_code == 404
 
+    def test_get_lifecycle_marks_persisted_completed_run_terminal(self, tmp_path):
+        import api_server
+        from api_server import app
+
+        thread_id = f"completed_{time.time_ns()}"
+        api_server.event_store.create_session(
+            thread_id,
+            prompt="done",
+            workspace_dir=str(tmp_path),
+            status="completed",
+        )
+
+        client = TestClient(app)
+        resp = client.get(f"/api/runs/{thread_id}/lifecycle")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "completed"
+        assert body["is_terminal"] is True
+
     def test_retry_non_existent_run_returns_404(self):
         from api_server import app
         client = TestClient(app)
@@ -240,3 +260,91 @@ class TestLifecycleAPI:
             assert resp.status_code == 400  # running state, cannot retry
         finally:
             config_module.WORKSPACE_DIR = original
+
+    def test_cancel_active_run_enters_cancelling_without_terminal_done(self, tmp_path):
+        from api_server import app, event_store, run_manager
+        import queue
+
+        client = TestClient(app)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        thread_id = "cancel_active_run"
+        ctx = RunContext(thread_id=thread_id, workspace_dir=str(ws), queue=queue.Queue())
+
+        try:
+            run_manager.register(ctx)
+            event_store.create_session(thread_id, "test cancel", str(ws), status="running")
+
+            resp = client.post(f"/api/runs/{thread_id}/cancel")
+
+            assert resp.status_code == 200
+            assert resp.json()["cancelled"] is True
+            assert ctx.status == "cancelling"
+            session = event_store.get_session(thread_id, str(ws))
+            assert session["status"] == "cancelling"
+            sm = run_manager.get_state_machine(thread_id)
+            assert sm is not None
+            assert sm.status == RunStatus.CANCELLING
+            events = event_store.list_events(thread_id, str(ws))
+            assert events[-1].type == "run_cancelling"
+            assert all(event.type != "done" for event in events)
+        finally:
+            run_manager.unregister(thread_id)
+
+    def test_retry_run_builds_contextual_prompt(self, tmp_path, monkeypatch):
+        import api_server
+
+        class DummyThread:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(api_server.threading, "Thread", DummyThread)
+        client = TestClient(api_server.app)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        thread_id = "failed_retry_source"
+        api_server.event_store.create_session(thread_id, "修复登录页按钮样式", str(ws), status="failed")
+        api_server.event_store.update_session(
+            thread_id,
+            str(ws),
+            lifecycle={"failed_stage_id": "implement", "failure": "测试失败"},
+            execution_plan={
+                "stages": [
+                    {
+                        "id": "implement",
+                        "title": "实现按钮样式",
+                        "owner": "Coder",
+                        "failure": "按钮 hover 样式断言失败",
+                    }
+                ]
+            },
+        )
+        api_server.event_store.append_event(
+            thread_id,
+            "error",
+            title="测试失败",
+            content="AssertionError: expected primary button color",
+            workspace_dir=str(ws),
+        )
+
+        resp = client.post(
+            f"/api/runs/{thread_id}/retry",
+            json={"retry_mode": "failed_stage", "instruction": "优先修复样式断言"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        retry_thread_id = data["retry_thread_id"]
+        retry_session = api_server.event_store.get_session(retry_thread_id, str(ws))
+        assert retry_session["mode"] == "retry"
+        assert retry_session["retry_mode"] == "failed_stage"
+        assert retry_session["original_thread_id"] == thread_id
+        assert "原始 Run" in retry_session["prompt"]
+        assert "优先重试失败阶段" in retry_session["prompt"]
+        assert "AssertionError" in retry_session["prompt"]
+
+        api_server.run_manager.unregister(retry_thread_id)

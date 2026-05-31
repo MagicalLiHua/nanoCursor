@@ -89,7 +89,7 @@ class RunRequest(BaseModel):
     thread_id: str | None = Field(default=None, description="可选的已有线程 ID，用于继续对话")
     workspace_dir: str | None = Field(default=None, description="工作目录路径")
     messages: list[Message] | None = Field(default=None, description="对话历史消息列表，用于连续对话")
-    conversation_id: str | None = Field(default=None, description="可选的 AgentHub 会话 ID")
+    conversation_id: str | None = Field(default=None, description="可选的 nanoCursor 会话 ID")
     team: list[dict[str, Any]] | None = Field(default=None, description="本次运行的团队快照")
     execution_plan: dict[str, Any] | None = Field(default=None, description="本次运行的动态执行策略")
 
@@ -100,8 +100,15 @@ class RunResponse(BaseModel):
     status: str
 
 
+class RetryRunRequest(BaseModel):
+    """重试运行的请求"""
+    retry_mode: str = Field(default="full", description="full | failed_stage")
+    failure_id: str | None = Field(default=None, description="可选的失败记录 ID")
+    instruction: str = Field(default="", max_length=2000, description="用户补充的重试指令")
+
+
 class ConversationCreateRequest(BaseModel):
-    """创建 AgentHub 会话上下文"""
+    """创建 nanoCursor 会话上下文"""
     prompt: str = Field(default="", max_length=2000)
     workspace_dir: str | None = Field(default=None, description="工作目录路径")
 
@@ -110,6 +117,7 @@ class ConversationRunRequest(BaseModel):
     """在会话上下文中启动一次隔离运行"""
     prompt: str = Field(..., min_length=1, max_length=4000)
     workspace_dir: str | None = Field(default=None, description="工作目录路径")
+    messages: list[Message] | None = Field(default=None, description="同一会话内的最近消息，用于连续对话")
 
 
 class ConversationTeamUpdateRequest(BaseModel):
@@ -176,7 +184,7 @@ class BenchmarkRunResponse(BaseModel):
 
 
 class AgentEvent(BaseModel):
-    """AgentHub 前端消费的统一运行事件"""
+    """nanoCursor 前端消费的统一运行事件"""
     id: str
     thread_id: str
     type: str
@@ -188,7 +196,7 @@ class AgentEvent(BaseModel):
 
 
 class RunSessionResponse(BaseModel):
-    """AgentHub 运行会话状态"""
+    """nanoCursor 运行会话状态"""
     thread_id: str
     workspace_dir: str
     status: str
@@ -203,7 +211,7 @@ class RunSessionResponse(BaseModel):
 
 
 class RunHistoryItem(RunSessionResponse):
-    """AgentHub 历史运行摘要"""
+    """nanoCursor 历史运行摘要"""
     event_count: int = 0
     changed_files_count: int = 0
     has_diff: bool = False
@@ -230,7 +238,7 @@ class QualityCheck(BaseModel):
 
 
 class QualityGateResponse(BaseModel):
-    """AgentHub 交付质量门禁结果"""
+    """nanoCursor 交付质量门禁结果"""
     thread_id: str
     workspace_dir: str
     status: str
@@ -249,7 +257,7 @@ class ScoreReason(BaseModel):
 
 
 class DeliveryScoreResponse(BaseModel):
-    """AgentHub 交付评分结果"""
+    """nanoCursor 交付评分结果"""
     thread_id: str
     workspace_dir: str
     score: int
@@ -275,7 +283,7 @@ class RequirementTraceItem(BaseModel):
 
 
 class RequirementTraceabilityResponse(BaseModel):
-    """AgentHub 需求追踪矩阵"""
+    """nanoCursor 需求追踪矩阵"""
     thread_id: str
     workspace_dir: str
     source: str
@@ -294,6 +302,14 @@ class TeamAgentCreateRequest(BaseModel):
     goal: str = Field(default="", max_length=240)
     tools: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
+    lifetime: str = Field(default="permanent", description="permanent 或 temporary")
+    thread_id: str | None = Field(default=None, description="创建临时 Agent 时所属运行 ID")
+    mcp_servers: list[str] = Field(default_factory=list)
+    blocked_capabilities: list[str] = Field(default_factory=list)
+    risk_level: str = Field(default="medium")
+    task_scope: dict[str, Any] | None = None
+    expected_output: dict[str, Any] | None = None
+    ttl_seconds: int | None = None
 
 
 class PreferenceCreateRequest(BaseModel):
@@ -324,7 +340,7 @@ class PreferenceBucket(BaseModel):
 
 
 class MemoryProfileResponse(BaseModel):
-    """AgentHub 用户偏好档案"""
+    """nanoCursor 用户偏好档案"""
     workspace_dir: str
     total_memories: int
     preference_count: int
@@ -346,7 +362,7 @@ class ArtifactItem(BaseModel):
 
 
 class ArtifactCenterResponse(BaseModel):
-    """AgentHub 交付物中心"""
+    """nanoCursor 交付物中心"""
     thread_id: str
     workspace_dir: str
     status: str
@@ -390,7 +406,7 @@ class RecoveryAction(BaseModel):
 
 
 class RecoveryCenterResponse(BaseModel):
-    """AgentHub 安全与恢复中心"""
+    """nanoCursor 安全与恢复中心"""
     thread_id: str | None = None
     workspace_dir: str
     status: str

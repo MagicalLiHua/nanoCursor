@@ -118,3 +118,16 @@ export function capabilityStatusLabel(status) {
   };
   return labels[status] || status || "未知";
 }
+
+export function agentToneFromName(value = "", fallback = "lead") {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("user") || text.includes("用户")) return "user";
+  if (text.includes("planner") || text.includes("plan")) return "planner";
+  if (text.includes("coder") || text.includes("code") || text.includes("action")) return "coder";
+  if (text.includes("tester") || text.includes("test") || text.includes("verifier")) return "tester";
+  if (text.includes("reviewer") || text.includes("review")) return "reviewer";
+  if (text.includes("designer") || text.includes("design")) return "designer";
+  if (text.includes("devops") || text.includes("deploy")) return "devops";
+  if (text.includes("lead") || text.includes("supervisor")) return "lead";
+  return fallback;
+}

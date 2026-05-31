@@ -141,3 +141,44 @@ class TestMetricsCollector:
             mc.record_llm_call_end(start, input_tokens=i, output_tokens=0)
 
         assert len(mc.recent_llm_records) == 50
+
+    def test_reset_clears_all_counters(self):
+        """reset() zeroes all accumulated metrics."""
+        mc = MetricsCollector()
+        start = mc.record_llm_call_start()
+        mc.record_llm_call_end(start, input_tokens=500, output_tokens=300)
+        mc.record_tool_success("read_file")
+        mc.record_tool_failure("edit_file", "err")
+        mc.record_repair_cycle_start()
+        mc.record_repair_cycle_outcome("fixed")
+
+        mc.reset()
+
+        summary = mc.dump_summary()
+        assert summary["llm"]["total_calls"] == 0
+        assert summary["llm"]["total_tokens"] == 0
+        assert summary["llm"]["total_input_tokens"] == 0
+        assert summary["llm"]["total_output_tokens"] == 0
+        assert summary["tool_calls"]["total"] == 0
+        assert summary["repair_cycles"]["total"] == 0
+        assert mc.llm_latency_records == []
+        assert mc.recent_llm_records == []
+        assert mc.recent_tool_records == []
+        assert mc.repair_cycle_outcomes == []
+        assert mc.recent_supervisor_decisions == []
+
+    def test_reset_allows_fresh_accumulation(self):
+        """After reset(), new calls accumulate from zero."""
+        mc = MetricsCollector()
+        start = mc.record_llm_call_start()
+        mc.record_llm_call_end(start, input_tokens=1000, output_tokens=500)
+
+        mc.reset()
+
+        start = mc.record_llm_call_start()
+        mc.record_llm_call_end(start, input_tokens=10, output_tokens=5)
+
+        summary = mc.dump_summary()
+        assert summary["llm"]["total_calls"] == 1
+        assert summary["llm"]["total_input_tokens"] == 10
+        assert summary["llm"]["total_output_tokens"] == 5

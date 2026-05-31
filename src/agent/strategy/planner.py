@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from src.agent.strategy.tool_policy import ToolPolicy, policy_for_strategy
+
+logger = logging.getLogger(__name__)
 
 
 # Strategy definitions
@@ -103,12 +106,8 @@ def _has_feature_intent(text: str) -> bool:
     return _matches_any(text, FEATURE_INTENT_KEYWORDS) or _matches_any(text, CODE_ARTIFACT_PATTERNS)
 
 
-def select_strategy(prompt: str) -> str:
-    """Select the best execution strategy for a user prompt.
-
-    Uses keyword matching — deterministic and fast.
-    Falls back to 'feature_delivery' if no keywords match.
-    """
+def select_strategy_by_keywords(prompt: str) -> str:
+    """Select strategy using keyword matching (sync fallback)."""
     text = (prompt or "").lower()
     if _matches_any(text, ANALYSIS_ONLY_KEYWORDS):
         return "analysis_only"
@@ -118,11 +117,46 @@ def select_strategy(prompt: str) -> str:
         return "bug_fix"
     if _matches_any(text, REFACTOR_KEYWORDS):
         return "refactor"
+    if _matches_any(text, DOCS_ONLY_KEYWORDS) and not _has_feature_intent(text):
+        return "docs_only"
     if _has_feature_intent(text):
         return "feature_delivery"
-    if _matches_any(text, DOCS_ONLY_KEYWORDS):
-        return "docs_only"
     return "feature_delivery"
+
+
+def select_strategy(prompt: str) -> str:
+    """Select the best execution strategy for a user prompt (sync, keyword-only).
+
+    Falls back to 'feature_delivery' if no keywords match.
+    For LLM-enhanced selection, use select_strategy_async().
+    """
+    return select_strategy_by_keywords(prompt)
+
+
+async def select_strategy_async(
+    prompt: str,
+    conversation_summary: str = "",
+) -> tuple[str, dict[str, Any] | None]:
+    """Select strategy with LLM assistance.
+
+    Returns (strategy_id, llm_result) where llm_result is the full
+    classifier output if LLM was used, or None if keyword fallback was used.
+    """
+    from src.agent.strategy.classifier import classify_with_llm
+
+    llm_result = await classify_with_llm(prompt, conversation_summary)
+    if llm_result:
+        strategy = llm_result["strategy"]
+        logger.info(
+            "LLM classified strategy=%s complexity=%s confidence=%.2f rationale=%s",
+            strategy, llm_result["complexity"], llm_result["confidence"], llm_result["rationale"],
+        )
+        return strategy, llm_result
+
+    # Fallback to keywords
+    strategy = select_strategy_by_keywords(prompt)
+    logger.info("Keyword fallback strategy=%s", strategy)
+    return strategy, None
 
 
 def get_strategy_definition(strategy_id: str) -> dict[str, Any]:

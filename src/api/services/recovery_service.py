@@ -1,4 +1,4 @@
-"""Safety and recovery aggregation for AgentHub runs."""
+"""Safety and recovery aggregation for nanoCursor runs."""
 
 from __future__ import annotations
 

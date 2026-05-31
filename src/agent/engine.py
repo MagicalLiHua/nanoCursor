@@ -2,40 +2,37 @@
 """
 nanoCursor Core Engine - 统一 MVP 引擎
 
-整合所有借鉴的模块：
-- base_engine: while loop + tool_use
-- core_engine: Todo/Task/Subagent 工具
-- system_prompt_builder: sections 管道式提示
-- context_compactor: 三层上下文压缩
-- error_recovery: 错误恢复策略
-- hook_manager: 事件钩子系统
-- background_manager: 后台任务管理
-- cron_scheduler: 定时任务调度
-- worktree_manager: git worktree 隔离
-- skill_registry: 技能按需加载
-- permission_manager: 权限管道
-- memory_manager: 跨会话记忆
+核心模块：
+- agent_loop / agent_loop_stream: LLM 交互循环 + 工具调度
+- SystemPromptBuilder: sections 管道式提示构建
+- TodoManager / TaskManager: 任务管理
+- BackgroundManager: 后台任务执行
+- run_subagent / handle_spawn_agent: 子代理管理
 """
 
 import os
 import asyncio
+import contextvars
 import inspect
 import json
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Callable, Any
-from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
 from src.infra.llm_config import MODEL, API_KEY, BASE_URL, create_client
 from src.infra.metrics import metrics as _metrics
+from src.agent.state import WorkflowCancelledError
 
 # ========== 配置 ==========
 import src.infra.config as _config
 from src.infra.config import LLM_MAX_TOKENS, LLM_TEMPERATURE
+
+AGENT_BASH_TIMEOUT_SECONDS = 45
 
 def get_workdir() -> Path:
     """Return the current workspace directory (always reads latest value from config)."""
@@ -46,6 +43,26 @@ def reset_runtime_caches() -> None:
     """Clear workspace-scoped runtime singletons after the active workspace changes."""
     global _todo_mgr
     _todo_mgr = None
+
+
+_RUNTIME_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "nanocursor_runtime_context",
+    default={},
+)
+
+
+@contextmanager
+def bind_runtime_context(context: dict[str, Any] | None):
+    """Temporarily bind run-scoped context for tool handlers."""
+    token = _RUNTIME_CONTEXT.set(dict(context or {}))
+    try:
+        yield
+    finally:
+        _RUNTIME_CONTEXT.reset(token)
+
+
+def get_runtime_context() -> dict[str, Any]:
+    return dict(_RUNTIME_CONTEXT.get({}))
 
 # Bootstrap initial directories
 _initial_wd = get_workdir()
@@ -100,7 +117,7 @@ TASK_TOOLS = [
 ]
 
 SUBAGENT_TOOLS = [
-    {"name": "task", "description": "Spawn a subagent with fresh context",
+    {"name": "task", "description": "(Deprecated: use spawn_agent instead) Spawn a subagent with fresh context",
      "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string"}, "agent_type": {"type": "string"}}, "required": ["prompt"]}},
 ]
 
@@ -126,6 +143,59 @@ MEMORY_TOOLS = [
      }, "required": ["memory_id"]}},
 ]
 
+AGENT_RUNTIME_TOOLS = [
+    {
+        "name": "spawn_agent",
+        "description": (
+            "Create a run-scoped temporary Agent for a bounded task. Use this when the Lead "
+            "needs a specialist with explicit role, scope, tools, and expected output. "
+            "With run_now=true, the agent runs concurrently in the background (non-blocking). "
+            "Use gather_agents later to collect results."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Display name, e.g. Backend Reviewer"},
+                "role": {"type": "string", "description": "Stable role id, e.g. backend_reviewer"},
+                "goal": {"type": "string", "description": "Concrete task goal for this Agent"},
+                "lifetime": {"type": "string", "description": "temporary only for runtime-created agents"},
+                "reason": {"type": "string", "description": "Why this Agent is needed now"},
+                "tools": {"type": "array", "items": {"type": "string"}},
+                "capabilities": {"type": "array", "items": {"type": "string"}},
+                "mcp_servers": {"type": "array", "items": {"type": "string"}},
+                "blocked_capabilities": {"type": "array", "items": {"type": "string"}},
+                "risk_level": {"type": "string"},
+                "task_scope": {"type": "object"},
+                "expected_output": {"type": "object"},
+                "ttl_seconds": {"type": "integer"},
+                "run_now": {
+                    "type": "boolean",
+                    "description": "Run this Agent concurrently in background (non-blocking). Use gather_agents to collect results.",
+                },
+            },
+            "required": ["name", "role", "goal"],
+        },
+    },
+    {
+        "name": "gather_agents",
+        "description": (
+            "Wait for spawned agents to complete and collect their results. "
+            "Blocks until all specified agents (or all agents if no IDs given) finish. "
+            "Use after spawning agents with run_now=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Agent IDs to wait for. Omit to wait for all spawned agents.",
+                },
+            },
+        },
+    },
+]
+
 # Team tools from team.py
 from src.team.team import (
     get_team_manager, BUS, REQUEST_STORE,
@@ -141,7 +211,17 @@ from src.tools.project_tools import PROJECT_TOOLS as _PROJECT_TOOLS
 # Git tools
 from src.tools.git_tools import GIT_TOOLS as _GIT_TOOLS
 
-ALL_TOOLS = BASE_TOOLS + TODO_TOOLS + TASK_TOOLS + SUBAGENT_TOOLS + MEMORY_TOOLS + _PROJECT_TOOLS + _GIT_TOOLS + _TEAM_TOOLS
+ALL_TOOLS = (
+    BASE_TOOLS
+    + TODO_TOOLS
+    + TASK_TOOLS
+    + SUBAGENT_TOOLS
+    + MEMORY_TOOLS
+    + AGENT_RUNTIME_TOOLS
+    + _PROJECT_TOOLS
+    + _GIT_TOOLS
+    + _TEAM_TOOLS
+)
 # Alias for backwards compatibility
 TOOLS = ALL_TOOLS
 
@@ -149,53 +229,26 @@ TOOLS = ALL_TOOLS
 # ========== 工具处理函数 ==========
 import subprocess
 
+from src.tools.path_safety import safe_path as _safe_path
+from src.tools.bash import run_bash as _run_bash_impl
+from src.tools.file_ops import (
+    run_edit as _run_edit_impl,
+    run_list_directory as _run_list_dir_impl,
+    run_read as _run_read_impl,
+    run_write as _run_write_impl,
+)
+
+
 def safe_path(p: str) -> Path:
-    root = get_workdir()
-    normalized = str(p).replace("\\", os.sep)
-    path = (Path(normalized) if Path(normalized).is_absolute() else root / normalized).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
+    return _safe_path(p, get_workdir())
+
 
 def run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return f"Error: Dangerous command blocked"
-    try:
-        r = subprocess.run(command, shell=True, cwd=get_workdir(), capture_output=True, timeout=120)
-        try:
-            out = r.stdout.decode('gbk', errors='replace') + r.stderr.decode('gbk', errors='replace')
-        except (UnicodeDecodeError, AttributeError):
-            out = (r.stdout or b'') + (r.stderr or b'')
-            if isinstance(out, bytes):
-                out = out.decode('utf-8', errors='replace')
-        return out.strip()[:50000] or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
-    except FileNotFoundError:
-        return f"Error: Command not found: {command.split()[0] if command else ''}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_bash_impl(command, get_workdir(), timeout=AGENT_BASH_TIMEOUT_SECONDS)
 
 
 def run_list_directory(path: str = ".") -> str:
-    """List a workspace-relative directory without shell/platform quirks."""
-    try:
-        target = safe_path(path or ".")
-        if not target.exists():
-            return f"Error: Path not found: {path}"
-        if not target.is_dir():
-            return f"Error: Not a directory: {path}"
-
-        entries = []
-        for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-            suffix = "/" if child.is_dir() else ""
-            entries.append(f"{child.name}{suffix}")
-        return "\n".join(entries) or "(empty directory)"
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_list_dir_impl(path, get_workdir())
 
 
 def run_tests(test_path: str = "", framework: str = "auto") -> str:
@@ -307,262 +360,42 @@ def run_tests(test_path: str = "", framework: str = "auto") -> str:
         return f"Error running tests: {e}"
 
 
-def auto_verify_file(path: Path) -> str:
-    """Automatically verify a file after writing/editing. Returns '' if OK, error message if not."""
-    suffix = path.suffix.lower()
-    try:
-        if suffix == ".py":
-            import py_compile
-            try:
-                py_compile.compile(str(path), doraise=True)
-            except py_compile.PyCompileError as e:
-                return f"Python syntax error in {path.name}: {e}"
-        elif suffix in (".js", ".mjs"):
-            r = subprocess.run(
-                ["node", "--check", str(path)],
-                capture_output=True, timeout=10,
-            )
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout)
-                if isinstance(err, bytes):
-                    err = err.decode('utf-8', errors='replace')
-                return f"JavaScript syntax error in {path.name}: {err[:500]}"
-        elif suffix == ".ts":
-            # Check if tsc or esbuild is available
-            r = subprocess.run(
-                ["npx", "esbuild", str(path), "--format=esm"],
-                capture_output=True, timeout=15,
-            )
-            if r.returncode != 0:
-                err = r.stderr or r.stdout
-                if isinstance(err, bytes):
-                    err = err.decode('utf-8', errors='replace')
-                return f"TypeScript error in {path.name}: {err[:500]}"
-        elif suffix in (".json",):
-            import json
-            try:
-                json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as e:
-                return f"JSON syntax error in {path.name}: {e}"
-    except FileNotFoundError:
-        pass  # Tool not available - skip verification
-    except Exception:
-        pass  # Verification failure shouldn't block
-    return ""
-
 def run_read(path: str, limit: int = None) -> str:
-    try:
-        content = safe_path(path).read_text(encoding="utf-8")
-        if limit:
-            lines = content.splitlines()
-            if len(lines) > limit:
-                content = "\n".join(lines[:limit]) + f"\n... ({len(lines) - limit} more lines)"
-        return content[:50000]
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_read_impl(path, get_workdir(), limit)
+
 
 def run_write(path: str, content: str) -> str:
-    try:
-        fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        existed = fp.exists()
-        fp.write_text(content, encoding="utf-8")
-        # Auto-verify after write
-        verify_result = auto_verify_file(fp)
-        result = f"{'Updated' if existed else 'Created'} {path} ({len(content)} bytes)"
-        if verify_result:
-            result += f"\n⚠️  {verify_result}"
-        return result
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_write_impl(path, content, get_workdir())
+
 
 def run_edit(path: str, old_text: str = "", new_text: str = "", start_line: int = None, end_line: int = None) -> str:
-    """Edit file - supports both string-based (legacy) and line-based replacement.
-
-    Line-based mode (preferred): provide start_line, end_line, new_text.
-    String-based mode (legacy): provide old_text, new_text.
-
-    Returns a diff summary of what changed.
-    """
-    import difflib
-    try:
-        fp = safe_path(path)
-        if not fp.exists():
-            return f"Error: File not found: {path}"
-        content = fp.read_text(encoding="utf-8")
-        lines = content.splitlines(keepends=True)
-
-        if start_line is not None and end_line is not None:
-            # Line-based mode (1-indexed)
-            if start_line < 1 or end_line > len(lines) or start_line > end_line:
-                return f"Error: Invalid line range {start_line}-{end_line} (file has {len(lines)} lines)"
-            old_slice = "".join(lines[start_line-1:end_line])
-            new_lines = new_text.splitlines(keepends=True)
-            if new_lines and not new_lines[-1].endswith("\n"):
-                new_lines[-1] += "\n"
-            new_slice = "".join(new_lines)
-            new_content_lines = lines[:start_line-1] + new_lines + lines[end_line:]
-            new_content = "".join(new_content_lines)
-        elif old_text:
-            # String-based mode (legacy fallback)
-            if old_text not in content:
-                # Try fuzzy match across line boundaries
-                return f"Error: Text not found in file. Use start_line/end_line for line-based edits, or verify the exact text."
-            old_slice = old_text
-            new_slice = new_text
-            new_content = content.replace(old_text, new_text, 1)
-        else:
-            return "Error: Provide either (old_text, new_text) or (start_line, end_line, new_text)"
-
-        fp.write_text(new_content, encoding="utf-8")
-
-        # Auto-verify after edit
-        verify_result = auto_verify_file(fp)
-
-        # Generate diff summary
-        old_display = old_slice[:500]
-        new_display = new_slice[:500]
-        diff_lines = list(difflib.unified_diff(
-            old_slice.splitlines(keepends=True),
-            new_slice.splitlines(keepends=True),
-            fromfile=f"a/{path}", tofile=f"b/{path}",
-            lineterm="",
-        ))
-        diff_text = "\n".join(diff_lines[:30])
-
-        if start_line is not None:
-            loc = f"lines {start_line}-{end_line}"
-        else:
-            loc = "matched text"
-        added = len(new_slice) - len(old_slice)
-        change = f"+{added}" if added >= 0 else str(added)
-        result = f"Edited {path} ({loc}, {change} chars)\n```diff\n{diff_text}\n```"
-        if verify_result:
-            result += f"\n⚠️  {verify_result}"
-        return result
-    except Exception as e:
-        return f"Error: {e}"
+    return _run_edit_impl(path, get_workdir(), old_text, new_text, start_line, end_line)
 
 
-# ========== Todo 管理器 ==========
-
-def _todo_file() -> Path:
-    return get_workdir() / ".todos.json"
-
-@dataclass
-class TodoItem:
-    id: str
-    content: str
-    status: str = "pending"
-    created_at: float = field(default_factory=time.time)
-
-class TodoManager:
-    def __init__(self):
-        self.items: list[TodoItem] = []
-        self._load()
-
-    def _load(self):
-        todo_file = _todo_file()
-        if todo_file.exists():
-            try:
-                data = json.loads(todo_file.read_text(encoding="utf-8"))
-                self.items = [TodoItem(**t) for t in data]
-            except (json.JSONDecodeError, TypeError, OSError):
-                self.items = []
-
-    def _save(self):
-        data = [{"id": t.id, "content": t.content, "status": t.status, "created_at": t.created_at} for t in self.items]
-        _todo_file().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-    def add(self, content: str) -> str:
-        todo_id = str(int(time.time() * 1000))
-        self.items.append(TodoItem(id=todo_id, content=content))
-        self._save()
-        return todo_id
-
-    def update(self, todo_id: str, status: str):
-        for t in self.items:
-            if t.id == todo_id:
-                t.status = status
-                break
-        self._save()
-
-    def list_all(self) -> list[TodoItem]:
-        return self.items
-
-
-# ========== 任务管理器 ==========
-class TaskManager:
-    def __init__(self, tasks_dir: Path = None):
-        self.tasks_dir = (tasks_dir or get_workdir() / ".tasks")
-        self.tasks_dir.mkdir(parents=True, exist_ok=True)
-
-    def _task_file(self, task_id: str) -> Path:
-        return self.tasks_dir / f"task_{task_id}.json"
-
-    def create(self, subject: str, description: str = "", blocked_by: list = None) -> dict:
-        task_id = str(int(time.time() * 1000))
-        task = {
-            "id": task_id,
-            "subject": subject,
-            "description": description,
-            "status": "pending",
-            "blocked_by": blocked_by or [],
-            "created_at": time.time(),
-            "completed_at": None,
-        }
-        self._task_file(task_id).write_text(json.dumps(task, ensure_ascii=False))
-        return task
-
-    def get(self, task_id: str) -> Optional[dict]:
-        f = self._task_file(task_id)
-        if f.exists():
-            return json.loads(f.read_text(encoding="utf-8"))
-        return None
-
-    def update_status(self, task_id: str, status: str):
-        task = self.get(task_id)
-        if task:
-            task["status"] = status
-            if status == "completed":
-                task["completed_at"] = time.time()
-            self._task_file(task_id).write_text(json.dumps(task, ensure_ascii=False))
-
-    def list_all(self) -> list[dict]:
-        tasks = []
-        for f in self.tasks_dir.glob("task_*.json"):
-            try:
-                tasks.append(json.loads(f.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                pass
-        return sorted(tasks, key=lambda t: t.get("created_at", 0))
-
-    def list_runnable(self) -> list[dict]:
-        all_tasks = self.list_all()
-        completed_ids = {t["id"] for t in all_tasks if t["status"] == "completed"}
-        runnable = []
-        for t in all_tasks:
-            if t["status"] != "pending":
-                continue
-            blocked_by = t.get("blocked_by", [])
-            if all(b in completed_ids for b in blocked_by):
-                runnable.append(t)
-        return runnable
+# ========== Todo & Task 管理器 ==========
+from src.agent.managers import TodoManager, TaskManager
 
 
 # ========== 子代理 ==========
-async def run_subagent(prompt: str, system: str = None, agent_type: str = "Explore") -> str:
+async def run_subagent(
+    prompt: str,
+    system: str = None,
+    agent_type: str = "Explore",
+    tools: list | None = None,
+) -> str:
     if system is None:
         system = f"You are a {agent_type} subagent at {get_workdir()}. Complete the task and summarize."
+    if tools is None:
+        tools = BASE_TOOLS
 
     client = create_client()
     messages = [{"role": "user", "content": prompt}]
 
     try:
         for turn in range(30):
-            resp = await client.messages.create(
-                model=MODEL, system=system, messages=messages,
-                tools=BASE_TOOLS, max_tokens=LLM_MAX_TOKENS,
+            resp = await _retryable_llm_call(
+                client, model=MODEL, system=system, messages=messages,
+                tools=tools, max_tokens=LLM_MAX_TOKENS,
             )
             messages.append({"role": "assistant", "content": resp.content})
 
@@ -573,13 +406,94 @@ async def run_subagent(prompt: str, system: str = None, agent_type: str = "Explo
             for block in resp.content:
                 if block.type == "tool_use":
                     handler = TOOL_HANDLERS.get(block.name, lambda **kw: f"Unknown: {block.name}")
-                    output = str(handler(**block.input))[:50000]
+                    handled = handler(**block.input)
+                    if inspect.isawaitable(handled):
+                        handled = await handled
+                    output = str(handled)[:50000]
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
             messages.append({"role": "user", "content": results})
 
         return "".join(b.text for b in resp.content if hasattr(b, "text")) or "(no summary)"
     finally:
         await client.close()
+
+
+# ========== 并行工具执行 ==========
+PARALLEL_TOOLS = {"read_file", "list_directory"}
+WRITE_TOOLS = {"write_file", "edit_file"}
+
+
+async def _execute_single_tool(
+    tool_name: str,
+    tool_input: dict,
+    tool_id: str,
+    on_tool_check: Callable | None,
+    on_tool_call: Callable | None,
+    on_cancel_check: Callable | None,
+    session_id: str | None,
+    file_lock=None,
+) -> dict:
+    """Execute a single tool call and return the tool_result dict."""
+    await _raise_if_cancelled(on_cancel_check)
+
+    decision = await _call_tool_check(on_tool_check, tool_name, tool_input)
+    allowed, reason = _tool_policy_allows(decision)
+
+    if not allowed:
+        output = f"Error: Tool policy blocked: {reason}"
+        _metrics.record_tool_failure(tool_name, output)
+    elif tool_name == "task":
+        output = await run_subagent(
+            tool_input.get("prompt", ""),
+            agent_type=tool_input.get("agent_type", "Explore"),
+        )
+        _metrics.record_tool_success(tool_name)
+    else:
+        try:
+            handler = TOOL_HANDLERS.get(tool_name, lambda **kw: f"Unknown: {tool_name}")
+            if not isinstance(tool_input, dict):
+                output = f"Error: Invalid tool input format (expected dict, got {type(tool_input).__name__})"
+                _metrics.record_tool_failure(tool_name, output)
+            else:
+                async def _run_handler():
+                    return handler(**tool_input)
+
+                if file_lock and tool_name in WRITE_TOOLS:
+                    target_path = tool_input.get("path") or tool_input.get("file_path") or ""
+                    if target_path:
+                        handled = await file_lock.run_write(target_path, _run_handler())
+                    else:
+                        handled = await _run_handler()
+                else:
+                    handled = await _run_handler()
+
+                if inspect.isawaitable(handled):
+                    handled = await handled
+                output = str(handled)[:50000]
+                if output.startswith("Error:"):
+                    _metrics.record_tool_failure(tool_name, output)
+                    from src.agent.learner import get_learner
+                    get_learner().on_tool_failure(tool_name, tool_input, output, session_id)
+                else:
+                    _metrics.record_tool_success(tool_name)
+                    from src.agent.learner import get_learner
+                    get_learner().on_tool_success(tool_name, tool_input, output)
+        except Exception as tool_err:
+            output = f"Error: {tool_err}"
+            _metrics.record_tool_failure(tool_name, str(tool_err))
+            from src.agent.learner import get_learner
+            get_learner().on_tool_failure(tool_name, tool_input, output, session_id)
+
+    if on_tool_call:
+        on_tool_call(tool_name, tool_input, output)
+
+    await _raise_if_cancelled(on_cancel_check)
+
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_id,
+        "content": output,
+    }
 
 
 # ========== 工具处理函数字典 ==========
@@ -606,7 +520,7 @@ _todo_mgr = None
 def get_todo_manager() -> TodoManager:
     global _todo_mgr
     if _todo_mgr is None:
-        _todo_mgr = TodoManager()
+        _todo_mgr = TodoManager(workdir=get_workdir())
     return _todo_mgr
 
 def handle_TodoWrite(items: list) -> str:
@@ -644,7 +558,7 @@ _task_mgr = None
 def get_task_manager() -> TaskManager:
     global _task_mgr
     if _task_mgr is None:
-        _task_mgr = TaskManager()
+        _task_mgr = TaskManager(workdir=get_workdir())
     return _task_mgr
 
 def handle_task_create(subject: str, description: str = "", blocked_by: list = None) -> str:
@@ -773,218 +687,320 @@ TOOL_HANDLERS["plan_approval"] = _safe_handler(["request_id", "approve"], lambda
 TOOL_HANDLERS["claim_task"] = _safe_handler(["task_id"], lambda task_id: handle_claim_task(task_id))
 
 
-# ========== 系统提示构建器（借鉴 s10） ==========
-DYNAMIC_BOUNDARY = "=== DYNAMIC_BOUNDARY ==="
+def _as_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
-def _build_core() -> str:
-    return f"""你是 nanoCursor AgentHub 的 Lead Agent，一个多 Agent 软件交付工作台的协调者。
 
-【核心原则】
+def _runtime_tool_names() -> set[str]:
+    return {str(tool.get("name")) for tool in TOOLS if isinstance(tool, dict) and tool.get("name")}
 
-1. **多 Agent 协作优先** — 对于复杂任务，不要自己全干。使用 spawn_teammate 组建团队：
-   - Planner: 需求分析和任务拆解
-   - Coder: 代码实现和文件修改
-   - Tester: 验证和测试
-   - Reviewer: 代码审查和风险评估
-   - Designer: UI/UX 设计和前端打磨
-   给每个 teammate 清晰、具体的任务指令。通过 send_message 跟进进度，用 read_inbox 接收报告。
 
-2. **像人一样对话** — 用户只是聊天时，就自然地聊天，不要调用任何工具。说"你好"你就回"你好！有什么可以帮你的？"，仅此而已。
+def _tools_for_runtime_agent(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return read-only tools allowed for a runtime child-agent proposal."""
+    readonly = {"read_file", "list_directory", "search_codebase", "project_context", "git_status", "git_diff"}
+    requested = set(_as_string_list(agent.get("tools", [])))
+    allowed = (requested & readonly) or readonly
+    runtime_names = _runtime_tool_names()
+    return [tool for tool in TOOLS if tool.get("name") in allowed and tool.get("name") in runtime_names]
 
-3. **按需使用工具** — 只有在用户明确要求做编程相关操作时才调用工具。
 
-4. **先思考再行动** — 理解用户真正想要什么。复杂任务先 spawn Planner 做需求分析，再 spawn Coder 实现。
+async def _default_runtime_subagent_runner(prompt: str, **kwargs) -> str:
+    return await run_subagent(prompt=prompt, **kwargs)
 
-5. **用中文回复** — 始终使用中文与用户交流。
 
-6. **简洁有力** — 用户没说要看代码就不要贴代码，没说要做就不要做。回复尽量简短。
+async def handle_spawn_agent(
+    name: str,
+    role: str,
+    goal: str,
+    lifetime: str = "temporary",
+    reason: str = "",
+    tools: list | None = None,
+    capabilities: list | None = None,
+    task_scope: dict | None = None,
+    expected_output: dict | None = None,
+    mcp_servers: list | None = None,
+    blocked_capabilities: list | None = None,
+    risk_level: str = "medium",
+    ttl_seconds: int | None = None,
+    run_now: bool = False,
+) -> str:
+    """Create a run-scoped temporary Agent from inside the active Lead run."""
+    context = get_runtime_context()
+    thread_id = str(context.get("thread_id") or "").strip()
+    workspace_dir = str(context.get("workspace_dir") or "").strip()
+    event_store = None
 
-【环境信息】
-- 工作目录: {get_workdir()}
-- 操作系统: Windows
-- Windows 命令: dir (不是 ls), type (不是 cat), del (不是 rm), copy (不是 cp)
+    if not thread_id or not workspace_dir:
+        return "Error: spawn_agent requires active run context with thread_id and workspace_dir."
 
-【多 Agent 工作流】
-对于编程任务，推荐流程：
-1. spawn_teammate(name="Planner", role="planner", prompt="分析需求并拆解任务...")
-2. 收到 Planner 的任务列表后，用 task_create 创建任务到共享任务板
-3. spawn_teammate(name="Coder", role="coder", prompt="实现任务...")
-4. spawn_teammate(name="Tester", role="tester", prompt="验证实现...")
-5. 通过 read_inbox 接收各 agent 的完成报告
-6. 汇总结果回复用户
+    cleaned_name = str(name or "").strip()
+    cleaned_role = str(role or "").strip()
+    cleaned_goal = str(goal or "").strip()
+    if not cleaned_name or not cleaned_role or not cleaned_goal:
+        return "Error: spawn_agent requires non-empty name, role, and goal."
 
-【验证工作流 - 重要！】
-每次文件修改后，你应该：
-1. 使用 run_tests 运行项目的测试套件
-2. 如果测试失败，分析失败原因，修复代码
-3. 再次运行 run_tests 确认修复
-4. 测试全部通过后才报告"完成"
-5. 如果项目没有测试，至少运行语法检查和导入检查（auto_verify_file 已自动做）
-不要报告"完成"除非你已验证代码能运行。
+    if str(lifetime or "temporary").strip().lower() not in {"temporary", "temp", "ephemeral"}:
+        return "Error: runtime spawn_agent currently supports temporary agents only."
 
-【工具说明】
-- bash: 执行 shell 命令
-- read_file: 读取文件内容（编辑前先读文件获取准确行号）
-- write_file: 创建/覆盖文件
-- edit_file: 编辑文件（推荐用 start_line/end_line 行号定位）
-- list_directory: 列出目录内容
-- project_context / search_codebase: 理解项目结构
-- TodoWrite / TodoList: 管理待办事项
-- task_create / task_update / task_list: 管理共享任务板
-- task: 启动子代理处理独立任务
-- spawn_teammate / send_message / broadcast / read_inbox: 多 Agent 团队管理
-"""
-
-def _build_tool_listing(tools: list) -> str:
-    if not tools:
-        return ""
-    lines = ["【可用工具】"]
-    for t in tools:
-        name = t.get("name", "")
-        desc = t.get("description", "")
-        lines.append(f"- {name}: {desc}")
-    return "\n".join(lines)
-
-def _build_dynamic_context() -> str:
-    from datetime import datetime
-    import platform
-    return f"""【当前环境】
-- 日期: {datetime.now().strftime('%Y-%m-%d')}
-- 工作目录: {get_workdir()}
-- 平台: {platform.system()}
-"""
-
-class SystemPromptBuilder:
-    def __init__(self, tools: list = None):
-        self.tools = tools or []
-        self._static_cache: str | None = None
-
-    def build(self) -> str:
-        sections = [_build_core()]
-        # 添加自我进化的学习上下文
-        learnings = self._build_learnings()
-        if learnings:
-            sections.append(learnings)
-        # 添加项目感知上下文
-        proj_ctx = self._build_project_context()
-        if proj_ctx:
-            sections.append(proj_ctx)
-        sections.append(_build_tool_listing(self.tools))
-        sections.append(_build_dynamic_context())
-        return "\n\n".join(sections)
-
-    def _build_learnings(self) -> str:
-        """注入学习上下文（过去会话的教训 + 成功经验）"""
-        parts = []
+    spec = {
+        "name": cleaned_name,
+        "role": cleaned_role,
+        "goal": cleaned_goal,
+        "reason": str(reason or f"Lead requested a specialist for: {cleaned_goal}"),
+        "parent_agent": str(context.get("agent") or "Lead"),
+        "tools": _as_string_list(tools),
+        "capabilities": _as_string_list(capabilities),
+        "mcp_servers": _as_string_list(mcp_servers),
+        "blocked_capabilities": _as_string_list(blocked_capabilities),
+        "risk_level": str(risk_level or "medium"),
+    }
+    if isinstance(task_scope, dict):
+        spec["task_scope"] = task_scope
+    if isinstance(expected_output, dict):
+        spec["expected_output"] = expected_output
+    if ttl_seconds is not None:
         try:
-            from src.agent.learner import get_learner, get_experience_learner
-            learner = get_learner()
-            ctx = learner.build_learning_context()
-            if ctx:
-                parts.append(ctx)
-            exp = get_experience_learner()
-            # Try to find relevant past episodes based on workspace name
-            exp_ctx = exp.build_experience_context(str(get_workdir()))
-            if exp_ctx:
-                parts.append(exp_ctx)
-        except Exception:
-            pass
-        return "\n".join(parts)
+            spec["ttl_seconds"] = max(60, int(ttl_seconds))
+        except (TypeError, ValueError):
+            return "Error: ttl_seconds must be an integer."
 
-    def _build_project_context(self) -> str:
-        """注入项目感知上下文（代码库结构概览）"""
-        try:
-            from src.tools.project_tools import project_context
-            ctx = project_context()
-            if ctx:
-                return ctx
-        except Exception:
-            pass
-        return ""
+    run_result: dict[str, Any] | None = None
+    try:
+        from src.api.services.event_store import get_event_store
+        from src.api.services.ephemeral_agent_service import spawn_ephemeral_agent
 
-    def build_static(self) -> str:
-        if self._static_cache:
-            return self._static_cache
-        sections = [_build_core(), _build_tool_listing(self.tools)]
-        self._static_cache = "\n\n".join(sections)
-        return self._static_cache
+        event_store = get_event_store()
+        event_store.append_event(
+            thread_id,
+            "agent_spawn_requested",
+            title=f"请求创建临时 Agent：{cleaned_name}",
+            content=spec["reason"],
+            agent="lead",
+            payload={"request": spec},
+            workspace_dir=workspace_dir,
+        )
+        agent = spawn_ephemeral_agent(thread_id, spec, workspace_dir)
+        event_store.append_event(
+            thread_id,
+            "agent_spawn_approved",
+            title=f"临时 Agent 已创建：{agent.get('name')}",
+            content=agent.get("goal", ""),
+            agent="lead",
+            payload={"agent": agent},
+            workspace_dir=workspace_dir,
+        )
+        if run_now:
+            from src.agent.agent_pool import get_or_create_pool
 
-    def build_dynamic(self) -> str:
-        return _build_dynamic_context()
+            pool = get_or_create_pool(thread_id)
+            # Set status callback from runtime context if available
+            _pool_cb = context.get("pool_status_callback")
+            if _pool_cb and not pool._status_callback:
+                pool.set_status_callback(_pool_cb)
+            agent_tools = _tools_for_runtime_agent(agent)
+            runner = context.get("subagent_runner") or _default_runtime_subagent_runner
 
-    def clear_cache(self):
-        self._static_cache = None
+            handle = await pool.submit(
+                name=cleaned_name,
+                role=cleaned_role,
+                goal=str(context.get("prompt") or cleaned_goal),
+                runner=runner,
+                tools=agent_tools,
+            )
+            agent["pool_agent_id"] = handle.agent_id
+            agent["status"] = "running"
+    except ValueError as exc:
+        if event_store is not None:
+            event_store.append_event(
+                thread_id,
+                "agent_spawn_rejected",
+                title=f"临时 Agent 创建被拒绝：{cleaned_name}",
+                content=str(exc),
+                agent="lead",
+                payload={"request": spec, "reason": str(exc)},
+                workspace_dir=workspace_dir,
+            )
+        return f"Error: {exc}"
+
+    result_payload = {
+        "ok": True,
+        "agent_id": agent.get("agent_id"),
+        "name": agent.get("name"),
+        "role": agent.get("role"),
+        "status": agent.get("status"),
+        "tools": agent.get("tools", []),
+        "capabilities": agent.get("capabilities", []),
+        "task_scope": agent.get("task_scope", {}),
+        "expected_output": agent.get("expected_output", {}),
+        "run_now": bool(run_now),
+    }
+    if run_now:
+        result_payload["pool_agent_id"] = agent.get("pool_agent_id")
+        result_payload["message"] = "Agent submitted to execution pool. Use gather_agents to collect results."
+    else:
+        result_payload["result"] = run_result.get("result") if isinstance(run_result, dict) else {}
+        result_payload["message"] = "Temporary Agent created for this run."
+    return json.dumps(result_payload, ensure_ascii=False)
 
 
-# ========== 上下文压缩器（借鉴 s06） ==========
+TOOL_HANDLERS["spawn_agent"] = _safe_handler(
+    ["name", "role", "goal"],
+    lambda name, role, goal, lifetime="temporary", reason="", tools=None, capabilities=None,
+    task_scope=None, expected_output=None, mcp_servers=None, blocked_capabilities=None,
+    risk_level="medium", ttl_seconds=None, run_now=False: handle_spawn_agent(
+        name=name,
+        role=role,
+        goal=goal,
+        lifetime=lifetime,
+        reason=reason,
+        tools=tools,
+        capabilities=capabilities,
+        task_scope=task_scope,
+        expected_output=expected_output,
+        mcp_servers=mcp_servers,
+        blocked_capabilities=blocked_capabilities,
+        risk_level=risk_level,
+        ttl_seconds=ttl_seconds,
+        run_now=run_now,
+    ),
+)
+
+
+async def handle_gather_agents(agent_ids: list[str] | None = None) -> str:
+    """Wait for spawned agents to complete and return their results."""
+    context = get_runtime_context()
+    thread_id = str(context.get("thread_id") or "").strip()
+    if not thread_id:
+        return "Error: gather_agents requires active run context."
+
+    from src.agent.agent_pool import get_pool
+    pool = get_pool(thread_id)
+    if not pool:
+        return "Error: No agent pool found for this run. No agents have been spawned."
+
+    results = await pool.gather(agent_ids)
+
+    output = []
+    for aid, handle in results.items():
+        entry = {
+            "agent_id": aid,
+            "name": handle.name,
+            "role": handle.role,
+            "status": handle.status,
+        }
+        if handle.result:
+            entry["result"] = handle.result[:5000]
+        if handle.error:
+            entry["error"] = handle.error
+        output.append(entry)
+
+    return json.dumps({"ok": True, "agents": output}, ensure_ascii=False)
+
+
+TOOL_HANDLERS["gather_agents"] = _safe_handler(
+    [],
+    lambda agent_ids=None: handle_gather_agents(agent_ids=agent_ids),
+)
+
+
+# ========== 系统提示构建器 ==========
+from src.agent.prompt_builder import DYNAMIC_BOUNDARY, SystemPromptBuilder
+
+
+# ========== 上下文压缩器 ==========
+from src.agent.compaction import auto_compact, micro_compact
+
 OUTPUT_DIR = get_workdir() / ".task_outputs"
 TRANSCRIPTS_DIR = get_workdir() / ".transcripts"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-COMPACT_TOKEN_THRESHOLD = 50000
-MAX_RECENT_TOOL_RESULTS = 3
-
-def _content_to_dict(content) -> dict | list:
-    """将 Anthropic ContentBlock 列表转换为 JSON 可序列化的 dict"""
-    if isinstance(content, list):
-        return [_content_to_dict(block) for block in content]
-    if hasattr(content, 'type'):
-        if content.type == 'text':
-            return {"type": "text", "text": content.text}
-        if content.type == 'thinking':
-            return {"type": "thinking", "thinking": content.thinking, "signature": getattr(content, 'signature', '')}
-        if content.type == 'tool_use':
-            return {"type": "tool_use", "id": content.id, "name": content.name, "input": content.input}
-        if content.type == 'tool_result':
-            return {"type": "tool_result", "tool_use_id": content.tool_use_id, "content": content.content}
-        return {"type": content.type}
-    return content
-
-def micro_compact(messages: list) -> list:
-    """微型压缩：保留最近3个工具结果"""
-    result = []
-    tool_result_count = 0
-    for msg in messages:
-        msg_dict = msg if isinstance(msg, dict) else {"role": msg.role, "content": msg.content}
-        if msg_dict.get("role") == "user" and isinstance(msg_dict.get("content"), list):
-            new_content = []
-            for block in msg_dict["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    if tool_result_count < MAX_RECENT_TOOL_RESULTS:
-                        new_content.append(block)
-                        tool_result_count += 1
-                    else:
-                        new_content.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.get("tool_use_id", "unknown"),
-                            "content": f"[{len(block.get('content', ''))} chars tool output]"
-                        })
-                else:
-                    new_content.append(block)
-            msg_dict["content"] = new_content
-        result.append(msg_dict)
-    return result
-
-def auto_compact(messages: list) -> list:
-    """自动压缩检查"""
-    # 先转换消息中的 ContentBlock 为 dict
-    serializable = []
-    for msg in messages:
-        if isinstance(msg, dict) and "content" in msg:
-            msg = dict(msg)
-            msg["content"] = _content_to_dict(msg["content"])
-        serializable.append(msg)
-    size = len(json.dumps(serializable))
-    if size > COMPACT_TOKEN_THRESHOLD:
-        return micro_compact(messages)
-    return messages
-
-
-# ========== 错误恢复（借鉴 s11） ==========
+# ========== 错误恢复 ==========
 MAX_RECOVERY_ATTEMPTS = 3
 BACKOFF_BASE_DELAY = 1.0
 CONTINUATION_MESSAGE = "Output limit reached. Please continue directly."
+
+
+def _block_value(block: Any, key: str, default: Any = None) -> Any:
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _assistant_tool_use_ids(message: dict[str, Any]) -> list[str]:
+    if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+        return []
+    ids: list[str] = []
+    for block in message["content"]:
+        if _block_value(block, "type") == "tool_use":
+            tool_id = _block_value(block, "id")
+            if tool_id:
+                ids.append(str(tool_id))
+    return ids
+
+
+def _is_tool_result_block(block: Any) -> bool:
+    return _block_value(block, "type") == "tool_result"
+
+
+def _synthetic_tool_result(tool_use_id: str) -> dict[str, str]:
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": "Tool result was missing from recovered history; continue from the available context.",
+    }
+
+
+def _ensure_tool_result_sequence(messages: list) -> list:
+    """Repair Anthropic tool-use history so every tool_use has an immediate result."""
+    repaired: list = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        msg_dict = message if isinstance(message, dict) else {"role": getattr(message, "role", "user"), "content": getattr(message, "content", "")}
+        tool_ids = _assistant_tool_use_ids(msg_dict)
+        repaired.append(msg_dict)
+        if not tool_ids:
+            index += 1
+            continue
+
+        next_msg = messages[index + 1] if index + 1 < len(messages) else None
+        next_dict = (
+            next_msg
+            if isinstance(next_msg, dict)
+            else {"role": getattr(next_msg, "role", "user"), "content": getattr(next_msg, "content", "")}
+            if next_msg is not None
+            else None
+        )
+        next_content = next_dict.get("content") if isinstance(next_dict, dict) else None
+
+        if isinstance(next_dict, dict) and next_dict.get("role") == "user" and isinstance(next_content, list):
+            by_id = {
+                str(_block_value(block, "tool_use_id")): block
+                for block in next_content
+                if _is_tool_result_block(block) and _block_value(block, "tool_use_id")
+            }
+            ordered_results = [by_id.get(tool_id) or _synthetic_tool_result(tool_id) for tool_id in tool_ids]
+            extra_blocks = [
+                block
+                for block in next_content
+                if not (_is_tool_result_block(block) and str(_block_value(block, "tool_use_id")) in set(tool_ids))
+            ]
+            repaired.append({**next_dict, "content": ordered_results + extra_blocks})
+            index += 2
+            continue
+
+        repaired.append({"role": "user", "content": [_synthetic_tool_result(tool_id) for tool_id in tool_ids]})
+        index += 1
+
+    return repaired
 
 def backoff_delay(attempt: int) -> float:
     import random
@@ -992,48 +1008,37 @@ def backoff_delay(attempt: int) -> float:
     return min(delay, 30.0)
 
 
-# ========== 后台任务管理器（借鉴 s13） ==========
+def _is_retryable_error(exc: Exception) -> bool:
+    """Check if an LLM API error is retryable (transient)."""
+    from anthropic import RateLimitError, InternalServerError, APIConnectionError, APITimeoutError
+    return isinstance(exc, (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError))
+
+
+async def _retryable_llm_call(client, **kwargs):
+    """Call LLM API with retry for transient errors."""
+    import asyncio as _asyncio
+    last_exc = None
+    for attempt in range(MAX_RECOVERY_ATTEMPTS):
+        try:
+            return await client.messages.create(**kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_error(exc) or attempt == MAX_RECOVERY_ATTEMPTS - 1:
+                raise
+            delay = backoff_delay(attempt)
+            print(f"[retry] LLM call failed (attempt {attempt + 1}/{MAX_RECOVERY_ATTEMPTS}): {exc}. Retrying in {delay:.1f}s...")
+            await _asyncio.sleep(delay)
+    raise last_exc
+
+# ========== 后台任务管理器 ==========
+from src.agent.managers import BackgroundManager as _BgMgr
+
 _bg_manager = None
 
-class BackgroundManager:
-    def __init__(self):
-        self._tasks: dict[str, dict] = {}
-        self._lock = asyncio.Lock()
-
-    async def run(self, command: str, label: str = "") -> str:
-        task_id = str(uuid.uuid4())
-        self._tasks[task_id] = {
-            "id": task_id, "command": command, "label": label,
-            "status": "running", "started_at": time.time(), "result": None,
-        }
-        asyncio.create_task(self._run_background(task_id, command))
-        return task_id
-
-    async def _run_background(self, task_id: str, command: str):
-        import subprocess
-        try:
-            r = subprocess.run(command, shell=True, cwd=get_workdir(), capture_output=True, timeout=300)
-            out = r.stdout.decode('gbk', errors='replace') + r.stderr.decode('gbk', errors='replace')
-            async with self._lock:
-                if task_id in self._tasks:
-                    self._tasks[task_id]["status"] = "completed"
-                    self._tasks[task_id]["result"] = out.strip()
-        except Exception as e:
-            async with self._lock:
-                if task_id in self._tasks:
-                    self._tasks[task_id]["status"] = "failed"
-                    self._tasks[task_id]["error"] = str(e)
-
-    def check(self, task_id: str) -> Optional[dict]:
-        return self._tasks.get(task_id)
-
-    def list_all(self) -> list[dict]:
-        return list(self._tasks.values())
-
-def get_background_manager() -> BackgroundManager:
+def get_background_manager() -> _BgMgr:
     global _bg_manager
     if _bg_manager is None:
-        _bg_manager = BackgroundManager()
+        _bg_manager = _BgMgr(workdir=get_workdir())
     return _bg_manager
 
 
@@ -1055,6 +1060,17 @@ async def _call_tool_check(callback: Callable[[str, dict], Any] | None, tool_nam
     return decision
 
 
+async def _raise_if_cancelled(callback: Callable[[], Any] | None) -> None:
+    """Stop the Agent loop at safe checkpoints when the host requests cancel."""
+    if not callback:
+        return
+    result = callback()
+    if inspect.isawaitable(result):
+        result = await result
+    if result:
+        raise WorkflowCancelledError("工作流已被用户取消")
+
+
 # ========== 主 Agent Loop ==========
 async def agent_loop(
     messages: list,
@@ -1064,7 +1080,9 @@ async def agent_loop(
     on_tool_check: Callable[[str, dict], Any] = None,
     on_tool_call: Callable[[str, dict, str], None] = None,
     on_llm_response: Callable[[int, int], None] = None,
+    on_cancel_check: Callable[[], Any] = None,
     session_id: str = None,
+    runtime_context: dict[str, Any] | None = None,
 ) -> str:
     """
     统一 agent loop - 整合所有增强功能
@@ -1086,96 +1104,81 @@ async def agent_loop(
     client = create_client()
 
     try:
-        for turn in range(max_turns):
-            try:
-                _llm_start = _metrics.record_llm_call_start()
-                resp = await client.messages.create(
-                    model=MODEL,
-                    system=system,
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=LLM_MAX_TOKENS,
-                    temperature=LLM_TEMPERATURE,
-                )
-                _metrics.record_llm_call_end(_llm_start, input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens)
-                if on_llm_response:
-                    on_llm_response(resp.usage.input_tokens, resp.usage.output_tokens)
+        with bind_runtime_context(runtime_context):
+            for turn in range(max_turns):
+                try:
+                    await _raise_if_cancelled(on_cancel_check)
+                    _llm_start = _metrics.record_llm_call_start()
+                    messages = _ensure_tool_result_sequence(messages)
+                    resp = await _retryable_llm_call(
+                        client,
+                        model=MODEL,
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=LLM_MAX_TOKENS,
+                        temperature=LLM_TEMPERATURE,
+                    )
+                    _metrics.record_llm_call_end(_llm_start, input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens)
+                    if on_llm_response:
+                        on_llm_response(resp.usage.input_tokens, resp.usage.output_tokens)
 
-                messages.append({"role": "assistant", "content": _content_to_dict(resp.content)})
+                    messages.append({"role": "assistant", "content": _content_to_dict(resp.content)})
 
-                if resp.stop_reason != "tool_use":
-                    return "".join(b.text for b in resp.content if hasattr(b, "text"))
+                    await _raise_if_cancelled(on_cancel_check)
+                    if resp.stop_reason != "tool_use":
+                        return "".join(b.text for b in resp.content if hasattr(b, "text"))
 
-                # 处理工具调用
-                tool_results = []
-                for block in resp.content:
-                    if block.type == "tool_use":
-                        tool_name = block.name
-                        tool_input = block.input
-                        tool_id = block.id
-                        decision = await _call_tool_check(on_tool_check, tool_name, tool_input)
-                        allowed, reason = _tool_policy_allows(decision)
+                    # 处理工具调用：只读工具并行，写工具串行（带文件锁）
+                    _ctx = get_runtime_context()
+                    _fl = _ctx.get("file_lock")
+                    tool_calls = [
+                        (block.name, block.input, block.id)
+                        for block in resp.content if block.type == "tool_use"
+                    ]
+                    parallel_calls = [(n, i, tid) for n, i, tid in tool_calls if n in PARALLEL_TOOLS]
+                    sequential_calls = [(n, i, tid) for n, i, tid in tool_calls if n not in PARALLEL_TOOLS]
 
-                        if not allowed:
-                            output = f"Error: Tool policy blocked: {reason}"
-                            _metrics.record_tool_failure(tool_name, output)
-                        elif tool_name == "task":
-                            output = await run_subagent(
-                                tool_input.get("prompt", ""),
-                                agent_type=tool_input.get("agent_type", "Explore"),
-                            )
-                            _metrics.record_tool_success(tool_name)
-                        else:
-                            try:
-                                handler = TOOL_HANDLERS.get(tool_name, lambda **kw: f"Unknown: {tool_name}")
-                                if not isinstance(tool_input, dict):
-                                    output = f"Error: Invalid tool input format (expected dict, got {type(tool_input).__name__})"
-                                    _metrics.record_tool_failure(tool_name, output)
-                                else:
-                                    output = str(handler(**tool_input))[:50000]
-                                    if output.startswith("Error:"):
-                                        _metrics.record_tool_failure(tool_name, output)
-                                        # 自我进化：记录失败
-                                        from src.agent.learner import get_learner
-                                        learner = get_learner()
-                                        learner.on_tool_failure(tool_name, tool_input, output, session_id)
-                                    else:
-                                        _metrics.record_tool_success(tool_name)
-                                        # 自我进化：记录成功模式
-                                        from src.agent.learner import get_learner
-                                        learner = get_learner()
-                                        learner.on_tool_success(tool_name, tool_input, output)
-                            except Exception as tool_err:
-                                output = f"Error: {tool_err}"
-                                _metrics.record_tool_failure(tool_name, str(tool_err))
-                                # 自我进化：记录异常
-                                from src.agent.learner import get_learner
-                                learner = get_learner()
-                                learner.on_tool_failure(tool_name, tool_input, output, session_id)
+                    tool_results = [None] * len(tool_calls)
 
-                        if on_tool_call:
-                            on_tool_call(tool_name, tool_input, output)
+                    # 并行执行只读工具
+                    if parallel_calls:
+                        parallel_tasks = [
+                            _execute_single_tool(n, i, tid, on_tool_check, on_tool_call, on_cancel_check, session_id, file_lock=_fl)
+                            for n, i, tid in parallel_calls
+                        ]
+                        parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+                        for idx, (_, _, tid) in enumerate(parallel_calls):
+                            result = parallel_results[idx]
+                            if isinstance(result, Exception):
+                                result = {"type": "tool_result", "tool_use_id": tid, "content": f"Error: {result}"}
+                            orig_idx = next(j for j, (_, _, t) in enumerate(tool_calls) if t == tid)
+                            tool_results[orig_idx] = result
 
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": output
-                        })
+                    # 串行执行写工具
+                    for n, i, tid in sequential_calls:
+                        result = await _execute_single_tool(n, i, tid, on_tool_check, on_tool_call, on_cancel_check, session_id, file_lock=_fl)
+                        orig_idx = next(j for j, (_, _, t) in enumerate(tool_calls) if t == tid)
+                        tool_results[orig_idx] = result
 
-                messages.append({"role": "user", "content": tool_results})
+                    tool_results = [r for r in tool_results if r is not None]
 
-                # 每轮自动压缩
-                messages = auto_compact(messages)
+                    messages.append({"role": "user", "content": tool_results})
 
-            except Exception as e:
-                error_str = str(e)
-                if "max_tokens" in error_str.lower():
-                    messages.append({"role": "user", "content": CONTINUATION_MESSAGE})
-                    continue
-                else:
-                    return f"Error: {e}"
+                    # 每轮自动压缩
+                    messages = auto_compact(messages)
 
-        return "(max turns reached)"
+                except WorkflowCancelledError:
+                    raise
+                except Exception as e:
+                    error_str = str(e)
+                    if "max_tokens" in error_str.lower():
+                        messages.append({"role": "user", "content": CONTINUATION_MESSAGE})
+                        continue
+                    else:
+                        return f"Error: {e}"
+
+            return "(max turns reached)"
     finally:
         await client.close()
 
@@ -1224,7 +1227,9 @@ async def agent_loop_stream(
     max_turns: int = 100,
     on_tool_check: Callable[[str, dict], Any] = None,
     on_tool_call: Callable[[str, dict, str], None] = None,
+    on_cancel_check: Callable[[], Any] = None,
     session_id: str = None,
+    runtime_context: dict[str, Any] | None = None,
 ):
     """
     Streaming agent loop - yields events as they happen.
@@ -1250,14 +1255,18 @@ async def agent_loop_stream(
 
     messages = auto_compact(messages)
     client = create_client()
+    context_token = _RUNTIME_CONTEXT.set(dict(runtime_context or {}))
 
     try:
         for turn in range(max_turns):
             try:
+                await _raise_if_cancelled(on_cancel_check)
                 _llm_start = _metrics.record_llm_call_start()
+                messages = _ensure_tool_result_sequence(messages)
 
                 # Use streaming API
-                stream = await client.messages.create(
+                stream = await _retryable_llm_call(
+                    client,
                     model=MODEL,
                     system=system,
                     messages=messages,
@@ -1269,6 +1278,7 @@ async def agent_loop_stream(
 
                 # Accumulate streaming response
                 text_blocks: list[str] = []
+                assistant_content: list[dict[str, Any]] = []
                 tool_blocks: list[dict] = []
                 current_block_type: str = ""
                 current_text: str = ""
@@ -1314,15 +1324,24 @@ async def agent_loop_stream(
                             pass
 
                     elif event_type == "content_block_stop":
-                        if current_block_type == "tool_use" and current_tool_id:
+                        if current_block_type == "text" and current_text:
+                            assistant_content.append({"type": "text", "text": current_text})
+                        elif current_block_type == "tool_use" and current_tool_id:
                             try:
                                 parsed_input = json.loads(current_tool_input) if current_tool_input else {}
                             except json.JSONDecodeError:
                                 parsed_input = {}
-                            tool_blocks.append({
+                            tool_block = {
                                 "id": current_tool_id,
                                 "name": current_tool_name,
                                 "input": parsed_input,
+                            }
+                            tool_blocks.append(tool_block)
+                            assistant_content.append({
+                                "type": "tool_use",
+                                "id": tool_block["id"],
+                                "name": tool_block["name"],
+                                "input": tool_block["input"],
                             })
                             yield ("tool_input", current_tool_name, parsed_input)
 
@@ -1336,74 +1355,49 @@ async def agent_loop_stream(
 
                 # Build assistant message for conversation history
                 full_text = "".join(text_blocks)
-                assistant_content = []
-                for tb in tool_blocks:
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": tb["id"],
-                        "name": tb["name"],
-                        "input": tb["input"],
-                    })
-                if full_text:
-                    assistant_content.append({"type": "text", "text": full_text})
                 messages.append({"role": "assistant", "content": assistant_content})
 
+                await _raise_if_cancelled(on_cancel_check)
                 if stop_reason != "tool_use":
                     yield ("done", full_text)
                     return
 
-                # Process tool calls
-                tool_results = []
-                for tb in tool_blocks:
-                    tool_name = tb["name"]
-                    tool_input = tb["input"]
-                    tool_id = tb["id"]
-                    decision = await _call_tool_check(on_tool_check, tool_name, tool_input)
-                    allowed, reason = _tool_policy_allows(decision)
+                # Process tool calls: read-only tools parallel, write tools sequential (with file lock)
+                _ctx = get_runtime_context()
+                _fl = _ctx.get("file_lock")
+                parallel_calls = [tb for tb in tool_blocks if tb["name"] in PARALLEL_TOOLS]
+                sequential_calls = [tb for tb in tool_blocks if tb["name"] not in PARALLEL_TOOLS]
 
-                    if not allowed:
-                        output = f"Error: Tool policy blocked: {reason}"
-                        _metrics.record_tool_failure(tool_name, output)
-                    elif tool_name == "task":
-                        output = await run_subagent(
-                            tool_input.get("prompt", ""),
-                            agent_type=tool_input.get("agent_type", "Explore"),
-                        )
-                        _metrics.record_tool_success(tool_name)
-                    else:
-                        try:
-                            handler = TOOL_HANDLERS.get(tool_name, lambda **kw: f"Unknown: {tool_name}")
-                            if not isinstance(tool_input, dict):
-                                output = f"Error: Invalid tool input format"
-                                _metrics.record_tool_failure(tool_name, output)
-                            else:
-                                output = str(handler(**tool_input))[:50000]
-                                if output.startswith("Error:"):
-                                    _metrics.record_tool_failure(tool_name, output)
-                                    from src.agent.learner import get_learner
-                                    learner = get_learner()
-                                    learner.on_tool_failure(tool_name, tool_input, output, session_id)
-                                else:
-                                    _metrics.record_tool_success(tool_name)
-                                    from src.agent.learner import get_learner
-                                    learner = get_learner()
-                                    learner.on_tool_success(tool_name, tool_input, output)
-                        except Exception as tool_err:
-                            output = f"Error: {tool_err}"
-                            _metrics.record_tool_failure(tool_name, str(tool_err))
+                tool_results = [None] * len(tool_blocks)
+                tb_by_id = {tb["id"]: i for i, tb in enumerate(tool_blocks)}
 
-                    yield ("tool_result", tool_name, tool_input, output)
-                    if on_tool_call:
-                        on_tool_call(tool_name, tool_input, output)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": output,
-                    })
+                # Parallel execution of read-only tools
+                if parallel_calls:
+                    parallel_tasks = [
+                        _execute_single_tool(tb["name"], tb["input"], tb["id"], on_tool_check, on_tool_call, on_cancel_check, session_id, file_lock=_fl)
+                        for tb in parallel_calls
+                    ]
+                    parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+                    for idx, tb in enumerate(parallel_calls):
+                        result = parallel_results[idx]
+                        if isinstance(result, Exception):
+                            result = {"type": "tool_result", "tool_use_id": tb["id"], "content": f"Error: {result}"}
+                        tool_results[tb_by_id[tb["id"]]] = result
+                        yield ("tool_result", tb["name"], tb["input"], result["content"])
+
+                # Sequential execution of write tools
+                for tb in sequential_calls:
+                    result = await _execute_single_tool(tb["name"], tb["input"], tb["id"], on_tool_check, on_tool_call, on_cancel_check, session_id, file_lock=_fl)
+                    tool_results[tb_by_id[tb["id"]]] = result
+                    yield ("tool_result", tb["name"], tb["input"], result["content"])
+
+                tool_results = [r for r in tool_results if r is not None]
 
                 messages.append({"role": "user", "content": tool_results})
                 messages = auto_compact(messages)
 
+            except WorkflowCancelledError:
+                raise
             except Exception as e:
                 error_str = str(e)
                 if "max_tokens" in error_str.lower():
@@ -1415,6 +1409,7 @@ async def agent_loop_stream(
         yield ("done", "(max turns reached)")
         return
     finally:
+        _RUNTIME_CONTEXT.reset(context_token)
         await client.close()
 
 
@@ -1422,8 +1417,8 @@ async def agent_loop_stream(
 __all__ = [
     "agent_loop", "agent_loop_stream", "run_subagent",
     "RunSession", "get_run_session", "cleanup_run_session",
-    "BASE_TOOLS", "TODO_TOOLS", "TASK_TOOLS", "SUBAGENT_TOOLS", "ALL_TOOLS", "TOOLS",
-    "TOOL_HANDLERS",
+    "BASE_TOOLS", "TODO_TOOLS", "TASK_TOOLS", "SUBAGENT_TOOLS", "AGENT_RUNTIME_TOOLS", "ALL_TOOLS", "TOOLS",
+    "TOOL_HANDLERS", "handle_spawn_agent", "bind_runtime_context", "get_runtime_context",
     "TodoManager", "TaskManager", "BackgroundManager",
     "SystemPromptBuilder", "DYNAMIC_BOUNDARY",
     "auto_compact", "micro_compact", "backoff_delay",

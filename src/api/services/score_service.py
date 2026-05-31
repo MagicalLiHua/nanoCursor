@@ -1,4 +1,4 @@
-"""Delivery scoring service for AgentHub runs."""
+"""Delivery scoring service for nanoCursor runs."""
 
 from __future__ import annotations
 

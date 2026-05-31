@@ -38,6 +38,25 @@ class MetricsCollector:
         self.recent_tool_records: list[dict] = []
         self.output_file = output_file
 
+    def reset(self):
+        """重置所有指标（每次新运行开始时调用）。"""
+        with self._lock:
+            self.llm_calls = 0
+            self.total_input_tokens = 0
+            self.total_output_tokens = 0
+            self.total_llm_tokens = 0
+            self.total_llm_latency_ms = 0
+            self.llm_latency_records = []
+            self.tool_calls = 0
+            self.tool_successes = 0
+            self.tool_failures = 0
+            self.tool_failure_reasons = []
+            self.repair_cycles = 0
+            self.repair_cycle_outcomes = []
+            self.recent_supervisor_decisions = []
+            self.recent_llm_records = []
+            self.recent_tool_records = []
+
     # ----- LLM 指标 -----
 
     def record_llm_call_start(self) -> float:

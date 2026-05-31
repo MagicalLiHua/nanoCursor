@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.api.services.intent_router import classify_user_intent
 from src.api.services.mcp_status_service import get_mcp_server_status
 
 
@@ -158,7 +159,7 @@ RECOMMENDATION_RULES = [
     },
     {
         "id": "quality",
-        "keywords": ["测试", "验证", "质量", "复核", "review", "bug", "修复", "报错", "异常", "回归"],
+        "keywords": ["测试", "验证", "质量", "复核", "审查", "风险", "diff", "review", "bug", "修复", "报错", "异常", "回归"],
         "agents": ["Tester", "Reviewer", "Coder"],
         "capabilities": ["skill.delivery-review", "tool.project_index", "tool.recovery"],
         "reason": "需求涉及质量或缺陷修复，需要测试、复核和可恢复保障。",
@@ -404,11 +405,30 @@ def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dic
     hub = build_capability_hub(workspace_dir)
     by_id = {item["id"]: item for item in hub["capabilities"]}
     prompt_text = (prompt or "").lower()
+    intent = classify_user_intent(prompt)
     matched = [
         rule
         for rule in RECOMMENDATION_RULES
         if any(keyword.lower() in prompt_text for keyword in rule["keywords"])
     ]
+    if intent["route"] == "lead_direct_reply" and not matched:
+        matched = [
+            {
+                "id": "lead_direct",
+                "agents": ["Lead"],
+                "capabilities": [],
+                "reason": intent["rationale"],
+            }
+        ]
+    elif not matched and intent["requires_workspace_write"]:
+        matched = [
+            {
+                "id": "code_task",
+                "agents": ["Lead", "Coder"],
+                "capabilities": ["tool.project_index", "tool.file_ops", "skill.delivery-review"],
+                "reason": intent["rationale"],
+            }
+        ]
     if not matched:
         matched = [
             {
@@ -453,6 +473,7 @@ def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dic
     mcp_plan = build_mcp_execution_plan(capability_ids, capabilities, workspace_dir)
     return {
         "prompt": prompt,
+        "intent": intent,
         "summary": {
             "agent_count": len(agent_names),
             "capability_count": len(capabilities),

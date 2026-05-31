@@ -1,4 +1,4 @@
-"""Dynamic AgentHub execution orchestration."""
+"""Dynamic nanoCursor execution orchestration."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ CAPABILITY_TOOL_MAP = {
     "tool.file_ops": ["read_file", "write_file", "edit_file"],
     "tool.project_index": ["project_context", "search_codebase", "list_directory", "read_file"],
     "tool.memory": ["recall_memories", "add_memory"],
+    "tool.agent_runtime": ["spawn_agent"],
     "tool.recovery": ["bash"],
     "skill.frontend-polish": ["read_file", "edit_file", "write_file"],
     "skill.delivery-review": ["bash", "task_update"],
@@ -31,7 +32,7 @@ CAPABILITY_TOOL_MAP = {
     "mcp.github": ["mcp_call", "bash"],
 }
 
-BASE_RECOMMENDED_TOOLS = ["task_create", "task_update", "task_list"]
+BASE_RECOMMENDED_TOOLS = ["task_create", "task_update", "task_list", "spawn_agent"]
 
 BUILTIN_SKILL_PLAYBOOKS = {
     "skill.frontend-polish": (
@@ -137,6 +138,7 @@ def build_tool_policy(capability_ids: list[str] | None = None) -> dict[str, Any]
                 recommended_tools.append(tool)
 
     notes = ["当前策略为 recommend_only：优先推荐这些工具，但不硬性阻断其他必要工具。"]
+    notes.append("运行时会按权限等级执行审批：risky_write、shell_risky、external_risky 必须用户确认。")
     if unmatched:
         notes.append(f"未匹配到工具映射的能力: {', '.join(unmatched[:8])}。")
     if planned_mcp:
@@ -214,48 +216,58 @@ def build_execution_plan(
     prompt: str,
     team: list[dict[str, Any]] | None = None,
     workspace_dir: str | None = None,
+    strategy_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build a team-aware execution plan for one run."""
+    """Build a team-aware execution plan for one run.
+
+    If strategy_id is provided, uses it directly instead of keyword classification.
+    """
     members = list(team or [])
+    strategy_id = strategy_id or select_strategy(prompt)
+    strategy_def = get_strategy_definition(strategy_id)
+    strategy_stage_ids = [str(item) for item in strategy_def.get("stages", [])]
+    required_roles = {str(item) for item in strategy_def.get("required_roles", [])}
     lead = _find_member(members, "lead", "Lead")
     planner = _find_member(members, "planner", "Planner")
     coder = _find_member(members, "coder", "Coder")
     tester = _find_member(members, "tester", "Tester")
 
-    stages = [
-        _stage(
+    base_stages = {
+        "intake": _stage(
             "intake",
             "接收需求与上下文定界",
             lead,
             "确认本轮任务目标、工作区边界和需要保留的用户约束。",
             ["tool.memory"],
         ),
-        _stage(
+        "plan": _stage(
             "plan",
             "任务拆解与验收标准",
             planner,
             "把需求拆成可执行任务、验收点和风险控制点。",
             ["tool.project_index"],
         ),
-        _stage(
+        "implement": _stage(
             "implement",
             "代码实现与文件变更",
             coder,
             "按计划执行代码修改，并保持变更可追踪。",
             ["tool.file_ops", "tool.project_index"],
         ),
-        _stage(
+        "verify": _stage(
             "verify",
             "验证与交付复核",
             tester,
             "运行检查、复核需求覆盖，并整理交付证据。",
             ["skill.delivery-review", "tool.recovery"],
         ),
-    ]
+    }
+    stages = [base_stages[stage_id] for stage_id in strategy_stage_ids if stage_id in base_stages]
 
     risks: list[dict[str, str]] = []
+    allows_delivery_optional = any(stage_id in strategy_stage_ids for stage_id in ["implement", "verify"])
 
-    if any(_matches_role(member, "designer") for member in members):
+    if allows_delivery_optional and any(_matches_role(member, "designer") for member in members):
         designer = _find_member(members, "designer", "Designer")
         stages.insert(
             2,
@@ -269,7 +281,7 @@ def build_execution_plan(
             ),
         )
 
-    if any(_matches_role(member, "reviewer") for member in members):
+    if allows_delivery_optional and any(_matches_role(member, "reviewer") for member in members):
         reviewer = _find_member(members, "reviewer", "Reviewer")
         stages.append(
             _stage(
@@ -282,7 +294,7 @@ def build_execution_plan(
             )
         )
 
-    if any(_matches_role(member, "devops") for member in members):
+    if allows_delivery_optional and any(_matches_role(member, "devops") for member in members):
         devops = _find_member(members, "devops", "DevOps")
         stages.append(
             _stage(
@@ -295,17 +307,17 @@ def build_execution_plan(
             )
         )
 
-    if not any(_matches_role(member, "tester") for member in members):
+    if "tester" in required_roles and not any(_matches_role(member, "tester") for member in members):
         risks.append(_risk("medium", "缺少测试 Agent", "当前团队没有明显 Tester / QA 角色，验证阶段会由 Lead 兜底。"))
-    if not any(_matches_role(member, "coder") for member in members):
+    if "coder" in required_roles and not any(_matches_role(member, "coder") for member in members):
         risks.append(_risk("high", "缺少实现 Agent", "当前团队没有明显 Coder / Developer 角色，代码实现能力不足。"))
     if any("planned" in str(capability).lower() for member in members for capability in member.get("capabilities", [])):
         risks.append(_risk("medium", "存在待接入能力", "部分能力尚未配置，执行时会使用本地工具和结构化提示兜底。"))
     if not risks:
-        risks.append(_risk("low", "常规交付风险", "按团队编排执行，重点关注 Diff、测试和需求覆盖。"))
-
-    strategy_id = select_strategy(prompt)
-    strategy_def = get_strategy_definition(strategy_id)
+        if strategy_id in {"analysis_only", "docs_only"}:
+            risks.append(_risk("low", "只读任务风险", "本轮不进入代码实现阶段，重点关注上下文完整性和结论可追溯。"))
+        else:
+            risks.append(_risk("low", "常规交付风险", "按团队编排执行，重点关注 Diff、测试和需求覆盖。"))
 
     capability_ids = _capability_ids_from_stages(stages)
     tool_policy_obj = get_tool_policy(strategy_id)
@@ -340,6 +352,28 @@ def build_execution_plan(
     }
 
 
+async def build_execution_plan_async(
+    prompt: str,
+    team: list[dict[str, Any]] | None = None,
+    workspace_dir: str | None = None,
+    conversation_summary: str = "",
+) -> dict[str, Any]:
+    """Build execution plan with LLM-assisted strategy selection."""
+    from src.agent.strategy.planner import select_strategy_async
+
+    strategy_id, llm_result = await select_strategy_async(prompt, conversation_summary)
+    plan = build_execution_plan(prompt, team=team, workspace_dir=workspace_dir, strategy_id=strategy_id)
+
+    if llm_result:
+        plan.setdefault("summary", {})["llm_classification"] = {
+            "strategy": llm_result["strategy"],
+            "complexity": llm_result["complexity"],
+            "confidence": llm_result["confidence"],
+            "rationale": llm_result["rationale"],
+        }
+    return plan
+
+
 def tasks_from_execution_plan(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert execution stages into frontend task cards."""
     tasks: list[dict[str, Any]] = []
@@ -372,7 +406,7 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
 
     lines = [
         "",
-        "【AgentHub 动态执行编排】",
+        "【nanoCursor 动态执行编排】",
         f"- 执行策略: {execution_plan.get('strategy', 'team_aware_run_per_message')}",
         "- 你必须按下列阶段推进，并在关键节点使用 task_create / task_update 记录任务状态。",
     ]
@@ -431,7 +465,10 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
     lines.extend(
         [
             "- 工具使用策略:",
+            "  - 权限分级: read_only 可直接读取/搜索；safe_write 只允许写工作区内文件；risky_write、shell_risky、external_risky 必须等待用户审批。",
+            "  - Shell 分级: 测试、lint、只读查看命令优先直接执行；安装依赖、git 操作、网络请求、删除/移动文件属于高风险。",
             "  - 开始实现前，先用 task_create 为每个阶段创建任务。",
+            "  - 复杂、跨领域或需要独立复核的阶段，优先用 spawn_agent 创建本轮临时 Agent，并声明 role、goal、tools、capabilities、task_scope、expected_output；需要即时专项分析时设置 run_now=true。",
             "  - 需要理解项目时优先使用 project_context / search_codebase / list_directory / read_file。",
             "  - MCP 计划中标记为可用的 server，可以在用户审批后通过 mcp_call 调用；不可用或未配置时不要硬调用。",
             "  - 写代码时优先使用 write_file / edit_file，并保持变更小而可审查。",

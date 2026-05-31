@@ -20,86 +20,22 @@ from typing import Any
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
-from src.infra.messages import HumanMessage
+from src.infra.messages import AIMessage, HumanMessage
 
-# Import Pydantic API models
 from src.api.models import (
     AgentEvent,
-    AgentStateResponse,
-    ArtifactCenterResponse,
-    BackupContentResponse,
-    BackupEntry,
-    BackupListResponse,
-    BenchmarkListResponse,
     BenchmarkRunRequest,
-    BenchmarkRunResponse,
     CancelResponse,
-    CapabilityRecommendRequest,
-    CodeFile,
-    ConfigResponse,
-    ContextPackRequest,
     ConversationCreateRequest,
     ConversationRunRequest,
     ConversationTeamRecommendRequest,
     ConversationTeamUpdateRequest,
-    EnvVar,
-    FileContentResponse,
-    FileEntry,
-    FileListResponse,
-    ApprovalDecisionRequest,
-    GitCommitRequest,
-    LLMProviderStatus,
-    McpEnabledRequest,
-    McpConfigResponse,
-    McpPresetInstallRequest,
-    McpServerUpsertRequest,
-    McpToolCallRequest,
-    McpValidateRequest,
     Message,
-    PolicyDecisionRecordRequest,
-    SkillDetailResponse,
-    SkillUpdateRequest,
-    MetricsCurrentResponse,
-    MetricsLLMData,
-    MemoryProfileResponse,
-    MetricsRepairData,
-    MetricsResponse,
-    MetricsToolData,
-    DeliveryScoreResponse,
-    QualityGateResponse,
-    PreferenceCreateRequest,
-    RecoveryActionRequest,
-    RecoveryActionResponse,
-    RecoveryCenterResponse,
-    RemediationRunRequest,
-    RequirementTraceabilityResponse,
-    WorkspaceHealth,
-    WorkspaceIdentity,
-    RollbackRequest,
-    RollbackResponse,
-    RunHistoryResponse,
-    RunEventsResponse,
+    RetryRunRequest,
     RunRequest,
     RunResponse,
-    RunSessionResponse,
-    SkillImportRequest,
-    SnapshotDetailResponse,
-    SnapshotEntry,
-    SnapshotListResponse,
-    SnapshotMetadata,
-    SystemConfig,
-    TeamAgentCreateRequest,
-    ToolApprovalResolveRequest,
 )
-
-
-class BashRequest(BaseModel):
-    """Bash command execution request"""
-    command: str
-    workspace_dir: str | None = None
-    timeout: int = 120
 
 
 # Ensure project root is in sys.path
@@ -111,7 +47,8 @@ if ROOT not in sys.path:
 from src.api.app import create_app
 app = create_app()
 
-from src.agent.engine import agent_loop, run_subagent, TOOLS, get_workdir, MODEL
+from src.agent.engine import agent_loop, agent_loop_stream, run_subagent, TOOLS, get_workdir
+from src.agent.file_lock import get_file_lock, cleanup_file_lock
 import src.infra.config as config_module
 from src.infra.metrics import metrics as metrics_collector
 
@@ -154,60 +91,290 @@ def _workspace_for_thread(thread_id: str) -> str:
     return _get_workspace()
 
 
-def _audit_route_action(
-    *,
-    thread_id: str,
-    workspace_dir: str,
-    kind: str,
-    target: str = "",
-    decision: str = "",
-    result: str = "",
-    reason: str = "",
-    detail: dict[str, Any] | None = None,
-) -> None:
-    """Best-effort audit for route-level actions outside the action pipeline."""
+def _session_for_thread(thread_id: str) -> dict[str, Any] | None:
+    """Resolve a run session from the active workspace, runtime index, or recent projects."""
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        workspace_dir = run_info.get("workspace_dir") if run_info else None
+    if workspace_dir:
+        session = event_store.get_session(thread_id, workspace_dir)
+        if session:
+            return session
+
     try:
-        get_audit_repo().append(
-            AuditRecord(
-                audit_id=f"audit_{uuid.uuid4().hex[:12]}",
-                thread_id=thread_id,
-                action_id=f"route_{uuid.uuid4().hex[:12]}",
-                kind=kind,
-                target=target,
-                decision=decision,
-                result=result,
-                reason=reason,
-                detail=detail or {},
-                created_at=_time.time(),
-            ),
-            workspace_dir,
-        )
+        indexed_workspace = event_store.workspace_for_thread(thread_id)
+    except Exception:
+        indexed_workspace = None
+    if indexed_workspace:
+        session = event_store.get_session(thread_id, indexed_workspace)
+        if session:
+            return session
+
+    try:
+        current_workspace = str(Path(_get_workspace()).resolve())
+        session = event_store.get_session(thread_id, current_workspace)
+        if session:
+            return session
+    except Exception:
+        pass
+
+    try:
+        from src.api.services.workspace_registry_service import list_recent_projects
+        for item in list_recent_projects():
+            candidate = item.get("path") if isinstance(item, dict) else None
+            if not candidate:
+                continue
+            session = event_store.get_session(thread_id, candidate)
+            if session:
+                return session
+    except Exception:
+        pass
+    return None
+
+
+def _should_cancel_run(thread_id: str) -> bool:
+    sm = run_manager.get_state_machine(thread_id)
+    if sm and sm.status in {
+        RunStatus.CANCELLING,
+        RunStatus.CANCELLED,
+        RunStatus.FAILED,
+        RunStatus.INTERRUPTED,
+    }:
+        _cancel_agent_pool(thread_id)
+        return True
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
+        should_cancel = bool(run_info and run_info.get("status") in {"cancelling", "cancelled", "failed", "interrupted"})
+    if should_cancel:
+        _cancel_agent_pool(thread_id)
+    return should_cancel
+
+
+def _cancel_agent_pool(thread_id: str):
+    """Cancel all sub-agents when a run is being cancelled."""
+    try:
+        from src.agent.agent_pool import get_pool
+        pool = get_pool(thread_id)
+        if pool:
+            pool.cancel_all()
     except Exception:
         pass
 
 
+def _retry_context_for_run(
+    thread_id: str,
+    workspace_dir: str,
+    failure_id: str | None = None,
+) -> dict[str, Any]:
+    """Collect compact failure/lifecycle evidence for a retry run."""
+    session = _session_for_thread(thread_id) or {}
+    lifecycle = session.get("lifecycle") if isinstance(session.get("lifecycle"), dict) else {}
+    failures: list[Any] = []
+    try:
+        from src.api.services.failure_classifier_service import load_failures, save_failures
+        failures = load_failures(thread_id, workspace_dir)
+        if not failures and session.get("status") == "failed":
+            failures = save_failures(thread_id, workspace_dir)
+    except Exception:
+        failures = []
+
+    selected_failure = None
+    if failure_id:
+        selected_failure = next((item for item in failures if item.failure_id == failure_id), None)
+    if selected_failure is None and failures:
+        selected_failure = failures[0]
+
+    events = event_store.list_events(thread_id, workspace_dir)
+    error_events = [event for event in events if event.type in {"error", "tool_policy_blocked", "test_finished"}]
+    latest_errors = error_events[-3:]
+    failed_stage_id = lifecycle.get("failed_stage_id")
+    stages = session.get("execution_plan", {}).get("stages", []) if isinstance(session.get("execution_plan"), dict) else []
+    failed_stage = next(
+        (stage for stage in stages if isinstance(stage, dict) and stage.get("id") == failed_stage_id),
+        None,
+    )
+
+    return {
+        "status": session.get("status", ""),
+        "failed_stage_id": failed_stage_id or "",
+        "failed_stage": failed_stage or {},
+        "failure": selected_failure.model_dump() if selected_failure else {},
+        "recent_errors": [
+            {
+                "type": event.type,
+                "title": event.title,
+                "content": event.content[:800],
+                "payload": event.payload,
+            }
+            for event in latest_errors
+        ],
+    }
+
+
+def _build_retry_prompt(
+    *,
+    original_prompt: str,
+    original_thread_id: str,
+    original_status: str,
+    retry_mode: str,
+    retry_context: dict[str, Any],
+    instruction: str = "",
+) -> str:
+    failed_stage = retry_context.get("failed_stage") or {}
+    failure = retry_context.get("failure") or {}
+    recent_errors = retry_context.get("recent_errors") or []
+    lines = [
+        "这是一次 nanoCursor 重试运行，请基于原始需求和失败证据继续完成任务。",
+        "",
+        f"原始 Run: {original_thread_id}",
+        f"原始状态: {original_status}",
+        f"重试模式: {retry_mode}",
+        "",
+        "原始需求:",
+        original_prompt or "(无原始需求)",
+    ]
+    if retry_mode == "failed_stage" and failed_stage:
+        lines.extend([
+            "",
+            "优先重试失败阶段:",
+            f"- 阶段: {failed_stage.get('title') or failed_stage.get('id')}",
+            f"- 负责人: {failed_stage.get('owner') or 'Lead'}",
+            f"- 失败原因: {failed_stage.get('failure') or retry_context.get('failed_stage_id') or '未知'}",
+        ])
+    if failure:
+        evidence = failure.get("evidence") if isinstance(failure.get("evidence"), dict) else {}
+        lines.extend([
+            "",
+            "失败分类:",
+            f"- 类型: {failure.get('failure_class') or 'unknown'}",
+            f"- 标题: {failure.get('title') or '运行失败'}",
+            f"- 证据: {json.dumps(evidence, ensure_ascii=False)[:1200]}",
+        ])
+    if recent_errors:
+        lines.append("\n最近错误事件:")
+        for event in recent_errors:
+            lines.append(f"- [{event.get('type')}] {event.get('title')}: {event.get('content')}")
+    if instruction.strip():
+        lines.extend(["", "用户补充指令:", instruction.strip()])
+    lines.extend([
+        "",
+        "执行要求:",
+        "- 不要盲目重复上次失败路径，先复盘失败原因。",
+        "- 只修改和本次需求相关的文件。",
+        "- 如涉及代码修改，完成后给出验证命令和结果。",
+        "- 最终回复说明本次重试相对原 run 的修复点、风险和下一步。",
+    ])
+    return "\n".join(lines)
+
+
+def _messages_for_run(messages: list[Message] | None, prompt: str) -> list[Any]:
+    history: list[Any] = []
+    for message in (messages or [])[-12:]:
+        role = str(message.role or "user").lower()
+        content = str(message.content or "").strip()
+        if not content:
+            continue
+        if role == "assistant":
+            history.append(AIMessage(content=content))
+        else:
+            history.append(HumanMessage(content=content))
+    history.append(HumanMessage(content=prompt))
+    return history
+
+
+def _is_simple_lead_message(prompt: str) -> bool:
+    return is_lead_direct_intent(prompt)
+
+
+def _lead_only_execution_plan(prompt: str, workspace_dir: str, team: list[dict[str, Any]]) -> dict[str, Any]:
+    lead = team[0] if team else {"name": "Lead", "role": "lead"}
+    stage = {
+        "id": "lead_reply",
+        "title": "Lead 直接回复",
+        "owner": lead.get("name") or "Lead",
+        "owner_role": lead.get("role") or "lead",
+        "description": "判断为轻量对话，不启动完整交付流水线；由 Lead 结合当前上下文直接回复。",
+        "capabilities": ["tool.memory"],
+        "required": True,
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "failed_at": None,
+        "tool_evidence": [],
+        "failure": None,
+    }
+    return {
+        "prompt": prompt,
+        "workspace_dir": workspace_dir,
+        "strategy": "lead_direct_reply",
+        "strategy_definition": {
+            "id": "lead_direct_reply",
+            "label": "Lead direct reply",
+            "description": "轻量消息只由 Lead 处理，避免每次都走完整 Planner/Coder/Tester 流程。",
+        },
+        "agents": [lead.get("name") or "Lead"],
+        "stages": [stage],
+        "tasks": [
+            {
+                "id": "stage-01-lead_reply",
+                "title": stage["title"],
+                "description": stage["description"],
+                "status": "pending",
+                "owner": stage["owner"],
+                "capabilities": stage["capabilities"],
+                "dependencies": [],
+            }
+        ],
+        "risks": [],
+        "capabilities": ["tool.memory"],
+        "tool_policy": {
+            "mode": "approval_required",
+            "recommended_tools": [],
+            "requires_approval": ["bash", "write_file", "edit_file", "delete_file", "mcp_call"],
+            "blocked_tools": [],
+            "budgets": {"max_tool_calls": 4, "max_file_writes": 0, "max_test_runs": 0},
+            "notes": ["轻量对话默认不执行文件修改和命令。"],
+        },
+        "skill_context": [],
+        "mcp_plan": [],
+        "summary": {
+            "agent_count": len(team) or 1,
+            "stage_count": 1,
+            "capability_count": 1,
+            "recommended_tool_count": 0,
+            "skill_context_count": 0,
+            "mcp_count": 0,
+            "usable_mcp_count": 0,
+            "risk_count": 0,
+            "optional_stage_count": 0,
+        },
+    }
+
+
+def _readonly_subagent_tools() -> list[dict[str, Any]]:
+    allowed = {"read_file", "list_directory", "search_codebase", "project_context", "git_status", "git_diff"}
+    return [tool for tool in TOOLS if tool.get("name") in allowed]
+
+
+async def _run_readonly_subagent(
+    prompt: str,
+    system: str,
+    agent_type: str,
+    tools: list[dict[str, Any]] | None = None,
+) -> str:
+    return await run_subagent(
+        prompt=prompt,
+        system=system,
+        agent_type=agent_type,
+        tools=tools or _readonly_subagent_tools(),
+    )
+
+
 from src.agent.state import WorkflowCancelledError
-from src.api.services.agenthub_state import add_team_member, list_task_items, list_team_members
-from src.api.services.artifact_service import build_artifact_center
-from src.api.services.benchmark_service import emit_benchmark_run, get_benchmark, list_benchmarks
-from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
-from src.api.services.mcp_service import (
-    install_mcp_server_preset,
-    list_mcp_server_presets,
-    list_mcp_servers,
-    upsert_mcp_server_config,
-    validate_mcp_config,
-)
-from src.api.services.mcp_status_service import get_mcp_server_status, get_mcp_status, set_mcp_enabled, update_mcp_status
-from src.api.services.mcp_runtime_service import probe_mcp_server, list_mcp_tools, call_mcp_tool
-from src.api.services.skill_manifest_service import (
-    list_skill_versions, parse_skill_manifest, restore_skill_version,
-    save_skill_version, validate_skill_content,
-)
-from src.api.services.capability_usage_service import build_capability_usage
-from src.api.services.skill_service import delete_workspace_skill, get_skill_detail, update_workspace_skill
+from src.api.services.benchmark_service import emit_benchmark_run, list_benchmarks
 from src.api.services.conversation_service import (
     create_conversation,
+    compose_runtime_team_async,
     finalize_conversation_run,
     get_conversation,
     link_run_to_conversation,
@@ -215,44 +382,28 @@ from src.api.services.conversation_service import (
     refresh_conversation_recommendation,
     update_conversation_team,
 )
+from src.api.services.intent_router import is_lead_direct_intent
 from src.api.services.demo_run import DEMO_PROMPT, emit_demo_run, write_demo_artifacts
-from src.api.services.diff_service import get_run_diff
 from src.api.services.event_store import get_event_store
-from src.api.services.sse_broker import get_sse_broker, stream_events_push, patch_event_store_for_push
+from src.api.services.sse_broker import stream_events_push, patch_event_store_for_push, get_sse_broker
 # Enable push-based SSE: all events are automatically broadcast to connected clients
 patch_event_store_for_push()
-from src.api.services.orchestration_service import build_execution_plan, build_runtime_instructions
-from src.api.services.quality_service import build_quality_gate
-from src.api.services.preference_service import add_preference_memory, build_memory_profile
-from src.api.services.recovery_action_service import execute_recovery_action
-from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
-from src.api.services.report_service import build_delivery_report
+from src.api.services.orchestration_service import build_execution_plan_async, build_runtime_instructions
+from src.api.services.change_tracker import ChangeTracker
+from src.api.services.parallel_agent_service import run_parallel_agent_briefing
 from src.api.services.run_history import list_run_history_with_active
 from src.api.services.run_context import RunContext
-from src.api.services.score_service import build_delivery_score
-from src.api.services.traceability_service import build_requirement_traceability
 from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
-from src.api.services.checkpoint_service import create_checkpoint, list_checkpoints, restore_checkpoint
 from src.api.services.context_service import build_context_pack
-from src.api.services.observability_service import build_run_observability, build_workspace_observability
-from src.api.services.git_sandbox_service import commit_branch, discard_branch, git_branch_status, prepare_git_branch
 from src.runtime.run_budget import RunBudget
 from src.runtime.run_manager import RunManager
-from src.runtime.run_state import RunStatus
+from src.runtime.run_state import RunStatus, TERMINAL_STATUSES
 from src.runtime.tool_policy_runtime import ToolPolicyRuntime
-from src.runtime.audit_log import AuditRecord, get_audit_repo
 from src.api.services.approval_service import (
     create_tool_approval,
     wait_for_approval_async,
-    get_tool_approval,
-    get_pending_approvals,
-    resolve_tool_approval,
 )
-from src.api.services.workspace_registry_service import get_workspace_identity, list_recent_projects, open_project
-from src.api.services.workspace_service import build_workspace_health, build_workspace_overview
-from src.api.services.workspace_settings_service import (
-    get_effective_settings, get_workspace_settings, save_workspace_settings, validate_settings,
-)
+from src.api.services.workspace_registry_service import list_recent_projects
 
 # Persistent metrics history file (project root, preserved across workspaces)
 METRICS_HISTORY_FILE = os.path.join(ROOT, "metrics_history.json")
@@ -269,15 +420,6 @@ run_manager = RunManager()
 active_runs = run_manager._active
 runs_lock = run_manager._lock
 event_store = get_event_store()
-
-
-def _approval_title(decision: str) -> str:
-    labels = {
-        "approved": "计划已批准",
-        "revise": "计划需调整",
-        "rejected": "计划已拒绝",
-    }
-    return labels.get(decision, "计划审批已记录")
 
 
 def _finalize_conversation_for_run(
@@ -319,7 +461,7 @@ def _emit_agenthub_event(
     legacy_event: dict[str, Any] | None = None,
     workspace_dir: str | None = None,
 ) -> AgentEvent:
-    """Persist a unified AgentHub event and optionally publish a legacy SSE event."""
+    """Persist a unified nanoCursor event and optionally publish a legacy SSE event."""
     if workspace_dir is None:
         with runs_lock:
             run_info = active_runs.get(thread_id)
@@ -345,6 +487,33 @@ def _emit_agenthub_event(
             q.put(json.dumps(enriched, ensure_ascii=False))
 
     return event
+
+
+def _emit_agent_activity(
+    *,
+    thread_id: str,
+    agent: str = "lead",
+    title: str,
+    content: str = "",
+    workspace_dir: str | None = None,
+    payload: dict[str, Any] | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> AgentEvent:
+    """Emit a user-facing progress heartbeat for perceptible runs."""
+    merged = dict(payload or {})
+    if input_tokens or output_tokens:
+        merged["input_tokens"] = input_tokens
+        merged["output_tokens"] = output_tokens
+    return _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="agent_activity",
+        title=title,
+        content=content,
+        agent=agent,
+        payload=merged,
+        workspace_dir=workspace_dir,
+    )
 
 
 def _sync_run_context(thread_id: str, workspace_dir: str) -> RunContext | None:
@@ -409,7 +578,7 @@ def _check_rate_limit(thread_id: str) -> tuple[bool, str]:
 
     with runs_lock:
         run_info = active_runs.get(thread_id)
-    if run_info and run_info.get("status") == "running":
+    if run_info and run_info.get("status") not in {"completed", "failed", "cancelled", "interrupted"}:
         return False, f"线程 {thread_id} 已有一个工作流在运行中，请等待完成后再试"
 
     last_times = _workflow_start_times.get(thread_id, [])
@@ -431,6 +600,22 @@ def _run_workflow(thread_id: str, initial_messages: list, workspace_dir: str, ma
     try:
         loop.run_until_complete(
             _run_workflow_async(thread_id, initial_messages, max_retries, max_coder_steps, workspace_dir)
+        )
+    finally:
+        loop.close()
+        try:
+            run_manager.unregister(thread_id)
+        except Exception:
+            pass
+
+
+def _run_workflow_from_messages(thread_id: str, messages: list, system: str, workspace_dir: str):
+    """Resume a run with pre-built messages and system prompt."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            _run_workflow_async_from_messages(thread_id, messages, system, workspace_dir)
         )
     finally:
         loop.close()
@@ -513,6 +698,7 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         workspace_dir = workspace_dir or run_info.get("workspace_dir")
         execution_plan = run_info.get("execution_plan", {})
         run_team = run_info.get("team", [])
+        conversation_id = run_info.get("conversation_id")
 
         tool_policy_data = execution_plan.get("tool_policy", {})
         if isinstance(tool_policy_data, dict):
@@ -526,31 +712,19 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             )
         else:
             policy_runtime = ToolPolicyRuntime()
+        change_tracker = ChangeTracker(thread_id, workspace_dir or _get_workspace())
+        current_run = active_runs.get(thread_id)
+        if current_run:
+            current_run["change_tracker"] = change_tracker
     workspace_dir = workspace_dir or _get_workspace()
 
     messages = [{"role": m.type if hasattr(m, 'type') else 'user', "content": m.content} for m in initial_messages]
 
     _wd = str(get_workdir())
-    system = f"""你是一个自动编程助手，在 {_wd} 工作目录。
-
-【重要】你运行在 Windows 系统上！使用 Windows 命令：
-- 用 `dir` 而不是 `ls`
-- 用 `type` 而不是 `cat`
-- 用 `del` 而不是 `rm`
-- 用 `copy` 而不是 `cp`
-
-你有以下工具：
-- bash: 执行 shell 命令（参数：command）
-- read_file: 读取文件（参数：path, limit 可选）
-- write_file: 写文件（参数：path, content）
-- edit_file: 编辑文件（参数：path, old_text, new_text）
-- list_directory: 列出目录内容（参数：path）
-
-注意：
-- 工作目录已经是 {_wd}，所以写文件名时直接用文件名，不要加 workspace/ 前缀
-- 例如：write_file(path="prime.py", content="...") 而不是 write_file(path="workspace/prime.py", content="...")
-- 读文件同理，直接写文件名
-"""
+    strategy = execution_plan.get("strategy", "feature_delivery")
+    from src.agent.prompt_builder import _build_core
+    system = _build_core(strategy)
+    system = f"{system}\n\n注意：工作目录已经是 {_wd}，写文件名时直接用文件名，不要加 workspace/ 前缀。"
     runtime_instructions = build_runtime_instructions(execution_plan, run_team)
     if runtime_instructions:
         system = f"{system}\n{runtime_instructions}"
@@ -568,25 +742,105 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             },
             workspace_dir=workspace_dir,
         )
+    _emit_agent_activity(
+        thread_id=thread_id,
+        agent="lead",
+        title="Lead 正在判断任务复杂度",
+        content="正在结合执行策略、团队配置、上下文包和工具权限决定本轮怎么推进。",
+        workspace_dir=workspace_dir,
+        payload={
+            "phase": "complexity_assessment",
+            "strategy": execution_plan.get("strategy"),
+            "complexity": execution_plan.get("complexity", {}),
+        },
+    )
+    try:
+        context_pack = build_context_pack(
+            prompt=str(messages[-1].get("content", "")) if messages else "",
+            team=run_team,
+            workspace_dir=workspace_dir,
+            execution_plan=execution_plan,
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+        )
+        system = f"{system}\n\n{context_pack.to_text()}"
+        event_store.update_session(
+            thread_id,
+            workspace_dir,
+            context_pack=context_pack.to_dict(),
+        )
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="context_pack_built",
+            title="上下文包已构建",
+            content="已注入会话摘要、运行摘要、相关文件、最近变更、文件大纲和当前计划。",
+            agent="system",
+            payload={
+                "relevant_files": context_pack.relevant_files,
+                "recent_changes": context_pack.recent_changes,
+                "file_outline_count": len(context_pack.file_outlines),
+                "estimated_tokens": context_pack.estimate_tokens(),
+            },
+            workspace_dir=workspace_dir,
+        )
+        _emit_agent_activity(
+            thread_id=thread_id,
+            agent="lead",
+            title="Lead 已压缩上下文",
+            content=f"已选择 {len(context_pack.relevant_files)} 个相关文件、{len(context_pack.file_outlines)} 个文件大纲和最近变更。",
+            workspace_dir=workspace_dir,
+            payload={
+                "phase": "context_pack",
+                "relevant_files": context_pack.relevant_files,
+                "file_outline_count": len(context_pack.file_outlines),
+            },
+        )
+    except Exception as exc:
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="context_pack_failed",
+            title="上下文包构建失败",
+            content=str(exc),
+            agent="system",
+            payload={"error": str(exc)},
+            workspace_dir=workspace_dir,
+        )
 
     pending_policy_decisions = []
     approved_tools_for_run: set[str] = set()
+    run_input_tokens = 0
+    run_output_tokens = 0
 
     def _approval_wait_should_abort() -> bool:
-        sm = run_manager.get_state_machine(thread_id)
-        if sm and sm.status in {
-            RunStatus.CANCELLING,
-            RunStatus.CANCELLED,
-            RunStatus.FAILED,
-            RunStatus.INTERRUPTED,
-        }:
-            return True
-        with runs_lock:
-            run_info = active_runs.get(thread_id)
-            return bool(run_info and run_info.get("status") in {"cancelled", "failed", "interrupted"})
+        return _should_cancel_run(thread_id)
 
     async def on_tool_check(tool_name: str, tool_input: dict):
-        decision = policy_runtime.check(tool_name)
+        decision = policy_runtime.check(tool_name, tool_input)
+        trace = capability_trace_for_tool(tool_name)
+        target = (
+            tool_input.get("path")
+            or tool_input.get("filename")
+            or tool_input.get("command")
+            or tool_input.get("query")
+            or ""
+        ) if isinstance(tool_input, dict) else ""
+        action_text = f"准备调用 {tool_name}"
+        if target:
+            action_text = f"{action_text}: {str(target)[:120]}"
+        _emit_agent_activity(
+            thread_id=thread_id,
+            agent=str(trace.get("agent") or "lead"),
+            title=f"{trace.get('agent') or 'Agent'} 正在准备工具调用",
+            content=action_text,
+            workspace_dir=workspace_dir,
+            payload={
+                "phase": "tool_check",
+                "tool": tool_name,
+                "target": target,
+                "decision": decision.to_dict(),
+                "capability_trace": trace,
+            },
+        )
         if decision.allowed and decision.requires_approval and tool_name in approved_tools_for_run:
             decision.requires_approval = False
             decision.status = "auto_allowed"
@@ -622,6 +876,19 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
                 agent="system",
                 payload={"tool": tool_name, "decision": decision.to_dict()},
                 workspace_dir=workspace_dir,
+            )
+            _emit_agent_activity(
+                thread_id=thread_id,
+                agent="system",
+                title="等待用户批准高风险工具",
+                content=decision.reason,
+                workspace_dir=workspace_dir,
+                payload={
+                    "phase": "approval_wait",
+                    "tool": tool_name,
+                    "decision": decision.to_dict(),
+                    "can_cancel": True,
+                },
             )
             _emit_agenthub_event(
                 thread_id=thread_id, event_type="run_waiting_approval",
@@ -666,10 +933,28 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         return decision
 
     def on_tool_call(tool_name: str, tool_input: dict, output: str):
-        decision = pending_policy_decisions.pop(0) if pending_policy_decisions else policy_runtime.check(tool_name)
+        decision = pending_policy_decisions.pop(0) if pending_policy_decisions else policy_runtime.check(tool_name, tool_input)
         if not decision.allowed:
             return
-        policy_runtime.record(tool_name, ok=not str(output or "").startswith("Error:"))
+        ok_flag = not str(output or "").startswith("Error:")
+        adaptation = policy_runtime.record(tool_name, ok=ok_flag)
+        capability_trace = capability_trace_for_tool(tool_name)
+        # B6: Emit adaptation events
+        if adaptation:
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type="tool_policy_adapted",
+                title=f"策略自适应: {adaptation.get('type', '')}",
+                content=adaptation.get("reason", ""),
+                agent="system",
+                payload={**adaptation, "budget": policy_runtime.budget.to_dict()},
+                workspace_dir=workspace_dir,
+            )
+        # B5: Record file changes for cross-agent awareness
+        if tool_name in ("write_file", "edit_file"):
+            file_path = (tool_input or {}).get("file_path") or (tool_input or {}).get("path")
+            if file_path:
+                change_tracker.record_change(str(file_path), capability_trace["agent"], "modify")
         _emit_agenthub_event(
             thread_id=thread_id, event_type="tool_policy_checked",
             title=f"策略检查: {tool_name}",
@@ -678,8 +963,6 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             payload={"tool": tool_name, "decision": decision.to_dict(), "budget": policy_runtime.budget.to_dict()},
             workspace_dir=workspace_dir,
         )
-
-        capability_trace = capability_trace_for_tool(tool_name)
         with runs_lock:
             current_run = active_runs.get(thread_id)
             stage_updates = (
@@ -698,6 +981,22 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
                 if current_run
                 else None
             )
+        _emit_agent_activity(
+            thread_id=thread_id,
+            agent=capability_trace["agent"].lower(),
+            title=f"{capability_trace['agent']} 完成工具调用",
+            content=(output or "")[:240],
+            workspace_dir=workspace_dir,
+            payload={
+                "phase": "tool_finished",
+                "tool": tool_name,
+                "ok": not str(output or "").startswith("Error:"),
+                "stage_id": current_stage_id,
+                "capability_trace": capability_trace,
+            },
+            input_tokens=run_input_tokens,
+            output_tokens=run_output_tokens,
+        )
         _sync_run_context(thread_id, workspace_dir)
         _emit_stage_updates(thread_id, workspace_dir, stage_updates)
 
@@ -754,14 +1053,148 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
     final_status = "completed"
 
     try:
-        result = await agent_loop(
+        if _should_cancel_run(thread_id):
+            raise WorkflowCancelledError("Agent 运行已取消")
+        _emit_agent_activity(
+            thread_id=thread_id,
+            agent="lead",
+            title="Lead 正在创建临时只读分析",
+            content="复杂任务会先让临时子 Agent 做只读预分析，完成后自动合并并归档。",
+            workspace_dir=workspace_dir,
+            payload={"phase": "parallel_briefing"},
+        )
+        parallel_result = await run_parallel_agent_briefing(
+            thread_id=thread_id,
+            prompt=str(messages[-1].get("content", "")) if messages else "",
+            workspace_dir=workspace_dir,
+            execution_plan=execution_plan,
+            runner=_run_readonly_subagent,
+            emit_event=_emit_agenthub_event,
+            tools=_readonly_subagent_tools(),
+        )
+        parallel_briefing = parallel_result.get("briefing") if isinstance(parallel_result, dict) else ""
+        merge_guidance = parallel_result.get("merge_guidance") if isinstance(parallel_result, dict) else ""
+        parallel_context = "\n\n".join(str(item) for item in [parallel_briefing, merge_guidance] if item)
+        if parallel_context:
+            messages.append({"role": "user", "content": parallel_context})
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type="parallel_briefing_injected",
+                title="并行预分析已注入 Lead 上下文",
+                content="Lead 将结合临时子 Agent 的只读分析和合并策略继续执行主流程。",
+                agent="lead",
+                payload={
+                    "contribution_count": len(
+                        parallel_result.get("contributions", {}).get("contributions", [])
+                        if isinstance(parallel_result.get("contributions"), dict)
+                        else []
+                    ),
+                    "has_merge_guidance": bool(merge_guidance),
+                },
+                workspace_dir=workspace_dir,
+            )
+            _emit_agent_activity(
+                thread_id=thread_id,
+                agent="lead",
+                title="Lead 已合并临时 Agent 预分析",
+                content="只读预分析已经合并进主上下文，接下来进入主 Agent 循环。",
+                workspace_dir=workspace_dir,
+                payload={
+                    "phase": "parallel_briefing_merged",
+                    "has_merge_guidance": bool(merge_guidance),
+                },
+            )
+
+        if _should_cancel_run(thread_id):
+            raise WorkflowCancelledError("Agent 运行已取消")
+
+        def _on_llm_response(input_tokens: int, output_tokens: int):
+            nonlocal run_input_tokens, run_output_tokens
+            run_input_tokens += input_tokens
+            run_output_tokens += output_tokens
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type="metrics_updated",
+                title="Token 指标更新",
+                content=f"in={run_input_tokens} out={run_output_tokens}",
+                agent="lead",
+                payload={
+                    "total_input_tokens": run_input_tokens,
+                    "total_output_tokens": run_output_tokens,
+                    "total_tokens": run_input_tokens + run_output_tokens,
+                },
+                workspace_dir=workspace_dir,
+            )
+
+        _emit_agent_activity(
+            thread_id=thread_id,
+            agent="lead",
+            title="Lead 进入主循环",
+            content="正在根据任务复杂度决定直接回答、修改文件、运行检查或创建临时 Agent。",
+            workspace_dir=workspace_dir,
+            payload={"phase": "agent_loop", "can_cancel": True},
+        )
+        result = ""
+        _token_broker = get_sse_broker()
+        _token_counter = 0
+
+        def _agent_pool_status_callback(handle, event):
+            """Emit SSE events for agent pool status changes."""
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type=f"agent_{event}",
+                title=f"子 Agent {event}",
+                content=f"{handle.name} ({handle.role}) {event}",
+                agent=handle.name.lower().replace(" ", "_"),
+                payload={
+                    "agent_id": handle.agent_id,
+                    "name": handle.name,
+                    "role": handle.role,
+                    "status": handle.status,
+                    "event": event,
+                    "result": (handle.result or "")[:500] if handle.result else None,
+                    "error": handle.error,
+                },
+                workspace_dir=workspace_dir,
+            )
+
+        async for event_type, *event_data in agent_loop_stream(
             messages=messages,
             system=system,
             tools=TOOLS,
             max_turns=100,
             on_tool_check=on_tool_check,
             on_tool_call=on_tool_call,
-        )
+            on_cancel_check=lambda: _should_cancel_run(thread_id),
+            session_id=thread_id,
+            runtime_context={
+                "thread_id": thread_id,
+                "workspace_dir": workspace_dir,
+                "agent": "Lead",
+                "file_lock": get_file_lock(thread_id),
+                "pool_status_callback": _agent_pool_status_callback,
+            },
+        ):
+            if event_type == "token":
+                text = event_data[0]
+                result += text
+                _token_counter += 1
+                # Publish lightweight token event directly to broker (no disk persistence)
+                _token_broker.publish(thread_id, AgentEvent(
+                    id=f"{thread_id}-tok-{_token_counter}",
+                    thread_id=thread_id,
+                    type="token",
+                    timestamp=_time.time(),
+                    agent="lead",
+                    content=text,
+                    payload={"delta": text},
+                ))
+            elif event_type == "metrics":
+                inp, out = event_data[0], event_data[1]
+                _on_llm_response(inp, out)
+            elif event_type == "error":
+                raise RuntimeError(event_data[0])
+            # tool_start, tool_input, tool_result are handled by on_tool_call callback
         if result.lstrip().startswith("Error:"):
             raise RuntimeError(result.removeprefix("Error:").strip() or result)
         _emit_agenthub_event(
@@ -793,7 +1226,14 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "done", "status": "completed"},
             workspace_dir=workspace_dir,
         )
-        event_store.update_session(thread_id, workspace_dir, status="completed")
+        event_store.update_session(
+            thread_id,
+            workspace_dir,
+            status="completed",
+            summary=result[:2000],
+            execution_summary=result[:1200],
+            saved_messages=messages,
+        )
         _finalize_conversation_for_run(
             thread_id=thread_id,
             workspace_dir=workspace_dir,
@@ -818,7 +1258,14 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "done", "status": "cancelled"},
             workspace_dir=workspace_dir,
         )
-        event_store.update_session(thread_id, workspace_dir, status="cancelled")
+        event_store.update_session(
+            thread_id,
+            workspace_dir,
+            status="cancelled",
+            summary="Agent 运行已取消",
+            execution_summary="Agent 运行已取消",
+            saved_messages=messages,
+        )
         _finalize_conversation_for_run(
             thread_id=thread_id,
             workspace_dir=workspace_dir,
@@ -845,7 +1292,14 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "error", "message": str(e)},
             workspace_dir=workspace_dir,
         )
-        event_store.update_session(thread_id, workspace_dir, status="failed", error=str(e))
+        event_store.update_session(
+            thread_id,
+            workspace_dir,
+            status="failed",
+            error=str(e),
+            execution_summary=f"失败: {str(e)[:1000]}",
+            saved_messages=messages,
+        )
         # R4: classify and persist failures
         try:
             from src.api.services.failure_classifier_service import save_failures as _save_failures
@@ -875,6 +1329,170 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             pass
         run_manager.finalize(thread_id, final_status)
         run_manager.unregister(thread_id)
+        # Clean up agent pool
+        try:
+            from src.agent.agent_pool import cleanup_pool
+            cleanup_pool(thread_id)
+        except Exception:
+            pass
+        # Clean up file lock
+        try:
+            cleanup_file_lock(thread_id)
+        except Exception:
+            pass
+
+
+async def _run_workflow_async_from_messages(thread_id: str, messages: list, system: str, workspace_dir: str):
+    """Resume a run with pre-built messages and system prompt. Simplified version of _run_workflow_async."""
+    import time as _time_mod
+
+    final_status = "completed"
+    _token_broker = get_sse_broker()
+    _token_counter = 0
+
+    def _on_llm_response(input_tokens: int, output_tokens: int):
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="metrics_updated",
+            title="Token 指标更新",
+            content=f"in={input_tokens} out={output_tokens}",
+            agent="lead",
+            payload={"total_input_tokens": input_tokens, "total_output_tokens": output_tokens},
+            workspace_dir=workspace_dir,
+        )
+
+    try:
+        result = ""
+
+        def _agent_pool_status_callback(handle, event):
+            """Emit SSE events for agent pool status changes."""
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type=f"agent_{event}",
+                title=f"子 Agent {event}",
+                content=f"{handle.name} ({handle.role}) {event}",
+                agent=handle.name.lower().replace(" ", "_"),
+                payload={
+                    "agent_id": handle.agent_id,
+                    "name": handle.name,
+                    "role": handle.role,
+                    "status": handle.status,
+                    "event": event,
+                    "result": (handle.result or "")[:500] if handle.result else None,
+                    "error": handle.error,
+                },
+                workspace_dir=workspace_dir,
+            )
+
+        async for event_type, *event_data in agent_loop_stream(
+            messages=messages,
+            system=system,
+            tools=TOOLS,
+            max_turns=100,
+            on_cancel_check=lambda: _should_cancel_run(thread_id),
+            session_id=thread_id,
+            runtime_context={
+                "thread_id": thread_id,
+                "workspace_dir": workspace_dir,
+                "agent": "Lead",
+                "file_lock": get_file_lock(thread_id),
+                "pool_status_callback": _agent_pool_status_callback,
+            },
+        ):
+            if event_type == "token":
+                text = event_data[0]
+                result += text
+                _token_counter += 1
+                _token_broker.publish(thread_id, AgentEvent(
+                    id=f"{thread_id}-tok-{_token_counter}",
+                    thread_id=thread_id,
+                    type="token",
+                    timestamp=_time_mod.time(),
+                    agent="lead",
+                    content=text,
+                    payload={"delta": text},
+                ))
+            elif event_type == "metrics":
+                _on_llm_response(event_data[0], event_data[1])
+            elif event_type == "error":
+                raise RuntimeError(event_data[0])
+
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="assistant_message",
+            title="Agent 回复",
+            content=result[:5000],
+            agent="lead",
+            payload={"content": result},
+            workspace_dir=workspace_dir,
+        )
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="done",
+            title="任务完成",
+            content="Agent 运行已完成",
+            agent="lead",
+            payload={"status": "completed"},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(
+            thread_id, workspace_dir,
+            status="completed",
+            summary=result[:2000],
+            execution_summary=result[:1200],
+            saved_messages=messages,
+        )
+
+    except WorkflowCancelledError:
+        final_status = "cancelled"
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="done",
+            title="任务已取消",
+            content="Agent 运行已取消",
+            agent="lead",
+            payload={"status": "cancelled"},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(
+            thread_id, workspace_dir,
+            status="cancelled",
+            summary="Agent 运行已取消",
+            saved_messages=messages,
+        )
+
+    except Exception as e:
+        final_status = "failed"
+        import traceback
+        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        print(f"[_run_workflow_async_from_messages] 工作流异常: {error_detail}")
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="error",
+            title="运行异常",
+            content=str(e),
+            agent="lead",
+            payload={"error": str(e), "detail": error_detail},
+            workspace_dir=workspace_dir,
+        )
+        event_store.update_session(
+            thread_id, workspace_dir,
+            status="failed",
+            error=str(e),
+            saved_messages=messages,
+        )
+
+    finally:
+        with runs_lock:
+            if thread_id in active_runs:
+                active_runs[thread_id].set_status(final_status)
+        run_manager.finalize(thread_id, final_status)
+        run_manager.unregister(thread_id)
+        # Clean up file lock
+        try:
+            cleanup_file_lock(thread_id)
+        except Exception:
+            pass
 
 
 def _extract_node_event(node_name: str, node_state: dict) -> dict:
@@ -944,9 +1562,17 @@ async def start_run(request: RunRequest):
     if not allowed:
         raise HTTPException(status_code=429, detail=rate_limit_msg)
 
+    # Concurrency control
+    with runs_lock:
+        running_count = sum(1 for r in active_runs.values() if r.get("status") == "running")
+    if running_count >= config_module.MAX_CONCURRENT_RUNS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"系统繁忙，当前已有 {running_count} 个运行中的任务（上限 {config_module.MAX_CONCURRENT_RUNS}）。请稍后再试。",
+        )
+
     if request.messages:
-        initial_messages = [HumanMessage(content=m.content) for m in request.messages]
-        initial_messages.append(HumanMessage(content=prompt))
+        initial_messages = _messages_for_run(request.messages, prompt)
         print(f"[API] 使用前端传入历史消息 {len(request.messages)} 条，新 prompt 已追加")
     else:
         initial_messages = [HumanMessage(content=prompt)]
@@ -1114,17 +1740,31 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
 
     workspace_dir = request.workspace_dir or conversation["workspace_dir"]
     team = conversation.get("team", {})
-    execution_plan = build_execution_plan(
-        prompt=request.prompt,
-        team=team.get("members", []),
-        workspace_dir=workspace_dir,
+    members = list(team.get("members", []))
+    runtime_team_source = team.get("source", "conversation")
+    is_simple = _is_simple_lead_message(request.prompt)
+    runtime_composition = await compose_runtime_team_async(request.prompt, workspace_dir, conversation_id)
+    if len(members) <= 1:
+        members = list(runtime_composition.get("members", []))
+        runtime_team_source = "runtime_composed"
+    execution_plan = (
+        _lead_only_execution_plan(request.prompt, workspace_dir, members)
+        if is_simple
+        else await build_execution_plan_async(
+            prompt=request.prompt,
+            team=members,
+            workspace_dir=workspace_dir,
+        )
     )
+    execution_plan["complexity"] = runtime_composition.get("complexity", {})
+    execution_plan.setdefault("summary", {})["runtime_team_source"] = runtime_team_source
     response = await start_run(
         RunRequest(
             prompt=request.prompt,
             workspace_dir=workspace_dir,
+            messages=request.messages,
             conversation_id=conversation_id,
-            team=team.get("members", []),
+            team=members,
             execution_plan=execution_plan,
         )
     )
@@ -1134,34 +1774,61 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         thread_id,
         workspace_dir,
         prompt=request.prompt,
-        team=team.get("members", []),
+        team=members,
     )
-    team = updated.get("team", {})
 
     with runs_lock:
         run_info = active_runs.get(thread_id)
         if run_info is not None:
-            run_info.bind_conversation(conversation_id, team.get("members", []))
+            run_info.bind_conversation(conversation_id, members)
             run_info.set_execution_plan(execution_plan)
 
     event_store.update_session(
         thread_id,
         workspace_dir,
         conversation_id=conversation_id,
-        team=team.get("members", []),
+        team=members,
         execution_plan=execution_plan,
         agent_loop_policy=updated.get("agent_loop_policy", "run_per_message"),
+        runtime_team_source=runtime_team_source,
+        runtime_composition=runtime_composition,
+    )
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="agent_complexity_assessed",
+        title="Lead 已判断任务复杂度",
+        content=runtime_composition.get("complexity", {}).get("rationale", ""),
+        agent="lead",
+        payload={
+            "conversation_id": conversation_id,
+            "complexity": runtime_composition.get("complexity", {}),
+            "members": members,
+            "source": runtime_team_source,
+        },
+        workspace_dir=workspace_dir,
+    )
+    _emit_agent_activity(
+        thread_id=thread_id,
+        agent="lead",
+        title="Lead 已完成任务复杂度判断",
+        content=runtime_composition.get("complexity", {}).get("rationale", ""),
+        workspace_dir=workspace_dir,
+        payload={
+            "phase": "complexity_assessed",
+            "complexity": runtime_composition.get("complexity", {}),
+            "members": [member.get("name") for member in members],
+        },
     )
     _emit_agenthub_event(
         thread_id=thread_id,
         event_type="team_updated",
-        title="会话团队已绑定",
-        content="本次运行将使用会话内的 Agent 群组配置。",
+        title="运行团队已绑定",
+        content="Lead 已为本次运行准备 Agent 群组；默认会话团队仍保持轻量。",
         agent="lead",
         payload={
             "conversation_id": conversation_id,
-            "members": team.get("members", []),
-            "source": team.get("source", "unknown"),
+            "members": members,
+            "source": runtime_team_source,
         },
         workspace_dir=workspace_dir,
     )
@@ -1169,7 +1836,7 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         thread_id=thread_id,
         event_type="plan_created",
         title="动态执行策略已生成",
-        content="AgentHub 已根据本会话团队生成本轮执行阶段。",
+        content="nanoCursor 已根据本会话团队生成本轮执行阶段。",
         agent="lead",
         payload={
             "conversation_id": conversation_id,
@@ -1181,7 +1848,11 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         },
         workspace_dir=workspace_dir,
     )
-    return {"run": response, "conversation": updated}
+    return {
+        "run": response,
+        "conversation": updated,
+        "runtime_team": {"members": members, "source": runtime_team_source},
+    }
 
 
 @app.post("/api/runs/demo")
@@ -1318,7 +1989,7 @@ async def get_agenthub_run_detail(thread_id: str):
             "workspace_dir": run_info.get("workspace_dir", _get_workspace()),
             "conversation_id": run_info.get("conversation_id"),
         }
-    session = event_store.get_session(thread_id)
+    session = _session_for_thread(thread_id)
     if session:
         return session
     raise HTTPException(status_code=404, detail="Run 不存在")
@@ -1330,356 +2001,8 @@ async def get_agenthub_run_events_history(thread_id: str):
     return {"events": [event.model_dump() for event in events]}
 
 
-@app.post("/api/runs/{thread_id}/approval")
-async def resolve_agenthub_approval(thread_id: str, decision: ApprovalDecisionRequest):
-    title = _approval_title(decision.decision)
-    _emit_agenthub_event(
-        thread_id=thread_id,
-        event_type="plan_approved" if decision.decision == "approved" else "approval_resolved",
-        title=title,
-        content=decision.feedback or "",
-        agent="lead",
-        payload={
-            "plan_id": decision.plan_id,
-            "decision": decision.decision,
-            "feedback": decision.feedback,
-        },
-        workspace_dir=_workspace_for_thread(thread_id),
-    )
-    return {"thread_id": thread_id, "plan_id": decision.plan_id, "decision": decision.decision}
-
-
-@app.get("/api/runs/{thread_id}/approvals")
-async def list_run_approvals(thread_id: str):
-    """List all pending tool approval decisions for a run."""
-    ws = _workspace_for_thread(thread_id)
-    return {"approvals": get_pending_approvals(thread_id, ws)}
-
-
-@app.get("/api/runs/{thread_id}/approvals/{decision_id}")
-async def get_run_approval(thread_id: str, decision_id: str):
-    """Get a single tool approval decision, including resolved/expired records."""
-    ws = _workspace_for_thread(thread_id)
-    result = get_tool_approval(thread_id, decision_id, ws)
-    if not result:
-        raise HTTPException(status_code=404, detail="审批记录不存在")
-    return result
-
-
-@app.post("/api/runs/{thread_id}/approvals/{decision_id}")
-async def resolve_run_approval(thread_id: str, decision_id: str, body: ToolApprovalResolveRequest):
-    """Approve or reject a pending tool approval.
-
-    Request body: {"approved": true, "comment": "允许执行"}
-    """
-    ws = _workspace_for_thread(thread_id)
-    result = resolve_tool_approval(thread_id, decision_id, body.approved, body.comment, ws)
-    if not result:
-        raise HTTPException(status_code=404, detail="审批记录不存在")
-    return result
-
-
-@app.get("/api/runs/{thread_id}/diff")
-async def get_agenthub_run_diff(thread_id: str):
-    return get_run_diff(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/report")
-async def get_agenthub_run_report(thread_id: str):
-    return build_delivery_report(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/quality")
-async def get_agenthub_run_quality(thread_id: str):
-    return build_quality_gate(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/score")
-async def get_agenthub_run_score(thread_id: str):
-    return build_delivery_score(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/traceability")
-async def get_agenthub_run_traceability(thread_id: str):
-    return build_requirement_traceability(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/capabilities")
-async def get_agenthub_run_capabilities(thread_id: str):
-    return build_capability_usage(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/artifacts")
-async def get_agenthub_run_artifacts(thread_id: str):
-    return build_artifact_center(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.get("/api/runs/{thread_id}/recovery")
-async def get_agenthub_run_recovery(thread_id: str):
-    return build_recovery_center(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.post("/api/runs/{thread_id}/recovery/actions/{action_id}")
-async def run_agenthub_recovery_action(thread_id: str, action_id: str, request: RecoveryActionRequest):
-    workspace = _workspace_for_thread(thread_id)
-    target = request.target or request.target_path
-    try:
-        result = execute_recovery_action(
-            thread_id=thread_id,
-            action_id=action_id,
-            workspace_dir=workspace,
-            target=target,
-            target_path=request.target_path,
-            confirmed=request.confirmed,
-        )
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="recovery_action",
-            target=action_id,
-            decision="confirmed" if request.confirmed else "allowed",
-            result="success" if result.get("ok", True) else "failure",
-            reason=str(result.get("message", "")),
-            detail={"action_id": action_id, "target": target, "target_path": request.target_path},
-        )
-        return result
-    except ValueError as exc:
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="recovery_action",
-            target=action_id,
-            decision="denied",
-            result="failure",
-            reason=str(exc),
-            detail={"action_id": action_id, "target": target, "target_path": request.target_path},
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/runs/{thread_id}/remediation")
-async def start_remediation_run(thread_id: str, request: RemediationRunRequest):
-    sm = run_manager.get_state_machine(thread_id)
-    if sm and not sm.current_status.endswith("ed"):
-        raise HTTPException(status_code=409, detail="Run 还在活跃中，无法启动修复。")
-    new_tid = str(uuid.uuid4())
-    q = queue.Queue()
-    run_workspace = _workspace_for_thread(thread_id)
-    prompt = request.instruction.strip() or (
-        f"请基于原 run {thread_id} 的失败记录"
-        f"{' ' + request.failure_id if request.failure_id else ''} 进行修复。"
-    )
-
-    with runs_lock:
-        run_context = RunContext(
-            thread_id=new_tid,
-            workspace_dir=run_workspace,
-            queue=q,
-            status="running",
-            team=[],
-            execution_plan={},
-        )
-        try:
-            run_manager.register(run_context)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    event_store.create_session(
-        thread_id=new_tid,
-        prompt=prompt,
-        workspace_dir=run_workspace,
-        status="running",
-        mode="remediation",
-    )
-    event_store.append_event(
-        thread_id=new_tid,
-        event_type="remediation_started",
-        title="修复运行已启动",
-        content=prompt,
-        agent="lead",
-        payload={"original_thread_id": thread_id, "failure_id": request.failure_id},
-        workspace_dir=run_workspace,
-    )
-
-    initial_messages = [HumanMessage(content=prompt)]
-    t = threading.Thread(
-        target=_run_workflow,
-        args=(new_tid, initial_messages, run_workspace),
-        daemon=True,
-    )
-    active_runs[new_tid].thread = t
-    t.start()
-
-    return {"original_thread_id": thread_id, "retry_thread_id": new_tid, "status": "created"}
-
-
-@app.post("/api/runs/{thread_id}/checkpoints")
-async def create_run_checkpoint(thread_id: str, request: RecoveryActionRequest):
-    workspace = _workspace_for_thread(thread_id)
-    target_path = request.target_path or request.target
-    if not target_path:
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="checkpoint_create",
-            target="",
-            decision="denied",
-            result="failure",
-            reason="创建 checkpoint 需要 target_path。",
-        )
-        raise HTTPException(status_code=400, detail="创建 checkpoint 需要 target_path。")
-    try:
-        result = create_checkpoint(
-            filepath=target_path,
-            reason=request.action_id or "manual checkpoint",
-            thread_id=thread_id,
-            workspace_dir=workspace,
-        )
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="checkpoint_create",
-            target=target_path,
-            decision="auto_allowed",
-            result="success",
-            reason=request.action_id or "manual checkpoint",
-            detail={"checkpoint_id": result.get("checkpoint_id")},
-        )
-        return result
-    except ValueError as exc:
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="checkpoint_create",
-            target=target_path,
-            decision="denied",
-            result="failure",
-            reason=str(exc),
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/runs/{thread_id}/checkpoints")
-async def list_run_checkpoints(thread_id: str):
-    return list_checkpoints(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.post("/api/runs/{thread_id}/checkpoints/{checkpoint_id}/restore")
-async def restore_run_checkpoint(thread_id: str, checkpoint_id: str, request: RecoveryActionRequest):
-    workspace = _workspace_for_thread(thread_id)
-    try:
-        result = restore_checkpoint(
-            checkpoint_id=checkpoint_id,
-            thread_id=thread_id,
-            confirmed=request.confirmed,
-            workspace_dir=workspace,
-        )
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="checkpoint_restore",
-            target=checkpoint_id,
-            decision="confirmed",
-            result="success",
-            reason="checkpoint restored",
-            detail={"checkpoint_id": checkpoint_id, "filepath": result.get("filepath")},
-        )
-        return result
-    except ValueError as exc:
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="checkpoint_restore",
-            target=checkpoint_id,
-            decision="confirmed" if request.confirmed else "denied",
-            result="failure",
-            reason=str(exc),
-            detail={"checkpoint_id": checkpoint_id},
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/runs/{thread_id}/git/prepare")
-async def prepare_run_git_branch(thread_id: str):
-    workspace = _workspace_for_thread(thread_id)
-    result = prepare_git_branch(thread_id, workspace)
-    _audit_route_action(
-        thread_id=thread_id,
-        workspace_dir=workspace,
-        kind="git_operation",
-        target="prepare",
-        decision="auto_allowed",
-        result="success" if result.get("ok") else "failure",
-        reason=str(result.get("message", "")),
-        detail=result,
-    )
-    return result
-
-
-@app.get("/api/runs/{thread_id}/git/status")
-async def get_run_git_status(thread_id: str):
-    return git_branch_status(thread_id, _workspace_for_thread(thread_id))
-
-
-@app.post("/api/runs/{thread_id}/git/commit")
-async def commit_run_branch(thread_id: str, commit_request: GitCommitRequest):
-    workspace = _workspace_for_thread(thread_id)
-    result = commit_branch(thread_id, commit_request.message, workspace)
-    _audit_route_action(
-        thread_id=thread_id,
-        workspace_dir=workspace,
-        kind="git_operation",
-        target="commit",
-        decision="confirmed",
-        result="success" if result.get("ok") else "failure",
-        reason=str(result.get("message", "")),
-        detail=result,
-    )
-    return result
-
-
-@app.post("/api/runs/{thread_id}/git/discard")
-async def discard_run_branch(thread_id: str, request: RecoveryActionRequest):
-    workspace = _workspace_for_thread(thread_id)
-    try:
-        result = discard_branch(
-            thread_id,
-            confirmed=request.confirmed,
-            workspace_dir=workspace,
-        )
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="git_operation",
-            target="discard",
-            decision="confirmed",
-            result="success" if result.get("ok") else "failure",
-            reason=str(result.get("message", "")),
-            detail=result,
-        )
-        return result
-    except ValueError as exc:
-        _audit_route_action(
-            thread_id=thread_id,
-            workspace_dir=workspace,
-            kind="git_operation",
-            target="discard",
-            decision="confirmed" if request.confirmed else "denied",
-            result="failure",
-            reason=str(exc),
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/runs/{thread_id}/policy")
-async def get_run_policy(thread_id: str):
-    return {"thread_id": thread_id, "decisions": []}
-
-
-@app.post("/api/runs/{thread_id}/policy/decision")
-async def record_policy_decision(thread_id: str, request: PolicyDecisionRecordRequest):
-    return {"thread_id": thread_id, "decision": request.decision, "status": "recorded"}
-
+# approvals → src/api/routes/approvals.py
+# recovery/checkpoints/git/policy/observability/workspace-recovery → src/api/routes/recovery.py
 
 @app.get("/api/runs/{thread_id}/events")
 async def get_run_events_push(thread_id: str):
@@ -1695,263 +2018,6 @@ async def get_run_events_push(thread_id: str):
     )
 
 
-@app.get("/api/tasks")
-async def list_team_tasks():
-    return {"tasks": list_task_items()}
-
-
-@app.get("/api/team")
-async def list_team_agents():
-    return {"team": list_team_members()}
-
-
-@app.get("/api/capabilities")
-async def get_agenthub_capabilities():
-    return build_capability_hub(_get_workspace())
-
-
-@app.post("/api/capabilities/recommend")
-async def recommend_caps(request: CapabilityRecommendRequest):
-    return recommend_capabilities(request.prompt, _get_workspace())
-
-
-@app.post("/api/capabilities/skills")
-async def create_skill(request: SkillImportRequest):
-    skill = import_workspace_skill(request.name, request.description, request.content, _get_workspace())
-    return {"skill": skill, "hub": build_capability_hub(_get_workspace()), "ok": True}
-
-
-@app.get("/api/capabilities/mcp")
-async def get_agenthub_mcp_servers():
-    return {"mcp": list_mcp_servers(_get_workspace())}
-
-
-@app.post("/api/capabilities/mcp/validate")
-async def validate_mcp_config_route(request: McpValidateRequest):
-    return validate_mcp_config(request.server_id, _get_workspace())
-
-
-@app.post("/api/capabilities/mcp/servers")
-async def upsert_mcp_server(request: McpServerUpsertRequest):
-    if not request.command.strip():
-        raise HTTPException(status_code=400, detail="MCP command 不能为空")
-    result = upsert_mcp_server_config(
-        request.server_id,
-        request.command,
-        request.args,
-        request.env_keys,
-        workspace_dir=_get_workspace(),
-        enabled=request.enabled,
-        ignored_env_keys=request.ignored_env_keys,
-    )
-    return result
-
-
-@app.get("/api/capabilities/mcp/presets")
-async def get_mcp_server_presets():
-    return list_mcp_server_presets(_get_workspace())
-
-
-@app.post("/api/capabilities/mcp/presets/{preset_id}/install")
-async def install_mcp_server_preset_route(
-    preset_id: str,
-    request: McpPresetInstallRequest | None = None,
-):
-    try:
-        return install_mcp_server_preset(
-            preset_id,
-            _get_workspace(),
-            enabled=request.enabled if request else None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/capabilities/skills/{skill_id}")
-async def get_skill(skill_id: str):
-    try:
-        detail = get_skill_detail(skill_id, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return detail
-
-
-@app.put("/api/capabilities/skills/{skill_id}")
-async def edit_skill(skill_id: str, request: SkillUpdateRequest):
-    try:
-        save_skill_version(skill_id, request.content, _get_workspace())
-        detail = update_workspace_skill(skill_id, request.content, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return detail
-
-
-@app.delete("/api/capabilities/skills/{skill_id}")
-async def remove_skill(skill_id: str):
-    try:
-        result = delete_workspace_skill(skill_id, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"deleted": bool(result.get("ok", True)), "skill_id": skill_id}
-
-
-@app.post("/api/capabilities/skills/{skill_id}/validate")
-async def validate_skill(skill_id: str):
-    try:
-        detail = get_skill_detail(skill_id, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return validate_skill_content(detail.get("content", ""))
-
-
-@app.get("/api/capabilities/skills/{skill_id}/versions")
-async def get_skill_versions(skill_id: str):
-    return list_skill_versions(skill_id, _get_workspace())
-
-
-@app.post("/api/capabilities/skills/{skill_id}/versions/{version_id}/restore")
-async def restore_skill_version_route(skill_id: str, version_id: str):
-    try:
-        return restore_skill_version(skill_id, version_id, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/capabilities/mcp/status")
-async def get_mcp_route_status():
-    return get_mcp_status(_get_workspace())
-
-
-@app.get("/api/capabilities/mcp/{server_id}/status")
-async def get_mcp_server_route_status(server_id: str):
-    return get_mcp_server_status(server_id, _get_workspace())
-
-
-@app.put("/api/capabilities/mcp/{server_id}/enabled")
-async def set_mcp_enabled_route(server_id: str, data: McpEnabledRequest):
-    return set_mcp_enabled(server_id, data.enabled, _get_workspace())
-
-
-@app.post("/api/capabilities/mcp/{server_id}/probe")
-async def probe_mcp_server_route(server_id: str):
-    """Run diagnostics on an MCP server: command, env, config, enabled."""
-    return probe_mcp_server(server_id, _get_workspace())
-
-
-@app.get("/api/capabilities/mcp/{server_id}/tools")
-async def list_mcp_tools_route(server_id: str, refresh: bool = False):
-    """List tools exposed by an MCP server."""
-    return list_mcp_tools(server_id, _get_workspace(), force_refresh=refresh)
-
-
-@app.post("/api/capabilities/mcp/{server_id}/tools/{tool_name}/call")
-async def call_mcp_tool_route(server_id: str, tool_name: str, request: McpToolCallRequest | None = None):
-    """Call an MCP tool."""
-    return call_mcp_tool(server_id, tool_name, request.arguments if request else {}, _get_workspace())
-
-
-@app.post("/api/runs/context-pack")
-async def build_run_context_pack_route(request: ContextPackRequest):
-    return build_context_pack(request.objective, request.workspace_dir or _get_workspace())
-
-
-@app.get("/api/runs/{thread_id}/context-pack")
-async def get_run_context_pack_route(thread_id: str):
-    return build_context_pack("", _workspace_for_thread(thread_id), thread_id)
-
-
-@app.post("/api/team/agents")
-async def create_team_agent(request: TeamAgentCreateRequest):
-    try:
-        agent = add_team_member(
-            request.name,
-            request.role,
-            request.goal,
-            request.tools,
-            request.capabilities,
-            _get_workspace(),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"agent": agent}
-
-
-@app.get("/api/preferences/profile")
-async def get_preference_profile():
-    return build_memory_profile(_get_workspace())
-
-
-@app.post("/api/preferences")
-async def add_preference(request: PreferenceCreateRequest):
-    try:
-        mem = add_preference_memory(
-            request.preference_type,
-            request.content,
-            request.importance,
-            _get_workspace(),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"memory": mem}
-
-
-@app.get("/api/recovery")
-async def get_recovery_center():
-    return build_recovery_center("", _get_workspace())
-
-
-@app.post("/api/recovery/rollback")
-async def rollback_recovery(request: RollbackRequest):
-    workspace = _get_workspace()
-    target = request.target_path
-    if not request.confirmed:
-        _audit_route_action(
-            thread_id="workspace",
-            workspace_dir=workspace,
-            kind="rollback",
-            target=target,
-            decision="denied",
-            result="failure",
-            reason="rollback 需要 confirmed=true 确认。",
-            detail={"backup_name": request.backup_name},
-        )
-        raise HTTPException(status_code=400, detail="rollback 需要 confirmed=true 确认。")
-    try:
-        result = rollback_from_backup(
-            backup_name=request.backup_name,
-            target_path=request.target_path,
-            workspace_dir=workspace,
-        )
-        _audit_route_action(
-            thread_id="workspace",
-            workspace_dir=workspace,
-            kind="rollback",
-            target=target,
-            decision="confirmed",
-            result="success",
-            reason=str(result.get("message", "")),
-            detail={"backup_name": request.backup_name},
-        )
-        return result
-    except (FileNotFoundError, ValueError) as exc:
-        _audit_route_action(
-            thread_id="workspace",
-            workspace_dir=workspace,
-            kind="rollback",
-            target=target,
-            decision="confirmed",
-            result="failure",
-            reason=str(exc),
-            detail={"backup_name": request.backup_name},
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/runs/{thread_id}/observability")
-async def get_run_observability(thread_id: str):
-    return build_run_observability(thread_id, _workspace_for_thread(thread_id))
-
-
 @app.post("/api/runs/{thread_id}/cancel")
 @app.post("/api/run/{thread_id}/cancel")
 async def cancel_run(thread_id: str):
@@ -1961,30 +2027,28 @@ async def cancel_run(thread_id: str):
     if not run_info:
         raise HTTPException(status_code=404, detail="未找到该线程的运行记录")
 
-    if run_info.get("status") != "running":
+    current_status = run_info.get("status")
+    if current_status == "cancelling":
+        return CancelResponse(cancelled=True, thread_id=thread_id)
+    if current_status not in {"running", "waiting_approval"}:
         raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
 
     try:
         run_manager.request_cancel(thread_id)
     except ValueError:
         pass
-    run_info.set_status("cancelled")
+    run_info.set_status("cancelling")
     workspace_dir = run_info.get("workspace_dir") or _workspace_for_thread(thread_id)
-    event_store.update_session(thread_id, workspace_dir, status="cancelled")
+    _sync_run_context(thread_id, workspace_dir)
+    event_store.update_session(thread_id, workspace_dir, status="cancelling")
     _emit_agenthub_event(
         thread_id=thread_id,
-        event_type="done",
-        title="任务已取消",
-        content="用户请求取消运行",
+        event_type="run_cancelling",
+        title="正在取消运行",
+        content="用户请求取消运行，Agent 会在下一个安全检查点停止。",
         agent="lead",
-        payload={"status": "cancelled"},
+        payload={"status": "cancelling"},
         workspace_dir=workspace_dir,
-    )
-    _finalize_conversation_for_run(
-        thread_id=thread_id,
-        workspace_dir=workspace_dir,
-        status="cancelled",
-        summary="用户请求取消运行",
     )
     return CancelResponse(cancelled=True, thread_id=thread_id)
 
@@ -2003,49 +2067,100 @@ async def resume_run(thread_id: str):
     if sm:
         raise HTTPException(status_code=409, detail="Run 已在活跃列表中。")
 
-    session = event_store.get_session(thread_id)
+    session = _session_for_thread(thread_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
-    if session.get("status") != "interrupted":
-        raise HTTPException(status_code=400, detail=f"只能恢复 interrupted 状态的 run，当前状态: {session.get('status')}")
 
-    event_store.update_session(thread_id, status="recovering")
+    resumable_statuses = {"interrupted", "failed", "cancelled"}
+    if session.get("status") not in resumable_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"只能恢复 interrupted/failed/cancelled 状态的 run，当前状态: {session.get('status')}",
+        )
+
+    saved_messages = session.get("saved_messages")
+    if not saved_messages:
+        raise HTTPException(status_code=400, detail="该 run 没有保存的消息历史，无法恢复。")
+
+    workspace_dir = session.get("workspace_dir") or _workspace_for_thread(thread_id)
+    previous_status = session.get("status")
+
+    # Register the run in the active manager
+    q = queue.Queue()
+    with runs_lock:
+        run_context = RunContext(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            queue=q,
+            status="running",
+            conversation_id=session.get("conversation_id"),
+        )
+        active_runs[thread_id] = run_context
+        run_manager.register(thread_id, workspace_dir)
+
+    event_store.update_session(thread_id, workspace_dir, status="running")
     event_store.append_event(
         thread_id, "run_resumed",
         title="Run 已恢复",
-        content="从 interrupted 状态恢复运行。",
+        content=f"从 {previous_status} 状态恢复运行，加载了 {len(saved_messages)} 条历史消息。",
         agent="lead",
-        payload={"previous_status": "interrupted"},
+        payload={"previous_status": previous_status, "message_count": len(saved_messages)},
+        workspace_dir=workspace_dir,
     )
-    return {"thread_id": thread_id, "status": "recovering", "ok": True}
+
+    # Build system prompt
+    execution_plan = session.get("execution_plan", {})
+    run_team = session.get("team", [])
+    strategy = execution_plan.get("strategy", "feature_delivery")
+    from src.agent.prompt_builder import _build_core
+    system = _build_core(strategy)
+    system = f"{system}\n\n注意：工作目录已经是 {workspace_dir}，写文件名时直接用文件名，不要加 workspace/ 前缀。"
+    runtime_instructions = build_runtime_instructions(execution_plan, run_team)
+    if runtime_instructions:
+        system = f"{system}\n{runtime_instructions}"
+
+    # Start agent loop thread with saved messages
+    t = threading.Thread(
+        target=_run_workflow_from_messages,
+        args=(thread_id, saved_messages, system, workspace_dir),
+        daemon=True,
+    )
+    with runs_lock:
+        active_runs[thread_id].thread = t
+    t.start()
+
+    return {"thread_id": thread_id, "status": "running", "ok": True, "resumed_from": previous_status}
 
 
 @app.get("/api/runs/{thread_id}/lifecycle")
 async def get_run_lifecycle(thread_id: str):
     """Get the full lifecycle status, history, and stage progress of a run."""
     sm = run_manager.get_state_machine(thread_id)
-    session = event_store.get_session(thread_id)
+    session = _session_for_thread(thread_id)
     if not sm and not session:
         raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
 
+    session_status = str((session or {}).get("status", "unknown"))
+    status = sm.status.value if sm else session_status
+    is_terminal = sm.is_terminal() if sm else status in {item.value for item in TERMINAL_STATUSES}
     lifecycle = {
         "thread_id": thread_id,
-        "status": sm.status.value if sm else session.get("status", "unknown"),
+        "status": status,
         "history": sm.history() if sm else [],
-        "is_terminal": sm.is_terminal() if sm else False,
+        "is_terminal": is_terminal,
         "session": session or {},
     }
     return lifecycle
 
 
 @app.post("/api/runs/{thread_id}/retry")
-async def retry_run(thread_id: str):
+async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
     """Create a new run from a failed/cancelled previous run.
 
     The new run gets a fresh thread_id but copies the prompt, workspace_dir,
     and team from the original.  The original run is never overwritten.
     """
-    session = event_store.get_session(thread_id)
+    session = _session_for_thread(thread_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"原 run 不存在: {thread_id}")
 
@@ -2056,10 +2171,22 @@ async def retry_run(thread_id: str):
             detail=f"只能重试已结束的 run，当前状态: {original_status}",
         )
 
+    request = request or RetryRunRequest()
+    retry_mode = request.retry_mode if request.retry_mode in {"full", "failed_stage"} else "full"
     new_thread_id = str(uuid.uuid4())
-    prompt = session.get("prompt", "")
+    original_prompt = session.get("prompt", "")
     run_workspace = session.get("workspace_dir", _get_workspace())
     team = session.get("team", [])
+    execution_plan = session.get("execution_plan", {})
+    retry_context = _retry_context_for_run(thread_id, run_workspace, request.failure_id)
+    prompt = _build_retry_prompt(
+        original_prompt=original_prompt,
+        original_thread_id=thread_id,
+        original_status=original_status,
+        retry_mode=retry_mode,
+        retry_context=retry_context,
+        instruction=request.instruction,
+    )
 
     q = queue.Queue()
     with runs_lock:
@@ -2068,8 +2195,9 @@ async def retry_run(thread_id: str):
             workspace_dir=run_workspace,
             queue=q,
             status="running",
+            mode="retry",
             team=team,
-            execution_plan=session.get("execution_plan", {}),
+            execution_plan=execution_plan,
         )
         try:
             run_manager.register(run_context)
@@ -2081,15 +2209,35 @@ async def retry_run(thread_id: str):
         prompt=prompt,
         workspace_dir=run_workspace,
         status="running",
-        mode="normal",
+        mode="retry",
     )
+    session_metadata = run_context.session_metadata()
+    event_store.update_session(
+        new_thread_id,
+        run_workspace,
+        **session_metadata,
+        original_thread_id=thread_id,
+        original_status=original_status,
+        original_prompt=original_prompt,
+        retry_mode=retry_mode,
+        retry_context=retry_context,
+    )
+    stage_updates = run_context.start_first_stage()
+    _sync_run_context(new_thread_id, run_workspace)
+    _emit_stage_updates(new_thread_id, run_workspace, stage_updates)
     event_store.append_event(
         thread_id=new_thread_id,
         event_type="run_retried",
         title="Run 已重试",
-        content=prompt,
+        content=f"基于原 run {thread_id} 创建 {retry_mode} 重试。",
         agent="lead",
-        payload={"original_thread_id": thread_id, "original_status": original_status},
+        payload={
+            "original_thread_id": thread_id,
+            "original_status": original_status,
+            "retry_mode": retry_mode,
+            "failure_id": request.failure_id or "",
+            "failed_stage_id": retry_context.get("failed_stage_id", ""),
+        },
         workspace_dir=run_workspace,
     )
 
@@ -2106,554 +2254,13 @@ async def retry_run(thread_id: str):
         "original_thread_id": thread_id,
         "retry_thread_id": new_thread_id,
         "status": "created",
+        "retry_mode": retry_mode,
     }
 
 
-@app.post("/api/bash")
-async def run_bash_command(request: BashRequest):
-    import subprocess as sp
+# /api/bash → src/api/routes/config.py
 
-    command = request.command.strip()
-    if not command:
-        raise HTTPException(status_code=400, detail="命令不能为空")
-
-    work_dir = request.workspace_dir or config_module.WORKSPACE_DIR
-    work_dir = os.path.abspath(work_dir)
-
-    dangerous = ["rm -rf /", "sudo ", "shutdown", "reboot", "> /dev/", "mkfs", "chroot", "dd if="]
-    for pattern in dangerous:
-        if pattern in command:
-            return {"success": False, "stdout": "", "stderr": f"Error: Dangerous command blocked (matches '{pattern}')", "exit_code": -1}
-
-    timeout = min(request.timeout, 300)
-
-    try:
-        r = sp.run(
-            command, shell=True, cwd=work_dir,
-            capture_output=True, timeout=timeout,
-        )
-        try:
-            stdout = r.stdout.decode('gbk', errors='replace')
-            stderr = r.stderr.decode('gbk', errors='replace')
-        except Exception:
-            stdout = r.stdout.decode('utf-8', errors='replace') if r.stdout else ""
-            stderr = r.stderr.decode('utf-8', errors='replace') if r.stderr else ""
-
-        return {
-            "success": r.returncode == 0,
-            "stdout": stdout.strip()[:50000] or "(no output)",
-            "stderr": stderr.strip()[:10000],
-            "exit_code": r.returncode,
-        }
-    except sp.TimeoutExpired:
-        return {"success": False, "stdout": "", "stderr": f"Error: Command timed out after {timeout}s", "exit_code": -1}
-    except FileNotFoundError:
-        return {"success": False, "stdout": "", "stderr": "Error: Command not found. Check that the program is installed.", "exit_code": -1}
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": f"Error: {e}", "exit_code": -1}
-
-
-# ============================================================
-# Legacy routes (compatibility)
-# ============================================================
-
-@app.get("/api/run/{thread_id}/state")
-async def get_legacy_run_state(thread_id: str):
-    with runs_lock:
-        run_info = active_runs.get(thread_id)
-
-    if not run_info:
-        return AgentStateResponse(
-            messages=[],
-            extra={"status": "not_found", "thread_id": thread_id},
-        )
-
-    return AgentStateResponse(
-        messages=[],
-        extra={
-            "status": run_info.get("status", "unknown"),
-            "thread_id": thread_id,
-        },
-    )
-
-
-@app.get("/api/files")
-async def list_files():
-    files = []
-
-    try:
-        for root, dirs, filenames in os.walk(config_module.WORKSPACE_DIR):
-            dirs[:] = [d for d in dirs if d not in (".backups", ".snapshots")]
-
-            for filename in filenames:
-                filepath = os.path.join(root, filename)
-                relpath = os.path.relpath(filepath, config_module.WORKSPACE_DIR)
-
-                try:
-                    stat = os.stat(filepath)
-                    files.append({
-                        "path": relpath,
-                        "is_dir": False,
-                        "size": stat.st_size,
-                        "mtime": stat.st_mtime,
-                    })
-                except OSError:
-                    pass
-
-            for dirname in dirs:
-                dirpath = os.path.join(root, dirname)
-                relpath = os.path.relpath(dirpath, config_module.WORKSPACE_DIR)
-                files.append({
-                    "path": relpath,
-                    "is_dir": True,
-                    "size": 0,
-                })
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取工作区失败: {e!s}")
-
-    files.sort(key=lambda f: f["path"])
-
-    return FileListResponse(files=[
-        FileEntry(path=f["path"], is_dir=f["is_dir"], size=f["size"], mtime=f.get("mtime"))
-        for f in files
-    ])
-
-
-@app.get("/api/files/{file_path:path}")
-async def read_file(file_path: str):
-    full_path = os.path.join(config_module.WORKSPACE_DIR, file_path)
-
-    real_path = os.path.realpath(full_path)
-    real_root = os.path.realpath(config_module.WORKSPACE_DIR)
-    if os.path.commonpath([real_root, real_path]) != real_root:
-        raise HTTPException(status_code=403, detail="禁止访问该路径")
-
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="文件不存在")
-
-    if os.path.isdir(full_path):
-        raise HTTPException(status_code=400, detail="这是一个目录，不是文件")
-
-    try:
-        stat = os.stat(full_path)
-
-        try:
-            with open(full_path, encoding="utf-8") as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            content = "[二进制文件，无法显示内容]"
-
-        ext = os.path.splitext(file_path)[1].lower()
-        lang_map = {
-            ".py": "python",
-            ".js": "javascript",
-            ".ts": "typescript",
-            ".tsx": "typescript",
-            ".jsx": "javascript",
-            ".html": "html",
-            ".css": "css",
-            ".json": "json",
-            ".md": "markdown",
-            ".txt": "text",
-            ".yaml": "yaml",
-            ".yml": "yaml",
-            ".sh": "bash",
-            ".go": "go",
-            ".java": "java",
-            ".c": "c",
-            ".cpp": "cpp",
-            ".rs": "rust",
-        }
-        lang = lang_map.get(ext, "text")
-
-        return FileContentResponse(
-            content=content,
-            size=stat.st_size,
-            lines=content.count("\n") + 1,
-            mtime=stat.st_mtime,
-            lang=lang,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取文件失败: {e!s}")
-
-
-@app.get("/api/metrics")
-async def get_metrics():
-    summary = metrics_collector.dump_summary()
-    llm_data = summary.get("llm", {})
-    tool_data = summary.get("tool_calls", {})
-    repair_data = summary.get("repair_cycles", {})
-
-    current = MetricsCurrentResponse(
-        total_llm_calls=llm_data.get("total_calls", 0),
-        total_tokens=llm_data.get("total_tokens", 0),
-        llm_latency_avg=llm_data.get("avg_latency_ms", 0.0),
-        tool_calls=tool_data.get("total", 0),
-        tool_successes=tool_data.get("successes", 0),
-        tool_failures=tool_data.get("failures", 0),
-        tool_success_rate=tool_data.get("success_rate", 0.0),
-        repair_cycles=repair_data.get("total", 0),
-        repair_cycles_recovered=sum(1 for o in repair_data.get("outcomes", []) if o.get("outcome") == "fixed"),
-        last_updated=None,
-        llm=MetricsLLMData(
-            total_calls=llm_data.get("total_calls", 0),
-            total_tokens=llm_data.get("total_tokens", 0),
-            avg_tokens_per_call=llm_data.get("avg_tokens_per_call", 0.0),
-            avg_latency_ms=llm_data.get("avg_latency_ms", 0.0),
-            max_latency_ms=llm_data.get("max_latency_ms", 0.0),
-            min_latency_ms=llm_data.get("min_latency_ms", 0.0),
-        ),
-        tool_calls_detail=MetricsToolData(
-            total=tool_data.get("total", 0),
-            successes=tool_data.get("successes", 0),
-            failures=tool_data.get("failures", 0),
-            success_rate=tool_data.get("success_rate", 0.0),
-            failure_reasons=tool_data.get("failure_reasons", []),
-        ),
-        repair_cycles_detail=MetricsRepairData(
-            total=repair_data.get("total", 0),
-            outcomes=repair_data.get("outcomes", []),
-        ),
-    )
-
-    historical = []
-    if os.path.exists(METRICS_HISTORY_FILE):
-        try:
-            with open(METRICS_HISTORY_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                historical = data
-        except Exception:
-            pass
-
-    return MetricsResponse(current=current, historical=historical)
-
-
-async def check_ollama_connected(base_url: str, timeout: float = 2.0) -> bool:
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{base_url.rstrip('/')}/api/tags")
-            return resp.status_code == 200
-    except Exception:
-        return False
-
-
-@app.get("/api/config")
-async def get_config():
-    llm_providers = {
-        "openai": LLMProviderStatus(
-            has_key=bool(os.getenv("OPENAI_API_KEY")),
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-            base_url=os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL"),
-        ),
-        "anthropic": LLMProviderStatus(
-            has_key=bool(os.getenv("ANTHROPIC_API_KEY")),
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
-        ),
-        "ollama": LLMProviderStatus(
-            has_key=True,
-            model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder"),
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            is_connected=await check_ollama_connected(
-                os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-            ),
-        ),
-        "deepseek": LLMProviderStatus(
-            has_key=bool(os.getenv("DEEPSEEK_API_KEY")),
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        ),
-        "minimax": LLMProviderStatus(
-            has_key=bool(os.getenv("MINIMAX_API_KEY")),
-            model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.7"),
-            base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
-        ),
-    }
-
-    system_config = SystemConfig(
-        workspace_dir=str(config_module.WORKSPACE_DIR),
-        sandbox_image=os.getenv("SANDBOX_IMAGE", "python:3.10-slim"),
-        sandbox_mem_limit=os.getenv("SANDBOX_MEM_LIMIT", "256m"),
-        sandbox_timeout=int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")),
-        max_coder_steps=int(os.getenv("MAX_CODER_STEPS", "15")),
-        max_planner_steps=int(os.getenv("MAX_PLANNER_STEPS", "10")),
-        context_max_tokens=int(os.getenv("CONTEXT_MAX_TOKENS", "8000")),
-    )
-
-    env_vars = []
-    sensitive_keys = {"key", "secret", "token", "password"}
-
-    for key, value in sorted(os.environ.items()):
-        is_sensitive = any(s in key.lower() for s in sensitive_keys)
-        env_vars.append(EnvVar(
-            name=key,
-            value="****" if is_sensitive and value else value,
-            is_sensitive=is_sensitive,
-            is_set=True,
-        ))
-
-    return ConfigResponse(
-        llm_providers=llm_providers,
-        system=system_config,
-        env_vars=env_vars,
-    )
-
-
-@app.get("/api/snapshots")
-async def list_snapshots():
-    snapshots_dir = os.path.join(config_module.WORKSPACE_DIR, ".snapshots")
-    snapshots = []
-
-    if not os.path.exists(snapshots_dir):
-        return SnapshotListResponse(snapshots=[])
-
-    try:
-        for entry in sorted(os.listdir(snapshots_dir), reverse=True):
-            snapshot_path = os.path.join(snapshots_dir, entry)
-
-            if not os.path.isdir(snapshot_path):
-                continue
-
-            metadata_path = os.path.join(snapshot_path, "metadata.json")
-            metadata = {}
-
-            if os.path.exists(metadata_path):
-                try:
-                    with open(metadata_path, encoding="utf-8") as f:
-                        metadata = json.load(f)
-                except Exception:
-                    pass
-
-            snapshots.append(SnapshotEntry(
-                id=entry,
-                timestamp=metadata.get("timestamp", ""),
-                reason=metadata.get("reason", ""),
-                active_files=metadata.get("active_files", []),
-                active_files_count=len(metadata.get("active_files", [])),
-            ))
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取快照失败: {e!s}")
-
-    return SnapshotListResponse(snapshots=snapshots)
-
-
-@app.get("/api/snapshots/{snapshot_id}")
-async def get_snapshot(snapshot_id: str):
-    snapshots_dir = os.path.join(config_module.WORKSPACE_DIR, ".snapshots")
-    snapshot_path = os.path.join(snapshots_dir, snapshot_id)
-
-    if not os.path.exists(snapshot_path):
-        raise HTTPException(status_code=404, detail="快照不存在")
-
-    result = SnapshotDetailResponse(metadata=SnapshotMetadata(timestamp="", reason="", active_files=[]), conversation_summary="", code_files=[])
-
-    metadata_path = os.path.join(snapshot_path, "metadata.json")
-    if os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, encoding="utf-8") as f:
-                metadata = json.load(f)
-                result.metadata = SnapshotMetadata(
-                    timestamp=metadata.get("timestamp", ""),
-                    reason=metadata.get("reason", ""),
-                    active_files=metadata.get("active_files", []),
-                )
-        except Exception:
-            pass
-
-    summary_path = os.path.join(snapshot_path, "conversation_summary.json")
-    if os.path.exists(summary_path):
-        try:
-            with open(summary_path, encoding="utf-8") as f:
-                result.conversation_summary = json.load(f)
-        except Exception:
-            pass
-
-    code_dir = os.path.join(snapshot_path, "code")
-    if os.path.exists(code_dir):
-        for root, dirs, files in os.walk(code_dir):
-            for filename in files:
-                filepath = os.path.join(root, filename)
-                relpath = os.path.relpath(filepath, code_dir)
-
-                try:
-                    with open(filepath, encoding="utf-8") as f:
-                        content = f.read()
-                    result.code_files.append(CodeFile(path=relpath, content=content))
-                except Exception:
-                    pass
-
-    return result
-
-
-@app.get("/api/backups")
-async def list_backups():
-    backups_dir = os.path.join(config_module.WORKSPACE_DIR, ".backups")
-    backups = []
-
-    if not os.path.exists(backups_dir):
-        return BackupListResponse(backups=[])
-
-    try:
-        for entry in os.listdir(backups_dir):
-            filepath = os.path.join(backups_dir, entry)
-
-            if not os.path.isfile(filepath):
-                continue
-
-            stat = os.stat(filepath)
-            backups.append(BackupEntry(
-                name=entry,
-                size=stat.st_size,
-                mtime=stat.st_mtime,
-            ))
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取备份失败: {e!s}")
-
-    backups.sort(key=lambda b: b.mtime, reverse=True)
-
-    return BackupListResponse(backups=backups)
-
-
-@app.get("/api/backups/{backup_name}")
-async def read_backup(backup_name: str):
-    backups_dir = os.path.join(config_module.WORKSPACE_DIR, ".backups")
-    filepath = os.path.join(backups_dir, backup_name)
-
-    real_path = os.path.realpath(filepath)
-    real_root = os.path.realpath(backups_dir)
-    if not real_path.startswith(real_root):
-        raise HTTPException(status_code=403, detail="禁止访问")
-
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="备份文件不存在")
-
-    try:
-        stat = os.stat(filepath)
-
-        with open(filepath, encoding="utf-8") as f:
-            content = f.read()
-
-        return BackupContentResponse(
-            content=content,
-            size=stat.st_size,
-            mtime=stat.st_mtime,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取备份失败: {e!s}")
-
-
-# ============================================================
-# Todo List API
-# ============================================================
-
-from src.infra import db as nano_db
-
-@app.get("/api/todos")
-async def list_todos():
-    try:
-        todos = nano_db.todo_get_all()
-        return {"todos": todos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/todos")
-async def create_todo(title: str, priority: int = 0, category: str | None = None):
-    try:
-        item = nano_db.todo_create(title=title, priority=priority, category=category)
-        return {"todo": item}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.patch("/api/todos/{todo_id}/complete")
-async def complete_todo(todo_id: str):
-    result = nano_db.todo_complete(todo_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    return {"todo": result}
-
-@app.delete("/api/todos/{todo_id}")
-async def delete_todo(todo_id: str):
-    deleted = nano_db.todo_delete(todo_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    return {"deleted": True}
-
-
-# ============================================================
-# Memory API
-# ============================================================
-
-from src.memory.manager import get_memory_manager
-
-@app.get("/api/memories")
-async def list_memories(category: str | None = None, min_importance: int = 0, limit: int = 50):
-    try:
-        mm = get_memory_manager()
-        memories = mm.get(category=category, min_importance=min_importance, limit=limit)
-        return {"memories": memories}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/memories")
-async def create_memory(content: str, category: str, importance: int = 1, tags: str = ""):
-    try:
-        import json
-        tag_list = json.loads(tags) if tags else []
-        mm = get_memory_manager()
-        entry = mm.save(category=category, content=content, importance=importance, tags=tag_list)
-        return {"memory": entry}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/memories/search")
-async def search_memories(q: str, limit: int = 20):
-    try:
-        mm = get_memory_manager()
-        results = mm.search(query=q, limit=limit)
-        return {"memories": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.patch("/api/memories/{memory_id}")
-async def update_memory(memory_id: str, content: str | None = None, importance: int | None = None):
-    result = nano_db.memory_update(memory_id, content, importance)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return {"memory": result}
-
-@app.delete("/api/memories/{memory_id}")
-async def delete_memory(memory_id: str):
-    deleted = nano_db.memory_delete(memory_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return {"deleted": True}
-
-
-# ============================================================
-# Sub-Agent API
-# ============================================================
-
-@app.get("/api/subagents")
-async def list_subagents():
-    try:
-        active = nano_db.subagent_get_active()
-        return {"active": active}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/subagents/{subagent_id}")
-async def get_subagent(subagent_id: str):
-    result = nano_db.subagent_get(subagent_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="SubAgent not found")
-    return {"subagent": result}
-
+# Legacy/files/metrics/config/snapshots/backups/todos/memories/subagents/bash → src/api/routes/config.py + data.py
 
 # ============================================================
 # Static file serving (production)
@@ -2723,7 +2330,22 @@ def _recover_interrupted_runs():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _recover_interrupted_runs()
+
+    # Background cleanup task
+    async def _periodic_cleanup():
+        while True:
+            await asyncio.sleep(600)  # every 10 minutes
+            try:
+                from src.api.services.run_lifecycle_service import cleanup_stale_runs
+                cleaned = cleanup_stale_runs(run_manager, _get_workspace(), older_than_hours=24)
+                if cleaned:
+                    print(f"[cleanup] Cleaned {cleaned} stale run(s)")
+            except Exception as exc:
+                print(f"[cleanup] Error: {exc}")
+
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
     yield
+    cleanup_task.cancel()
     _save_active_runs_state()
 
 

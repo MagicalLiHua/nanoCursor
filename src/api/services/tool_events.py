@@ -1,11 +1,11 @@
-"""Convert raw tool calls into AgentHub domain events."""
+"""Convert raw tool calls into nanoCursor domain events."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
-from src.api.services.agenthub_state import list_team_members
+from src.api.services.agent_state import list_team_members
 from src.api.services.diff_service import get_run_diff
 
 
@@ -75,6 +75,12 @@ CAPABILITY_TRACE_BY_TOOL = {
         "capability_name": "偏好记忆",
         "kind": "tool",
         "agent": "Planner",
+    },
+    "spawn_agent": {
+        "capability_id": "tool.agent_runtime",
+        "capability_name": "动态 Agent 运行时",
+        "kind": "tool",
+        "agent": "Lead",
     },
 }
 

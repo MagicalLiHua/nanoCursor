@@ -1,4 +1,4 @@
-"""Runtime context objects for active AgentHub runs."""
+"""Runtime context objects for active nanoCursor runs."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ class RunContext:
     approval_event: threading.Event | None = None
     approval_decision: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    change_tracker: Any = None
 
     def __post_init__(self) -> None:
         self._ensure_lifecycle()

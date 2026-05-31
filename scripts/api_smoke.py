@@ -174,6 +174,7 @@ def run_smoke() -> list[SmokeResult]:
                 ("GET", "/api/evals", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events/history", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events", None, (200,)),
+                ("GET", f"/api/runs/{thread_id}/outcome", None, (200,)),
                 ("POST", "/api/capabilities/recommend", {"prompt": "build a todo app"}, (200,)),
                 ("POST", "/api/capabilities/skills", {"name": "Smoke Skill", "content": "Use smoke checks."}, (200,)),
                 ("POST", "/api/capabilities/mcp/validate", {"server_id": None}, (200,)),

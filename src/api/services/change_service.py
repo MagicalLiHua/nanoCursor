@@ -88,16 +88,79 @@ def _parse_status(output: str) -> dict[str, str]:
     for line in output.splitlines():
         if not line.strip():
             continue
-        status = line[:2].strip()
+        raw_status = line[:2]
+        status = raw_status.strip()
         path = line[3:].strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        change_type = {
-            "A": "added", "M": "modified", "D": "deleted",
-            "R": "renamed", "C": "added", "??": "added",
-        }.get(status, "modified")
+        status_chars = set(raw_status)
+        if status == "??" or "A" in status_chars or "C" in status_chars:
+            change_type = "added"
+        elif "R" in status_chars:
+            change_type = "renamed"
+        elif "D" in status_chars:
+            change_type = "deleted"
+        else:
+            change_type = "modified"
         result[path] = change_type
     return result
+
+
+def _is_internal_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip("/")
+    return normalized == ".nanocursor" or normalized.startswith((".nanocursor/", ".backups/", ".tasks/", ".snapshots/"))
+
+
+def _safe_workspace_file(workspace: Path, path: str) -> Path | None:
+    if not path or path.startswith(("/", "\\")):
+        return None
+    candidate = (workspace / path).resolve()
+    try:
+        candidate.relative_to(workspace)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _expand_untracked_directories(workspace: Path, status_map: dict[str, str]) -> dict[str, str]:
+    expanded: dict[str, str] = {}
+    for path, change_type in status_map.items():
+        if change_type != "added" or not path.endswith("/"):
+            expanded[path] = change_type
+            continue
+
+        directory = (workspace / path).resolve()
+        try:
+            directory.relative_to(workspace)
+        except ValueError:
+            expanded[path] = change_type
+            continue
+        if not directory.is_dir():
+            expanded[path] = change_type
+            continue
+
+        found = False
+        for child in sorted(directory.rglob("*")):
+            if not child.is_file():
+                continue
+            relative = child.relative_to(workspace).as_posix()
+            if _is_internal_path(relative) or "/.git/" in f"/{relative}/":
+                continue
+            expanded[relative] = "added"
+            found = True
+        if not found:
+            expanded[path] = change_type
+    return expanded
+
+
+def _line_count(workspace: Path, path: str) -> int:
+    file_path = _safe_workspace_file(workspace, path)
+    if file_path is None:
+        return 0
+    try:
+        return len(file_path.read_text(encoding="utf-8", errors="replace").splitlines())
+    except OSError:
+        return 0
 
 
 def _parse_diff_unified_zero(output: str) -> dict[str, int]:
@@ -116,16 +179,19 @@ def _parse_diff_unified_zero(output: str) -> dict[str, int]:
 
 def collect_changes_git(workspace: Path, include_untracked: bool = True) -> list[FilePatchSummary]:
     """Collect file changes using git."""
-    numstat_result = _run_git(workspace, ["diff", "--numstat", "--", "."])
+    numstat_result = _run_git(workspace, ["diff", "--numstat", "--find-renames", "--", "."])
     status_result = _run_git(workspace, ["status", "--porcelain", "--", "."])
 
     if include_untracked:
-        numstat_all = _run_git(workspace, ["diff", "--numstat", "HEAD", "--", "."])
+        numstat_all = _run_git(workspace, ["diff", "--numstat", "--find-renames", "HEAD", "--", "."])
         if numstat_all.returncode == 0 and numstat_all.stdout.strip():
             numstat_result = numstat_all
 
     numstat = _parse_numstat(numstat_result.stdout) if numstat_result.returncode == 0 else {}
     status_map = _parse_status(status_result.stdout) if status_result.returncode == 0 else {}
+    status_map = _expand_untracked_directories(workspace, status_map)
+    status_map = {path: change_type for path, change_type in status_map.items() if not _is_internal_path(path)}
+    numstat = {path: stats for path, stats in numstat.items() if not _is_internal_path(path)}
 
     all_files = set(numstat.keys()) | set(status_map.keys())
     files: list[FilePatchSummary] = []
@@ -133,6 +199,8 @@ def collect_changes_git(workspace: Path, include_untracked: bool = True) -> list
     for path in sorted(all_files):
         adds, dels = numstat.get(path, (0, 0))
         ct = status_map.get(path, "modified")
+        if ct == "added" and adds == 0 and dels == 0:
+            adds = _line_count(workspace, path)
         risk = _classify_risk(path, ct, adds, dels)
 
         files.append(FilePatchSummary(
@@ -146,7 +214,7 @@ def collect_changes_git(workspace: Path, include_untracked: bool = True) -> list
         ))
 
     # Add hunk counts
-    diff_unified = _run_git(workspace, ["diff", "--unified=0", "--", "."])
+    diff_unified = _run_git(workspace, ["diff", "--unified=0", "--find-renames", "HEAD", "--", "."])
     if diff_unified.returncode == 0:
         hunk_map = _parse_diff_unified_zero(diff_unified.stdout)
         for f in files:

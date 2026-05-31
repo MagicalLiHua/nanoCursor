@@ -1,4 +1,4 @@
-"""Artifact Center aggregation for AgentHub runs."""
+"""Artifact Center aggregation for nanoCursor runs."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 from src.api.models import AgentEvent
 from src.api.services.diff_service import get_run_diff
 from src.api.services.event_store import get_event_store
+from src.api.services.parallel_agent_service import load_parallel_merge_plan, load_parallel_proposals
 from src.api.services.quality_service import build_quality_gate
 from src.api.services.report_service import build_delivery_report
 from src.api.services.score_service import build_delivery_score
@@ -106,6 +107,8 @@ def build_artifact_center(thread_id: str, workspace_dir: str | None = None) -> d
     quality = build_quality_gate(thread_id, str(workspace))
     score = build_delivery_score(thread_id, str(workspace))
     traceability = build_requirement_traceability(thread_id, str(workspace))
+    parallel_proposals = load_parallel_proposals(thread_id, str(workspace))
+    parallel_merge_plan = load_parallel_merge_plan(thread_id, str(workspace))
 
     tasks = _run_tasks(events)
     tests = _test_results(events)
@@ -114,6 +117,11 @@ def build_artifact_center(thread_id: str, workspace_dir: str | None = None) -> d
     report_path = run_dir / "report.md"
     diff_path = run_dir / "diff.patch"
     requirements_path = run_dir / "requirements.json"
+    report_status = (
+        "empty"
+        if report.get("source") == "not_applicable"
+        else _status_for_artifact(True, bool(report.get("markdown")))
+    )
 
     artifacts = [
         {
@@ -168,7 +176,7 @@ def build_artifact_center(thread_id: str, workspace_dir: str | None = None) -> d
             "id": "report",
             "kind": "report",
             "label": "交付报告",
-            "status": _status_for_artifact(True, bool(report.get("markdown"))),
+            "status": report_status,
             "summary": report.get("summary", ""),
             "path": str(report_path) if report_path.exists() else None,
             "payload": report,
@@ -199,6 +207,32 @@ def build_artifact_center(thread_id: str, workspace_dir: str | None = None) -> d
             "summary": "未发现阻塞风险" if not risks else f"{len(risks)} 个风险或缺失项",
             "count": len(risks),
             "payload": {"risks": risks},
+        },
+        {
+            "id": "parallel_proposals",
+            "kind": "agent_proposals",
+            "label": "并行 Agent 提案",
+            "status": _status_for_artifact(False, bool(parallel_proposals.get("proposals"))),
+            "summary": (
+                f"{parallel_proposals.get('summary', {}).get('proposal_count', 0)} 个子 Agent 提案 · "
+                f"{parallel_proposals.get('summary', {}).get('suggested_file_count', 0)} 个建议关注文件"
+            ),
+            "path": str(run_dir / "parallel_proposals.json") if (run_dir / "parallel_proposals.json").exists() else None,
+            "count": parallel_proposals.get("summary", {}).get("proposal_count", 0),
+            "payload": parallel_proposals,
+        },
+        {
+            "id": "parallel_merge_plan",
+            "kind": "agent_merge",
+            "label": "Lead 合并策略",
+            "status": _status_for_artifact(False, bool(parallel_merge_plan.get("accepted_proposals"))),
+            "summary": (
+                f"接受 {parallel_merge_plan.get('summary', {}).get('accepted_count', 0)} 个提案 · "
+                f"暂缓 {parallel_merge_plan.get('summary', {}).get('deferred_count', 0)} 个"
+            ),
+            "path": str(run_dir / "parallel_merge_plan.json") if (run_dir / "parallel_merge_plan.json").exists() else None,
+            "count": parallel_merge_plan.get("summary", {}).get("accepted_count", 0),
+            "payload": parallel_merge_plan,
         },
     ]
 

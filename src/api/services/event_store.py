@@ -1,4 +1,4 @@
-"""Persistent run event storage for the AgentHub web experience."""
+"""Persistent run event storage for the nanoCursor web experience."""
 
 from __future__ import annotations
 

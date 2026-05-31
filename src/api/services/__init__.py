@@ -1,1 +1,1 @@
-"""Service helpers for the AgentHub API layer."""
+"""Service helpers for the nanoCursor API layer."""

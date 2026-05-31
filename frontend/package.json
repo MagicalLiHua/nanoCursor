@@ -1,14 +1,24 @@
 {
   "name": "nanocursor-frontend",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/serve.mjs",
-    "preview": "node scripts/serve.mjs",
-    "check": "node --check src/main.js && node --check src/actions/capabilityActions.js && node --check src/actions/runActions.js && node --check src/actions/teamActions.js && node --check src/actions/workspaceActions.js && node --check src/app/bootstrap.js && node --check src/controllers/busyController.js && node --check src/controllers/capabilityController.js && node --check src/controllers/commandController.js && node --check src/controllers/ephemeralAgentController.js && node --check src/controllers/layoutController.js && node --check src/controllers/recommendationController.js && node --check src/controllers/replayController.js && node --check src/controllers/runLifecycleController.js && node --check src/controllers/runStateController.js && node --check src/controllers/toastController.js && node --check src/controllers/workspaceSessionController.js && node --check src/core/apiClient.js && node --check src/core/diff.js && node --check src/core/format.js && node --check src/core/storage.js && node --check src/hydrators/runHydrator.js && node --check src/state/demoState.js && node --check src/state/mappers.js && node --check src/state/runDefaults.js && node --check src/state/selectors.js && node --check src/events/capabilityBindings.js && node --check src/events/commandBindings.js && node --check src/events/composerBindings.js && node --check src/events/domBindings.js && node --check src/events/ephemeralDelegatedBindings.js && node --check src/events/evidenceBindings.js && node --check src/events/layoutBindings.js && node --check src/events/workspaceBindings.js && node --check src/render/artifacts.js && node --check src/render/capabilities.js && node --check src/render/chat.js && node --check src/render/contextContent.js && node --check src/render/contextExtras.js && node --check src/render/contextPanel.js && node --check src/render/evidenceContent.js && node --check src/render/evidenceShell.js && node --check src/render/recovery.js && node --check src/render/report.js && node --check src/render/shell.js && node --check src/render/sidebar.js && node --check src/render/workspaceNav.js && node --check src/services/approvalService.js && node --check src/services/capabilityRecommendation.js && node --check src/services/commandExecutor.js && node --check src/services/mcpConfig.js && node --check src/services/reportText.js && node --check src/services/runEventHandler.js && node --check src/services/workspaceSettings.js && node --check src/ui/commands.js && node --check src/ui/commandPalette.js && node --check src/ui/toast.js && node --check scripts/serve.mjs"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "dev:legacy": "node scripts/serve.mjs",
+    "check": "vite build"
+  },
+  "dependencies": {
+    "lucide-react": "^1.16.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0"
+    "@playwright/test": "^1.60.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.14"
   }
 }

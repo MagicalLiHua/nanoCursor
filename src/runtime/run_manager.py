@@ -56,6 +56,8 @@ class RunManager:
         workspace = str(Path(run_ctx.workspace_dir).resolve())
 
         with self._lock:
+            if thread_id in self._active:
+                raise ValueError(f"Run 已在活跃列表中: {thread_id}")
             if _is_write_mode(run_ctx):
                 existing = self._workspace_locks.get(workspace)
                 if existing and existing != thread_id:
@@ -129,7 +131,7 @@ class RunManager:
             sm.transition(RunStatus.CANCELLING)
         ctx = self.get(thread_id)
         if ctx and hasattr(ctx, "set_status"):
-            ctx.set_status("cancelled")
+            ctx.set_status("cancelling")
 
     def finalize(self, thread_id: str, final_status: str | RunStatus) -> None:
         sm = self.get_state_machine(thread_id)

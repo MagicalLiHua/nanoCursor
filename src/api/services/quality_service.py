@@ -1,4 +1,4 @@
-"""Rule-based quality gate checks for AgentHub runs."""
+"""Rule-based quality gate checks for nanoCursor runs."""
 
 from __future__ import annotations
 

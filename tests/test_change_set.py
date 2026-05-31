@@ -221,6 +221,60 @@ class TestCollectChangesGit:
         assert cs.files[0].change_type == "added"
         assert cs.files[0].additions == 2
 
+    def test_collect_deleted_and_renamed_files(self, tmp_path):
+        ws = tmp_path / "repo"
+        ws.mkdir()
+        subprocess.run(["git", "init"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=ws, capture_output=True)
+        (ws / "deleted.py").write_text("print('bye')\n", encoding="utf-8")
+        (ws / "old_name.py").write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=ws, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=ws, capture_output=True)
+
+        (ws / "deleted.py").unlink()
+        subprocess.run(["git", "mv", "old_name.py", "new_name.py"], cwd=ws, capture_output=True)
+
+        files = collect_changes_git(ws)
+        by_path = {item.path: item for item in files}
+
+        assert by_path["deleted.py"].change_type == "deleted"
+        assert by_path["deleted.py"].risk == "high"
+        assert by_path["new_name.py"].change_type == "renamed"
+
+    def test_collect_untracked_directory_expands_to_files_with_additions(self, tmp_path):
+        ws = tmp_path / "repo"
+        ws.mkdir()
+        subprocess.run(["git", "init"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=ws, capture_output=True)
+        (ws / "README.md").write_text("# Demo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=ws, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=ws, capture_output=True)
+
+        (ws / "src").mkdir()
+        (ws / "src" / "created.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
+
+        files = collect_changes_git(ws)
+
+        assert [(item.path, item.change_type, item.additions) for item in files] == [
+            ("src/created.py", "added", 2)
+        ]
+
+    def test_collect_ignores_internal_runtime_paths(self, tmp_path):
+        ws = tmp_path / "repo"
+        ws.mkdir()
+        subprocess.run(["git", "init"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=ws, capture_output=True)
+        (ws / "README.md").write_text("# Demo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=ws, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=ws, capture_output=True)
+        (ws / ".nanocursor" / "runs" / "x").mkdir(parents=True)
+        (ws / ".nanocursor" / "runs" / "x" / "session.json").write_text("{}", encoding="utf-8")
+
+        assert collect_changes_git(ws) == []
+
 
 class TestReviewChanges:
     def test_review_sets_status(self):

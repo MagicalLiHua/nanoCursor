@@ -1,4 +1,4 @@
-"""Run history summaries for the AgentHub workspace."""
+"""Run history summaries for the nanoCursor workspace."""
 
 from __future__ import annotations
 

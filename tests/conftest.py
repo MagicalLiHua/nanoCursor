@@ -12,6 +12,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# Disable LLM classifier in tests to ensure deterministic keyword-based routing.
+os.environ["LLM_CLASSIFIER_ENABLED"] = "false"
+
 
 def _patch_file_tools_workspace(workspace_str, monkeypatch):
     """Patch both config and file_tools module-level WORKSPACE_DIR refs."""

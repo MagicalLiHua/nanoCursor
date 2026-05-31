@@ -27,6 +27,24 @@ def test_execution_plan_adds_role_specific_stages():
     assert len(plan["tasks"]) == len(plan["stages"])
 
 
+def test_analysis_only_plan_uses_read_only_stages(tmp_path):
+    team = [
+        {"name": "Lead", "role": "lead", "capabilities": ["tool.memory"]},
+        {"name": "Planner", "role": "planner", "capabilities": ["tool.project_index"]},
+        {"name": "Tester", "role": "tester", "capabilities": ["skill.delivery-review"]},
+    ]
+
+    plan = build_execution_plan("只分析 README，不修改任何文件", team, str(tmp_path))
+    stage_ids = [stage["id"] for stage in plan["stages"]]
+
+    assert plan["strategy"] == "analysis_only"
+    assert stage_ids == ["intake", "plan"]
+    assert "implement" not in stage_ids
+    assert "verify" not in stage_ids
+    assert all(risk["title"] != "缺少实现 Agent" for risk in plan["risks"])
+    assert plan["tool_policy"]["budgets"]["max_file_writes"] == 0
+
+
 def test_execution_plan_includes_tool_policy_and_builtin_skill_context(tmp_path):
     team = [
         {"name": "Coder", "role": "coder", "capabilities": ["tool.file_ops"]},
@@ -117,7 +135,7 @@ def test_runtime_instructions_include_team_stages_and_constraints():
 
     instructions = build_runtime_instructions(plan, team)
 
-    assert "AgentHub 动态执行编排" in instructions
+    assert "nanoCursor 动态执行编排" in instructions
     assert "Designer" in instructions
     assert "界面体验复核" in instructions
     assert "Diff 风险" in instructions

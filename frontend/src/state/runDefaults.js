@@ -2,6 +2,7 @@ export function blankReport() {
   return {
     summary: "",
     markdown: "",
+    source: "",
     requirements: [],
     changedFiles: [],
     risks: [],
