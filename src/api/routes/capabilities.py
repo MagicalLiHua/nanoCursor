@@ -11,6 +11,7 @@ from src.api.models import (
     McpServerUpsertRequest,
     McpToolCallRequest,
     McpValidateRequest,
+    PreferenceCreateRequest,
     SkillImportRequest,
     SkillUpdateRequest,
     TeamAgentCreateRequest,
