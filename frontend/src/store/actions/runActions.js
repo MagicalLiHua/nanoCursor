@@ -10,12 +10,18 @@ import {
   loadRunSessionAndEvents,
   loadRunArtifactsBundle as loadRunArtifactsBundleApi,
   loadReplayEvents,
+  loadRunState as loadRunStateApi,
+  loadRunSnapshot as loadRunSnapshotApi,
 } from "../../actions/runActions.js";
 import { loadConversation } from "../../actions/teamActions.js";
-import { applyRunArtifactsBundle } from "../../hydrators/runHydrator.js";
+import { applyRunArtifactsBundle, applyRunSnapshot } from "../../hydrators/runHydrator.js";
 
 function mapBackendTeam(members) {
   return mapBackendTeamBase(members, { agentToneFromName });
+}
+
+function isPlaceholderConversationTitle(title = "") {
+  return !String(title || "").trim() || String(title).trim() === "新会话";
 }
 
 export function createRunActions(set, get) {
@@ -79,27 +85,35 @@ export function createRunActions(set, get) {
       }
 
       set({ currentThreadId: run.thread_id });
-      get().upsertRun({
-        id: run.thread_id,
-        kind: "run",
-        title: runTitle(prompt, "新任务"),
-        status: "running",
-        time: nowTime(),
-        prompt,
-      });
 
       const conversationId = get().currentConversationId;
       if (conversationId) {
+        const existingConversation = get().runs.find((item) => item.id === conversationId);
+        const title = isPlaceholderConversationTitle(existingConversation?.title)
+          ? runTitle(prompt, "新会话")
+          : existingConversation.title;
+        const conversationPrompt = String(existingConversation?.prompt || "").trim()
+          ? existingConversation.prompt
+          : prompt;
         get().upsertRun({
           id: conversationId,
           kind: "conversation",
           conversationId,
           threadId: run.thread_id,
-          title: runTitle(prompt, "新会话"),
+          title,
+          status: "running",
+          time: nowTime(),
+          prompt: conversationPrompt,
+          agentCount: get().team.length,
+        });
+      } else {
+        get().upsertRun({
+          id: run.thread_id,
+          kind: "run",
+          title: runTitle(prompt, "新任务"),
           status: "running",
           time: nowTime(),
           prompt,
-          agentCount: get().team.length,
         });
       }
 
@@ -110,6 +124,7 @@ export function createRunActions(set, get) {
       });
       get().showToast({ kind: "success", title: "运行已启动", content: shortId(run.thread_id, "") });
       await get().refreshWorkspaceData({ allowEmpty: false });
+      await refreshRunSnapshot(run.thread_id, { focusPanel: false, replaceMessages: false });
       connectEventsSSE(run.thread_id);
     } catch (error) {
       set({ status: "failed" });
@@ -160,6 +175,34 @@ export function createRunActions(set, get) {
 
     try {
       const api = getApiClient();
+      let snapshot = null;
+      try {
+        snapshot = await loadRunSnapshotApi({ fetchJson: api.fetchJson, threadId });
+      } catch {
+        // Older backend fallback below.
+      }
+
+      if (snapshot) {
+        applySnapshotToStore(snapshot, { replaceMessages: true });
+        get().upsertRun({
+          id: threadId,
+          title: runTitle(snapshot.run?.prompt || selectedRun?.prompt, threadId),
+          status: snapshot.run?.status || selectedRun?.status || get().status,
+          time: formatTime(snapshot.run?.updated_at || snapshot.run?.created_at) || selectedRun?.time || "",
+          mode: snapshot.run?.mode || selectedRun?.mode || "agenthub_delivery",
+          prompt: snapshot.run?.prompt || selectedRun?.prompt || "",
+          eventCount: Array.isArray(snapshot.timeline) ? snapshot.timeline.length : selectedRun?.eventCount || 0,
+          changedFilesCount: snapshot.changes?.files_changed || selectedRun?.changedFilesCount || 0,
+          hasDiff: Boolean(snapshot.changes?.files_changed || snapshot.outcome?.changes?.diff),
+          hasReport: Boolean(snapshot.outcome?.report?.markdown || snapshot.outcome?.report?.summary),
+          lastEventType: snapshot.timeline?.at?.(-1)?.type || selectedRun?.lastEventType || "",
+        });
+        if (["running", "waiting_approval", "cancelling"].includes(get().status)) {
+          connectEventsSSE(threadId);
+        }
+        return;
+      }
+
       const { sessionResult, eventsResult } = await loadRunSessionAndEvents({ fetchJson: api.fetchJson, threadId });
 
       const session = sessionResult.status === "fulfilled" ? sessionResult.value : null;
@@ -179,9 +222,10 @@ export function createRunActions(set, get) {
       if (session?.execution_plan) {
         get().syncTasksFromExecutionPlan(session.execution_plan);
         if (get().status === "running" && get().tasks.length) {
-          set({ rightTab: "tasks" });
+          set({ rightTab: "progress" });
         }
       }
+      await refreshRunState(threadId, { focusPanel: false });
       if (prompt) {
         set((s) => ({
           messages: s.messages.map((m, i) =>
@@ -414,6 +458,115 @@ export function createRunActions(set, get) {
     }
   }
 
+  function applySnapshotToStore(snapshot, { replaceMessages = false } = {}) {
+    const state = get();
+    const tempState = {
+      ...state,
+      report: { ...state.report },
+      runOutcome: state.runOutcome,
+      diff: state.diff,
+      diffFiles: state.diffFiles,
+      metrics: { ...state.metrics },
+      artifactCenter: { ...state.artifactCenter },
+      recoveryCenter: { ...state.recoveryCenter },
+      ephemeralAgents: { ...state.ephemeralAgents },
+      team: Array.isArray(state.team) ? [...state.team] : [],
+      messages: Array.isArray(state.messages) ? [...state.messages] : [],
+      events: Array.isArray(state.events) ? [...state.events] : [],
+      replay: { ...state.replay },
+      approval: { ...state.approval },
+    };
+
+    applyRunSnapshot({
+      state: tempState,
+      snapshot,
+      replaceMessages,
+      setDiffState: (diff, changedFiles) => {
+        tempState.diff = diff || "";
+        tempState.diffFiles = parseUnifiedDiff(diff || "", changedFiles);
+      },
+    });
+
+    set({
+      runSnapshot: tempState.runSnapshot,
+      status: tempState.status,
+      currentRunStatus: tempState.currentRunStatus,
+      currentThreadId: tempState.currentThreadId,
+      currentConversationId: tempState.currentConversationId,
+      workspaceDir: tempState.workspaceDir,
+      workspaceInput: tempState.workspaceInput,
+      messages: tempState.messages,
+      events: tempState.events,
+      replay: tempState.replay,
+      tasks: tempState.tasks,
+      metrics: tempState.metrics,
+      report: tempState.report,
+      runOutcome: tempState.runOutcome,
+      diff: tempState.diff,
+      diffFiles: tempState.diffFiles,
+      artifactCenter: tempState.artifactCenter,
+      recoveryCenter: tempState.recoveryCenter,
+      agentActivities: tempState.agentActivities,
+      ephemeralAgents: tempState.ephemeralAgents,
+      team: tempState.team,
+      approval: tempState.approval,
+      selectedDiffFile: tempState.diffFiles?.some((file) => file.path === state.selectedDiffFile)
+        ? state.selectedDiffFile
+        : tempState.diffFiles?.[0]?.path || "",
+    });
+  }
+
+  async function refreshRunSnapshot(threadId = get().currentThreadId, { focusPanel = false, replaceMessages = false } = {}) {
+    if (!threadId || threadId === "pending") return null;
+    const api = getApiClient();
+    try {
+      const snapshot = await loadRunSnapshotApi({ fetchJson: api.fetchJson, threadId });
+      applySnapshotToStore(snapshot, { replaceMessages });
+      if (focusPanel && Array.isArray(snapshot.tasks) && snapshot.tasks.length) {
+        set({ rightTab: "progress" });
+      }
+      return snapshot;
+    } catch (error) {
+      get().addTimelineEvent({
+        type: "error",
+        title: "运行快照读取失败",
+        content: error.message,
+      });
+      return refreshRunState(threadId, { focusPanel });
+    }
+  }
+
+  async function refreshRunState(threadId = get().currentThreadId, { focusPanel = false } = {}) {
+    if (!threadId || threadId === "pending") return null;
+    const api = getApiClient();
+    try {
+      const runState = await loadRunStateApi({ fetchJson: api.fetchJson, threadId });
+      const tasks = Array.isArray(runState?.tasks) ? runState.tasks : [];
+      const mapped = tasks.map((task) => get().normalizeTask?.(task) || null).filter(Boolean);
+      if (mapped.length) {
+        set((state) => {
+          const existing = new Map(state.tasks.map((task) => [task.id, task]));
+          for (const task of mapped) {
+            existing.set(task.id, { ...(existing.get(task.id) || {}), ...task });
+          }
+          return {
+            tasks: Array.from(existing.values()),
+            metrics: { ...state.metrics, tasks: mapped.length },
+            rightTab: focusPanel ? "tasks" : state.rightTab,
+          };
+        });
+      }
+      return runState;
+    } catch (error) {
+      get().addTimelineEvent({
+        type: "error",
+        title: "任务状态读取失败",
+        content: error.message,
+      });
+      return null;
+    }
+  }
+
   return {
     runPrompt,
     restoreRun,
@@ -422,6 +575,8 @@ export function createRunActions(set, get) {
     cancelCurrentRun,
     buildConversationHistory,
     hydrateRunArtifacts,
+    refreshRunState,
+    refreshRunSnapshot,
   };
 }
 

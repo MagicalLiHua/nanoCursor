@@ -1,5 +1,6 @@
 import React from "react";
 import { replayStatusLabel, agentToneFromName } from "../../core/format.js";
+import EmptyState from "./EmptyState.jsx";
 
 const FILTER_OPTIONS = [
   { value: "all", label: "全部事件" },
@@ -143,7 +144,10 @@ export default function Timeline({ state, eventKind, renderEventCapabilityTrace,
           )}
         </div>
       ) : (
-        <div className="empty">{filter === "all" ? "等待事件流" : "没有匹配的事件"}</div>
+        <EmptyState
+          title={filter === "all" ? "等待事件流" : "没有匹配事件"}
+          detail={filter === "all" ? "运行开始后，Agent 活动、工具调用和错误事件会实时出现。" : "换一个筛选条件可以查看其他事件。"}
+        />
       )}
     </div>
   );

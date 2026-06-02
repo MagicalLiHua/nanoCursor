@@ -411,7 +411,7 @@ def recommend_capabilities(prompt: str, workspace_dir: str | None = None) -> dic
         for rule in RECOMMENDATION_RULES
         if any(keyword.lower() in prompt_text for keyword in rule["keywords"])
     ]
-    if intent["route"] == "lead_direct_reply" and not matched:
+    if intent.get("execution_route") == "lead_direct_reply" and not matched:
         matched = [
             {
                 "id": "lead_direct",

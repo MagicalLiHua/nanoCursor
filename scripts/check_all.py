@@ -3,6 +3,7 @@
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +24,7 @@ def main() -> int:
     for pattern in py_patterns:
         matches = list(PROJECT_ROOT.glob(pattern))
         if matches:
-            rc = run(["python", "-m", "py_compile"] + [str(p) for p in matches], label="compile")
+            rc = run([sys.executable, "-m", "py_compile"] + [str(p) for p in matches], label="compile")
             if rc != 0:
                 failed += 1
 
@@ -33,14 +34,29 @@ def main() -> int:
         failed += 1
 
     # Backend audit
-    rc = run(["python", "scripts/backend_audit.py"], label="audit")
+    rc = run([sys.executable, "scripts/backend_audit.py"], label="audit")
     if rc != 0:
         failed += 1
 
     # API smoke
-    rc = run(["python", "scripts/api_smoke.py"], label="api-smoke")
+    rc = run([sys.executable, "scripts/api_smoke.py"], label="api-smoke")
     if rc != 0:
         failed += 1
+
+    # Agent runtime eval gate
+    with tempfile.TemporaryDirectory(prefix="nanocursor-agent-eval-gate-") as tmp:
+        rc = run(
+            [
+                sys.executable,
+                "scripts/run_agent_evals.py",
+                "--workspace-dir",
+                tmp,
+                "--no-persist",
+            ],
+            label="agent-evals",
+        )
+        if rc != 0:
+            failed += 1
 
     # Frontend check
     rc = run(["npm", "run", "check"], cwd=str(PROJECT_ROOT / "frontend"), label="frontend")

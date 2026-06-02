@@ -66,6 +66,61 @@
   white-space: normal;
 }
 
+.empty-state {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  min-height: 180px;
+  margin: 18px;
+  padding: 28px 22px;
+  border: 1px dashed rgba(216, 226, 234, 0.95);
+  border-radius: 14px;
+  background: #f8fafc;
+  color: var(--muted);
+  text-align: center;
+  writing-mode: horizontal-tb;
+}
+
+.empty-state.compact {
+  min-height: 86px;
+  margin: 0;
+  padding: 18px 14px;
+}
+
+.empty-state-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(216, 226, 234, 0.95);
+  border-radius: 12px;
+  background: #ffffff;
+  color: #8a96a8;
+}
+
+.empty-state.compact .empty-state-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+}
+
+.empty-state strong {
+  color: #3b4656;
+  font-size: 14px;
+  font-weight: 800;
+  writing-mode: horizontal-tb;
+}
+
+.empty-state p {
+  max-width: 420px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  writing-mode: horizontal-tb;
+}
+
 .bottom-summary {
   display: flex;
   align-items: center;

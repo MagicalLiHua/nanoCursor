@@ -3,6 +3,7 @@
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ def main() -> int:
         "src/agent/*.py",
     ]
     for pattern in py_files:
-        rc = run(["python3", "-m", "py_compile"] +
+        rc = run([sys.executable, "-m", "py_compile"] +
                  [str(p) for p in PROJECT_ROOT.glob(pattern)], label="py_compile")
         if rc != 0:
             failed += 1
@@ -35,6 +36,21 @@ def main() -> int:
     rc = run(["pytest", "-q"], label="pytest")
     if rc != 0:
         failed += 1
+
+    # Agent runtime eval gate
+    with tempfile.TemporaryDirectory(prefix="nanocursor-agent-eval-gate-") as tmp:
+        rc = run(
+            [
+                sys.executable,
+                "scripts/run_agent_evals.py",
+                "--workspace-dir",
+                tmp,
+                "--no-persist",
+            ],
+            label="agent-evals",
+        )
+        if rc != 0:
+            failed += 1
 
     # Frontend check
     rc = run(["npm", "run", "check"], cwd=str(PROJECT_ROOT / "frontend"), label="frontend")

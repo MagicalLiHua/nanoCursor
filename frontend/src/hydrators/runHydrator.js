@@ -2,6 +2,9 @@ import {
   blankEphemeralAgents,
   normalizeEphemeralAgentsResult,
 } from "../state/runDefaults.js";
+import { agentToneFromName, formatTime } from "../core/format.js";
+import { mapBackendTeam, normalizeTask } from "../state/mappers.js";
+import { inferTaskCapabilities } from "../state/selectors.js";
 
 export function mapTraceability(traceability = {}) {
   return {
@@ -190,9 +193,248 @@ export function applyRunOutcome({ state, outcome, setDiffState, setTraceability 
   }
 }
 
+export function applyRunSnapshot({
+  state,
+  snapshot,
+  setDiffState,
+  setTraceability = (traceability) => applyTraceability(state, traceability),
+  replaceMessages = false,
+}) {
+  if (!snapshot || typeof snapshot !== "object") return;
+  const snapshotThreadId = snapshot.run?.thread_id;
+  if (
+    snapshotThreadId &&
+    state.currentThreadId &&
+    state.currentThreadId !== "pending" &&
+    snapshotThreadId !== state.currentThreadId
+  ) {
+    return;
+  }
+
+  state.runSnapshot = snapshot;
+
+  const run = snapshot.run || {};
+  const workspace = snapshot.workspace || {};
+  const conversation = snapshot.conversation || {};
+  const changes = snapshot.changes || {};
+  const quality = snapshot.quality || {};
+  const timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
+
+  if (run.thread_id) state.currentThreadId = run.thread_id;
+  if (run.status) {
+    state.status = run.status;
+    state.currentRunStatus = run.status;
+  }
+  if (workspace.path) {
+    state.workspaceDir = workspace.path;
+    state.workspaceInput = workspace.path;
+  }
+  if (conversation.conversation_id) {
+    state.currentConversationId = conversation.conversation_id;
+  }
+
+  const mappedMessages = mapSnapshotMessages(conversation.messages || []);
+  if (mappedMessages.length && (replaceMessages || !Array.isArray(state.messages) || state.messages.length === 0)) {
+    state.messages = mappedMessages;
+  }
+
+  state.events = timeline.map(mapSnapshotTimelineEvent);
+  state.replay = {
+    ...(state.replay || {}),
+    events: timeline,
+    index: timeline.length,
+    status: timeline.length ? "ready" : "idle",
+    prompt: run.prompt || state.replay?.prompt || "",
+    startedAt: formatTime(run.created_at) || state.replay?.startedAt || "",
+  };
+
+  const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+  state.tasks = run.strategy === "lead_direct_reply"
+    ? []
+    : tasks.map((task) => normalizeTask(task, { inferTaskCapabilities })).filter(Boolean);
+  state.metrics = {
+    ...(state.metrics || {}),
+    tasks: state.tasks.length,
+    files: Number(changes.files_changed ?? changes.files?.length ?? state.metrics?.files ?? 0),
+  };
+
+  const outcome = snapshot.outcome && typeof snapshot.outcome === "object" ? snapshot.outcome : null;
+  if (outcome && Object.keys(outcome).length) {
+    applyRunOutcome({ state, outcome, setDiffState, setTraceability });
+  } else if (Array.isArray(changes.files) && changes.files.length) {
+    setDiffState?.("", changes.files);
+    state.report.changedFiles = changes.files.map((file) => file.path || file).filter(Boolean);
+  }
+
+  if (Array.isArray(snapshot.artifacts) && snapshot.artifacts.length) {
+    state.artifactCenter = {
+      ...(state.artifactCenter || {}),
+      status: snapshot.run?.status || state.artifactCenter?.status || "ready",
+      artifacts: snapshot.artifacts,
+    };
+  }
+
+  if (quality && Object.keys(quality).length) {
+    state.report.quality = quality;
+    if (Array.isArray(quality.risks) && quality.risks.length) {
+      state.report.risks = quality.risks;
+      state.recoveryCenter = {
+        ...(state.recoveryCenter || {}),
+        risks: quality.risks,
+      };
+    }
+  }
+
+  state.agentActivities = run.strategy === "lead_direct_reply" && !run.is_active
+    ? []
+    : mapSnapshotActivities(snapshot.activity?.items || []);
+  state.ephemeralAgents = normalizeEphemeralAgentsResult(
+    {
+      agents: Array.isArray(snapshot.agents) ? snapshot.agents : [],
+      active_count: Array.isArray(snapshot.agents)
+        ? snapshot.agents.filter((agent) => !["archived", "expired"].includes(agent.status)).length
+        : 0,
+      total: Array.isArray(snapshot.agents) ? snapshot.agents.length : 0,
+      includeArchived: Boolean(state.ephemeralAgents?.includeArchived),
+    },
+    state.ephemeralAgents || blankEphemeralAgents(),
+  );
+
+  const teamMembers = mapSnapshotTeamMembers(snapshot);
+  if (teamMembers.length) {
+    state.team = teamMembers;
+  }
+
+  const pendingApproval = Array.isArray(snapshot.approvals) ? snapshot.approvals[0] : null;
+  if (pendingApproval) {
+    state.approval = mapSnapshotApproval(pendingApproval);
+  } else if (state.approval?.kind === "tool" && state.approval?.status === "pending") {
+    state.approval = { status: "idle", planId: "", title: "", content: "", riskLevel: "", tasks: [], decision: "", comment: "" };
+  }
+}
+
 function hasChangeEvidence(outcome = {}) {
   const changes = outcome.changes || {};
   return Boolean(changes.diff || (Array.isArray(changes.files) && changes.files.length));
+}
+
+function mapSnapshotMessages(messages = []) {
+  return messages
+    .filter((message) => String(message?.content || "").trim())
+    .map((message) => ({
+      role: message.role === "assistant" ? "assistant" : "user",
+      author: message.role === "assistant"
+        ? `${message.agent || "Lead"} Agent`
+        : "用户",
+      time: formatTime(message.timestamp) || "",
+      content: message.content,
+    }));
+}
+
+function mapSnapshotTimelineEvent(event = {}) {
+  return {
+    id: event.id,
+    type: event.type || "event",
+    title: event.title || event.type || "事件",
+    content: event.content || "",
+    time: formatTime(event.timestamp) || "",
+    agent: event.agent || "",
+    payload: event.payload || {},
+  };
+}
+
+function mapSnapshotActivities(items = []) {
+  return items
+    .filter((item) => String(item?.action || item?.title || "").trim())
+    .slice()
+    .reverse()
+    .map((item) => ({
+      agent: normalizeAgentLabel(item.agent),
+      title: item.title || item.type || "Agent 活动",
+      text: item.action || item.title || "",
+      eventType: item.type || "agent_activity",
+      time: formatTime(item.timestamp) || "",
+      explicitAgentWork: true,
+      inputTokens: 0,
+      outputTokens: 0,
+    }));
+}
+
+function mapSnapshotTeamMembers(snapshot = {}) {
+  const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
+  const byName = new Map();
+
+  byName.set("lead", {
+    name: "Lead",
+    role: "lead",
+    status: snapshot.run?.is_active ? "running" : "idle",
+    initials: "L",
+    tone: "lead",
+    goal: "判断任务复杂度、组织上下文，并按需创建临时 Agent。",
+    lastAction: snapshot.activity?.current_action || "",
+    tools: ["plan", "inspect", "delegate", "report"],
+    capabilities: ["tool.project_index", "tool.memory"],
+    source: "snapshot",
+  });
+
+  for (const agent of agents.filter((item) => !["archived", "expired"].includes(item.status))) {
+    const name = agent.name || agent.agent_id || agent.role || "Agent";
+    const role = String(agent.role || "agent").toLowerCase();
+    byName.set(String(name).toLowerCase(), {
+      name,
+      role,
+      status: agent.status || "idle",
+      initials: String(name).slice(0, 1).toUpperCase(),
+      tone: agentToneFromName(`${name} ${role}`, "lead"),
+      goal: agent.goal || agent.reason || "",
+      tools: agent.tools || [],
+      capabilities: agent.capabilities || [],
+      lastAction: agent.result?.summary || "",
+      artifacts: agent.artifacts || [],
+      source: "snapshot",
+    });
+  }
+
+  return mapBackendTeam(Array.from(byName.values()), { agentToneFromName });
+}
+
+function normalizeAgentLabel(agent) {
+  const raw = String(agent || "Lead").trim();
+  if (!raw) return "Lead";
+  const clean = raw.replace(/\s*Agent$/i, "");
+  const known = {
+    lead: "Lead",
+    planner: "Planner",
+    coder: "Coder",
+    tester: "Tester",
+    reviewer: "Reviewer",
+    designer: "Designer",
+    security: "Security",
+    system: "System",
+  };
+  return known[clean.toLowerCase()] || clean;
+}
+
+function mapSnapshotApproval(approval = {}) {
+  const decisionId = approval.id || approval.decision_id || "";
+  const action = approval.action || approval.tool_call || {};
+  const tool = approval.tool || action.kind || action.tool || "tool";
+  return {
+    kind: "tool",
+    status: "pending",
+    decisionId,
+    tool,
+    title: approval.title || `${tool} 需要审批`,
+    content: approval.reason || approval.content || action.target || "",
+    riskLevel: approval.risk_level || approval.riskLevel || "",
+    tasks: [{
+      id: decisionId || tool,
+      title: approval.reason || `${tool}: ${action.target || "等待审批"}`,
+      status: "pending",
+    }],
+    decision: "",
+    comment: "",
+  };
 }
 
 function hasReportEvidence(outcome = {}) {

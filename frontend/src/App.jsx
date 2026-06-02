@@ -5,10 +5,7 @@ import { useBootstrap } from "./hooks/useBootstrap.js";
 
 import Sidebar from "./components/sidebar/Sidebar.jsx";
 import ChatPanel from "./components/chat/ChatPanel.jsx";
-import ContextPanel, { buildRightPanelTabs, resolveRightTab } from "./components/context/ContextPanel.jsx";
-import Tasks from "./components/context/Tasks.jsx";
-import Team from "./components/context/Team.jsx";
-import Metrics from "./components/context/Metrics.jsx";
+import ContextPanel from "./components/context/ContextPanel.jsx";
 import EvidenceShell from "./components/evidence/EvidenceShell.jsx";
 import Report from "./components/evidence/Report.jsx";
 import DiffView from "./components/evidence/DiffView.jsx";
@@ -68,18 +65,10 @@ export default function App() {
 
   // Derive layout
   const mainClass = layoutClass(state.layout, state.ui);
-  const isRunning = ["running", "waiting_approval", "cancelling"].includes(state.status);
-  const ephemeralCount = isRunning
-    ? (state.ephemeralAgents?.active_count || 0) + (state.ephemeralAgents?.suggestions?.length || 0)
-    : 0;
-  const rightTabs = buildRightPanelTabs({ state, ephemeralCount });
-  const activeRightTab = resolveRightTab(state.rightTab, rightTabs);
 
   // Event handlers
   const handleToggleSidebar = useCallback(() => toggleSidebar(), []);
   const handleToggleBottom = useCallback(() => toggleBottom(), []);
-  const handleLeftTabChange = useCallback((tab) => setState({ leftTab: tab }), []);
-  const handleRightTabChange = useCallback((tab) => setState({ rightTab: tab }), []);
   const handleBottomTabChange = useCallback((tab) => setState({ activeTab: tab }), []);
 
   const handleNewSession = useCallback(() => {
@@ -93,10 +82,6 @@ export default function App() {
 
   const handleWorkspaceInputChange = useCallback((value) => {
     setState({ workspaceInput: value });
-  }, []);
-
-  const handleOpenCommandPalette = useCallback(() => {
-    setState((s) => ({ ui: { ...s.ui, commandPaletteOpen: true } }));
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -153,18 +138,6 @@ export default function App() {
     setState({ selectedDiffFile: path });
   }, []);
 
-  const handleToggleCompleted = useCallback(() => {
-    setState((s) => ({ showCompletedTasks: !s.showCompletedTasks }));
-  }, []);
-
-  // Right panel content
-  function renderRightContent() {
-    if (activeRightTab === "tasks") return <Tasks state={state} onToggleCompleted={handleToggleCompleted} />;
-    if (activeRightTab === "team") return <Team state={state} />;
-    if (activeRightTab === "metrics") return <Metrics state={state} />;
-    return null;
-  }
-
   // Bottom panel content
   const bottomTabs = [
     ["report", "报告"],
@@ -206,10 +179,6 @@ export default function App() {
         />
         <ContextPanel
           state={state}
-          tabs={rightTabs}
-          activeTab={activeRightTab}
-          content={renderRightContent()}
-          onTabChange={handleRightTabChange}
         />
         <EvidenceShell
           state={state}

@@ -11,6 +11,7 @@ from src.runtime.action_policy import (
     ActionRequest,
     _classify_action_risk,
     check_action,
+    classify_action_permission,
 )
 from src.runtime.audit_log import AuditLogRepository, AuditRecord, get_audit_repo
 from src.api.services.action_execution_service import (
@@ -112,8 +113,39 @@ class TestRiskClassification:
     def test_run_command_high(self):
         assert _classify_action_risk(ActionKind.RUN_COMMAND) == "high"
 
+    def test_run_command_shell_safe_medium(self):
+        assert _classify_action_risk(ActionKind.RUN_COMMAND, "pytest -q") == "medium"
+        d = check_action(ActionKind.RUN_COMMAND, "pytest -q")
+        assert d.requires_approval is False
+        assert d.permission_level == "shell_safe"
+
     def test_mcp_call_high(self):
         assert _classify_action_risk(ActionKind.MCP_CALL) == "high"
+
+    def test_mcp_read_tool_is_low_risk(self):
+        assert classify_action_permission(
+            ActionKind.MCP_CALL,
+            "mcp.github/list_issues",
+            payload={"tool_name": "list_issues"},
+        ) == "mcp_read"
+        d = check_action(
+            ActionKind.MCP_CALL,
+            "mcp.github/list_issues",
+            payload={"tool_name": "list_issues"},
+        )
+        assert d.risk == "low"
+        assert d.requires_approval is False
+        assert d.permission_level == "mcp_read"
+
+    def test_mcp_write_tool_requires_approval(self):
+        d = check_action(
+            ActionKind.MCP_CALL,
+            "mcp.github/create_pr",
+            payload={"tool_name": "create_pr"},
+        )
+        assert d.risk == "high"
+        assert d.requires_approval is True
+        assert d.permission_level == "mcp_write"
 
     def test_recovery_high(self):
         assert _classify_action_risk(ActionKind.RECOVERY_ACTION) == "high"
@@ -124,8 +156,8 @@ class TestRiskClassification:
     def test_git_discard_high(self):
         assert _classify_action_risk(ActionKind.GIT_OPERATION, "git reset --hard") == "high"
 
-    def test_git_commit_medium(self):
-        assert _classify_action_risk(ActionKind.GIT_OPERATION, "git commit") == "medium"
+    def test_git_commit_high(self):
+        assert _classify_action_risk(ActionKind.GIT_OPERATION, "git commit") == "high"
 
     def test_write_env_high(self):
         assert _classify_action_risk(ActionKind.WRITE_FILE, ".env") == "high"
@@ -275,11 +307,25 @@ class TestActionExecutionService:
         assert result["allowed"] is False
         assert result["risk"] == "high"
 
+    def test_safe_run_command_executes_without_approval(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        result = execute_action(
+            kind="run_command", target="echo hello",
+            thread_id="run_cmd_safe", workspace_dir=str(ws),
+        )
+        assert result["allowed"] is True
+        assert result["requires_approval"] is False
+        assert result["risk"] == "medium"
+        assert result["permission_level"] == "shell_safe"
+        assert result["result"] == "success"
+        assert "hello" in result["detail"]["stdout"]
+
     def test_high_risk_execute_creates_pending_approval(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
         result = execute_action(
-            kind="run_command", target="pytest -q",
+            kind="run_command", target="rm -rf dist",
             thread_id="run_needs_approval", workspace_dir=str(ws),
         )
         assert result["allowed"] is True
@@ -290,13 +336,13 @@ class TestActionExecutionService:
         assert approval is not None
         assert approval["status"] == "pending"
         assert approval["kind"] == "run_command"
-        assert approval["target"] == "pytest -q"
+        assert approval["target"] == "rm -rf dist"
 
     def test_approved_run_command_executes_and_records_output(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
         pending = execute_action(
-            kind="run_command", target="echo hello",
+            kind="run_command", target="rm -rf dist",
             thread_id="run_cmd_approved", workspace_dir=str(ws),
         )
         from src.api.services.approval_service import resolve_tool_approval
@@ -309,7 +355,7 @@ class TestActionExecutionService:
         )
 
         result = execute_action(
-            kind="run_command", target="echo hello",
+            kind="run_command", target="rm -rf dist",
             payload={"approval_id": pending["approval_id"]},
             thread_id="run_cmd_approved", workspace_dir=str(ws),
         )
@@ -317,7 +363,6 @@ class TestActionExecutionService:
         assert result["requires_approval"] is False
         assert result["result"] == "success"
         assert result["detail"]["exit_code"] == 0
-        assert "hello" in result["detail"]["stdout"]
         trail = get_audit_trail("run_cmd_approved", str(ws))
         assert trail["records"][-1]["decision"] == "approved"
 
@@ -325,7 +370,7 @@ class TestActionExecutionService:
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
         pending = execute_action(
-            kind="run_command", target="echo blocked",
+            kind="run_command", target="rm -rf blocked",
             thread_id="run_cmd_rejected", workspace_dir=str(ws),
         )
         from src.api.services.approval_service import resolve_tool_approval
@@ -338,7 +383,7 @@ class TestActionExecutionService:
         )
 
         result = execute_action(
-            kind="run_command", target="echo blocked",
+            kind="run_command", target="rm -rf blocked",
             payload={"approval_id": pending["approval_id"]},
             thread_id="run_cmd_rejected", workspace_dir=str(ws),
         )
@@ -351,7 +396,7 @@ class TestActionExecutionService:
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
         pending = execute_action(
-            kind="run_command", target="echo one",
+            kind="run_command", target="rm -rf one",
             thread_id="run_cmd_mismatch", workspace_dir=str(ws),
         )
         from src.api.services.approval_service import resolve_tool_approval
@@ -363,7 +408,7 @@ class TestActionExecutionService:
         )
 
         result = execute_action(
-            kind="run_command", target="echo two",
+            kind="run_command", target="rm -rf two",
             payload={"approval_id": pending["approval_id"]},
             thread_id="run_cmd_mismatch", workspace_dir=str(ws),
         )
@@ -493,6 +538,32 @@ class TestActionExecutionService:
         assert result["detail"]["result"]["content"][0]["text"] == "echo:hello"
         trail = get_audit_trail("run_mcp_approved", str(ws))
         assert trail["records"][-1]["kind"] == "mcp_call"
+
+    def test_readonly_mcp_call_executes_without_approval(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        script = write_fake_mcp_server(ws)
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        (nanodir / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"fake": {"command": sys.executable, "args": [str(script)]}}}),
+            encoding="utf-8",
+        )
+
+        result = execute_action(
+            kind="mcp_call",
+            target="mcp.fake/list_echo",
+            payload={"server_id": "mcp.fake", "tool_name": "list_echo", "arguments": {"text": "hello"}},
+            thread_id="run_mcp_read",
+            workspace_dir=str(ws),
+        )
+
+        assert result["allowed"] is True
+        assert result["requires_approval"] is False
+        assert result["permission_level"] == "mcp_read"
+        assert result["result"] == "success"
+        assert result["detail"]["ok"] is True
+        assert result["detail"]["result"]["content"][0]["text"] == "echo:hello"
 
     def test_record_action_result(self, tmp_path):
         ws = tmp_path / "workspace"
@@ -627,7 +698,7 @@ class TestActionPolicyAPI:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/runs/run_high_risk_api/actions/execute",
-                json={"kind": "run_command", "target": "pytest -q"},
+                json={"kind": "run_command", "target": "rm -rf dist"},
             )
             assert resp.status_code == 200
             data = resp.json()
@@ -651,19 +722,18 @@ class TestActionPolicyAPI:
             client = TestClient(app, raise_server_exceptions=False)
             pending_resp = client.post(
                 f"/api/runs/{thread_id}/actions/execute",
-                json={"kind": "run_command", "target": "echo api-ok"},
+                json={"kind": "run_command", "target": "rm -rf dist"},
             )
             approval_id = pending_resp.json()["approval_id"]
             resolve_tool_approval(thread_id, approval_id, True, "允许", str(ws))
 
             exec_resp = client.post(
                 f"/api/runs/{thread_id}/actions/execute",
-                json={"kind": "run_command", "target": "echo api-ok", "approval_id": approval_id},
+                json={"kind": "run_command", "target": "rm -rf dist", "approval_id": approval_id},
             )
 
             assert exec_resp.status_code == 200
             data = exec_resp.json()
             assert data["result"] == "success"
-            assert "api-ok" in data["detail"]["stdout"]
         finally:
             cfg.WORKSPACE_DIR = old

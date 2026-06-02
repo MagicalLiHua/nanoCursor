@@ -46,12 +46,11 @@ RISKY_WRITE_TOOLS = frozenset(
         "rollback_file",
         "restore_snapshot",
         "apply_patch",
-        "mcp_call",
     }
 )
 SHELL_TOOLS = frozenset({"bash", "run_bash", "run_tests"})
-HIGH_RISK_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky"})
-DEFAULT_APPROVAL_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky"})
+HIGH_RISK_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky", "mcp_write"})
+DEFAULT_APPROVAL_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky", "mcp_write"})
 
 _SHELL_SAFE_PREFIXES = (
     ("ls",),
@@ -260,8 +259,63 @@ def classify_tool_permission(tool_name: str, tool_input: dict[str, Any] | None =
                 return "risky_write"
         return "safe_write"
     if name.startswith("mcp_") or name == "mcp_call":
-        return "external_risky"
+        return _classify_mcp_tool_permission(name, payload)
     return "external_risky"
+
+
+def _classify_mcp_tool_permission(tool_name: str, payload: dict[str, Any]) -> str:
+    """Classify MCP tool calls for runtime tool governance."""
+    explicit = str(
+        payload.get("permission_level")
+        or payload.get("permission")
+        or payload.get("access")
+        or payload.get("mode")
+        or ""
+    ).strip().lower()
+    if explicit in {"mcp_read", "read", "readonly", "read_only"}:
+        return "mcp_read"
+    if explicit in {"mcp_write", "write", "mutation", "mutate"}:
+        return "mcp_write"
+
+    name = str(payload.get("tool_name") or payload.get("tool") or tool_name or "").strip().lower().replace("-", "_")
+    if any(token in name for token in _MCP_WRITE_TOKENS):
+        return "mcp_write"
+    if any(name.startswith(prefix) or f"_{prefix}" in name for prefix in _MCP_READ_PREFIXES):
+        return "mcp_read"
+    return "external_risky"
+
+
+_MCP_READ_PREFIXES = (
+    "list",
+    "get",
+    "read",
+    "search",
+    "find",
+    "query",
+    "fetch",
+    "inspect",
+    "describe",
+    "resolve",
+    "lookup",
+)
+
+_MCP_WRITE_TOKENS = (
+    "create",
+    "update",
+    "delete",
+    "remove",
+    "write",
+    "edit",
+    "mutate",
+    "submit",
+    "approve",
+    "merge",
+    "commit",
+    "push",
+    "post",
+    "upload",
+    "install",
+)
 
 
 @dataclass

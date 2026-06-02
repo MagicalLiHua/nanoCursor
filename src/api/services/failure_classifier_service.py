@@ -49,6 +49,7 @@ class FailureRecord(BaseModel):
     failure_class: FailureClass
     title: str
     evidence: dict[str, Any] = Field(default_factory=dict)
+    related_files: list[str] = Field(default_factory=list)
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
     can_auto_retry: bool = False
     created_at: str = ""
@@ -265,6 +266,7 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
     ws_str = str(_workspace(workspace_dir))
     session = store.get_session(thread_id, ws_str)
     events = store.list_events(thread_id, ws_str)
+    known_paths = _known_workspace_paths(Path(ws_str))
     records: list[FailureRecord] = []
 
     # 1. Classify error events
@@ -273,6 +275,10 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
         content = str(e.content or e.title or "")
         fc = classify_failure_typed(content)
         payload = e.payload if isinstance(e.payload, dict) else {}
+        related_files = _extract_related_files(
+            " ".join([content, str(e.title or ""), _jsonish(payload)]),
+            known_paths,
+        )
         records.append(FailureRecord(
             failure_id=f"fail_{uuid.uuid4().hex[:12]}",
             thread_id=thread_id,
@@ -283,7 +289,9 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
                 "event_title": e.title,
                 "event_content": content[:500],
                 "error_detail": payload.get("detail", payload.get("error", ""))[:500],
+                "related_files": related_files,
             },
+            related_files=related_files,
             suggested_actions=_suggest_actions_for(fc, content),
             can_auto_retry=_can_auto_retry(fc),
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -296,6 +304,10 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
         for tc in tools:
             if tc.status == "failed":
                 fc = classify_failure_typed(tc.output_tail)
+                related_files = _extract_related_files(
+                    " ".join([str(tc.tool_name), str(tc.output_tail)]),
+                    known_paths,
+                )
                 records.append(FailureRecord(
                     failure_id=f"fail_{uuid.uuid4().hex[:12]}",
                     thread_id=thread_id,
@@ -305,7 +317,9 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
                         "call_id": tc.call_id,
                         "tool": tc.tool_name,
                         "output": tc.output_tail[:500],
+                        "related_files": related_files,
                     },
+                    related_files=related_files,
                     suggested_actions=_suggest_actions_for(fc, tc.output_tail),
                     can_auto_retry=_can_auto_retry(fc),
                     created_at=datetime.now(timezone.utc).isoformat(),
@@ -333,12 +347,19 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
 
                 is_timeout = "超时" in reason or "timeout" in reason_lower or ap.get("expired") is True
                 fc = FailureClass.APPROVAL_TIMEOUT if is_timeout else FailureClass.APPROVAL_REJECTED
+                related_files = _extract_related_files(
+                    _jsonish(ap),
+                    known_paths,
+                )
+                evidence = dict(ap)
+                evidence["related_files"] = related_files
                 records.append(FailureRecord(
                     failure_id=f"fail_{uuid.uuid4().hex[:12]}",
                     thread_id=thread_id,
                     failure_class=fc,
                     title=f"{_failure_title(fc)}: {ap.get('tool', '')}",
-                    evidence=ap,
+                    evidence=evidence,
+                    related_files=related_files,
                     suggested_actions=_suggest_actions_for(fc, reason),
                     can_auto_retry=False,
                     created_at=datetime.now(timezone.utc).isoformat(),
@@ -353,13 +374,80 @@ def classify_run_failures(thread_id: str, workspace_dir: str | None = None) -> l
             thread_id=thread_id,
             failure_class=FailureClass.UNKNOWN_ERROR,
             title="运行失败（无具体错误事件）",
-            evidence={"session_status": session.get("status")},
+            evidence={"session_status": session.get("status"), "related_files": []},
+            related_files=[],
             suggested_actions=_suggest_actions_for(FailureClass.UNKNOWN_ERROR, ""),
             can_auto_retry=True,
             created_at=datetime.now(timezone.utc).isoformat(),
         ))
 
     return records
+
+
+def _known_workspace_paths(workspace: Path) -> set[str]:
+    paths: set[str] = set()
+    if not workspace.exists():
+        return paths
+    ignored_dirs = {".git", ".nanocursor", ".venv", "node_modules", "__pycache__", "dist", "build"}
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(workspace).as_posix()
+        except ValueError:
+            continue
+        parts = set(rel.split("/"))
+        if ignored_dirs & parts:
+            continue
+        paths.add(rel)
+    return paths
+
+
+def _extract_related_files(text: str, known_paths: set[str]) -> list[str]:
+    mentions: list[str] = []
+    lowered = text.lower()
+    for path in sorted(known_paths):
+        if _path_token_present(path.lower(), lowered):
+            mentions.append(path)
+
+    basename_index: dict[str, list[str]] = {}
+    for path in known_paths:
+        basename_index.setdefault(Path(path).name.lower(), []).append(path)
+
+    raw_matches = re.findall(
+        r"[\w./\\-]+\.(?:py|js|jsx|ts|tsx|css|md|json|toml|yaml|yml|txt|html|vue)",
+        text,
+    )
+    for raw in raw_matches:
+        candidate = raw.strip(".,;:()[]{}'\"`").replace("\\", "/").lstrip("./")
+        if candidate in known_paths:
+            mentions.append(candidate)
+            continue
+        matches = basename_index.get(Path(candidate).name.lower(), [])
+        if len(matches) == 1:
+            mentions.append(matches[0])
+
+    return _unique(mentions)[:12]
+
+
+def _path_token_present(path: str, text: str) -> bool:
+    return re.search(r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])", text) is not None
+
+
+def _unique(items: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _jsonish(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(value)
 
 
 def _suggest_actions_for(fc: FailureClass, evidence_text: str) -> list[SuggestedAction]:
@@ -452,6 +540,13 @@ def save_failures(thread_id: str, workspace_dir: str | None = None) -> list[Fail
     records = classify_run_failures(thread_id, workspace_dir)
     rd = _run_dir(thread_id, workspace_dir)
     _write_json_atomic(rd / "failures.json", [r.model_dump() for r in records])
+    if records:
+        try:
+            from src.api.services.run_state_service import sync_failures_to_task_board
+
+            sync_failures_to_task_board(thread_id, str(_workspace(workspace_dir)), records)
+        except Exception:
+            pass
     return records
 
 

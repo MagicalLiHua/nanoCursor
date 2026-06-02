@@ -15,6 +15,14 @@ export async function loadRunSession({ fetchJson, threadId }) {
   return fetchJson(`/api/runs/${encodeURIComponent(threadId)}`);
 }
 
+export async function loadRunState({ fetchJson, threadId }) {
+  return fetchJson(`/api/runs/${encodeURIComponent(threadId)}/state`);
+}
+
+export async function loadRunSnapshot({ fetchJson, threadId }) {
+  return fetchJson(`/api/runs/${encodeURIComponent(threadId)}/snapshot`);
+}
+
 export async function startRun({ requestJson, conversationId, prompt, workspaceDir, messages = [], demo = false }) {
   const endpoint = demo
     ? "/api/runs/demo"

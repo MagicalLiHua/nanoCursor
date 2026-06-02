@@ -239,7 +239,6 @@ python scripts/api_smoke.py
 ```text
 nanoCursor/
   api_server.py                 # FastAPI 后端入口
-  cli.py                        # CLI 入口
   frontend/
     src/
       App.jsx                   # 前端主视图
@@ -261,8 +260,10 @@ nanoCursor/
     runtime/                    # 运行状态、事件、审计、交付契约
     tasks/                      # 任务管理
     tools/                      # 工具实现
+    cli/                        # 早期命令行实验，当前前后端系统不依赖
   tests/                        # 后端测试
-  docs/                         # 设计文档和开发计划
+  docs/product-roadmap.md       # 后续开发唯一主计划
+  docs/                         # 审计报告、面试材料和保留文档
   images/                       # README 截图
 ```
 
@@ -274,12 +275,7 @@ nanoCursor/
 
 ## 接下来想做的事
 
-- 把上下文管理继续做细：对话摘要、执行摘要、文件 outline、最近变更分层注入。
-- 继续收紧工具权限：命令白名单、危险参数识别、批量修改审批、审计回放。
-- 改进异步 Agent：并行执行、结果合并、冲突检测、临时 Agent 自动归档。
-- 完善 MCP/Skills：预设模板、健康检查、导入向导、使用统计。
-- 做一套更稳定的评测：用真实仓库任务看成功率、修改正确率和恢复能力。
-- 继续打磨前端：让运行状态更清楚，长回复更好读，底部证据面板更顺手。
+后续开发路线已经收敛到 [docs/product-roadmap.md](docs/product-roadmap.md)：先做统一 Run Snapshot，再把前端改成更接近 Codex 的工作台信息架构，之后继续加强 Lead 决策协议、上下文管理、工具治理和评测。
 
 ## License
 

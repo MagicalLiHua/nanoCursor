@@ -68,8 +68,9 @@ export async function loadRunHistorySnapshot({
   mapConversationItem,
 }) {
   try {
+    const workspaceQuery = workspaceDir ? `&workspace_dir=${encodeURIComponent(workspaceDir)}` : "";
     const [runsResult, conversationsResult] = await Promise.allSettled([
-      fetchJson("/api/runs?limit=50"),
+      fetchJson(`/api/runs?limit=50${workspaceQuery}`),
       fetchJson(`/api/conversations?limit=50${workspaceDir ? `&workspace_dir=${encodeURIComponent(workspaceDir)}` : ""}`),
     ]);
     const runs = runsResult.status === "fulfilled" ? (runsResult.value.runs || []).map(mapRunHistoryItem) : [];
@@ -82,6 +83,7 @@ export async function loadRunHistorySnapshot({
     const transientRuns = existingRuns.filter(
       (run) =>
         (run.localOnly || run.status === "running") &&
+        (!workspaceDir || !run.workspaceDir || run.workspaceDir === workspaceDir) &&
         !standaloneRuns.some((item) => item.id === run.id) &&
         !conversations.some((item) => item.id === run.id),
     );

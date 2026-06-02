@@ -1,7 +1,7 @@
 import React from "react";
 import {
   MessageSquare, FolderOpen, Settings, User,
-  Plus, ChevronLeft, ChevronRight, File, Folder
+  Plus, File, Folder, Search, SquarePen, FolderGit2
 } from "lucide-react";
 
 function shortPath(path) {
@@ -15,11 +15,14 @@ function displayRunTitle(run) {
   return run.title || run.prompt || run.id || "未命名会话";
 }
 
-function RunList({ runs, currentThreadId, onSelectRun, onNewSession }) {
+function RunList({ runs, currentThreadId, currentConversationId, onSelectRun, onNewSession }) {
+  const [query, setQuery] = React.useState("");
   const visibleRuns = (runs || []).filter((run) => {
     const hasPrompt = Boolean(String(run.prompt || "").trim());
     const hasWork = run.status && !["idle", "draft"].includes(run.status);
-    return hasPrompt || hasWork;
+    if (!hasPrompt && !hasWork) return false;
+    const haystack = `${displayRunTitle(run)} ${run.prompt || ""} ${run.id || ""}`.toLowerCase();
+    return !query.trim() || haystack.includes(query.trim().toLowerCase());
   });
 
   return (
@@ -31,10 +34,21 @@ function RunList({ runs, currentThreadId, onSelectRun, onNewSession }) {
         </button>
       </div>
       <div className="sidebar-panel-body">
+        <label className="sidebar-search">
+          <Search size={14} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索会话"
+          />
+        </label>
         {visibleRuns.length ? (
           <div className="run-list">
             {visibleRuns.map((run) => {
-              const isActive = run.id === currentThreadId;
+              const isActive =
+                run.id === currentConversationId ||
+                run.id === currentThreadId ||
+                run.threadId === currentThreadId;
               const statusClass = run.status || "unknown";
               return (
                 <button
@@ -76,7 +90,30 @@ function WorkspaceOpenBox({ workspaceDir, workspaceInput, onWorkspaceInputChange
   );
 }
 
-function FileTree({ workspaceFiles, workspaceDir, workspaceInput, onWorkspaceInputChange, onOpenWorkspace }) {
+function RecentProjects({ projects = [], onOpenProject }) {
+  const visible = projects.filter((item) => item?.path).slice(0, 6);
+  if (!visible.length) return null;
+  return (
+    <section className="sidebar-projects">
+      <div className="sidebar-section-title">最近项目</div>
+      <div className="sidebar-project-list">
+        {visible.map((item) => (
+          <button
+            key={item.path}
+            className="sidebar-project-item"
+            onClick={() => onOpenProject?.(item.path)}
+            type="button"
+          >
+            <FolderGit2 size={14} />
+            <span title={item.path}>{item.name || shortPath(item.path)}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects, onWorkspaceInputChange, onOpenWorkspace }) {
   const visibleFiles = (workspaceFiles || []).filter((file) => {
     const parts = String(file.path || "").split("/").filter(Boolean);
     if (!parts.length) return false;
@@ -84,11 +121,18 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, onWorkspaceInp
     return !parts.some((part) => ignored.has(part) || part.endsWith(".pyc"));
   });
 
+  const openProjectPath = (path) => {
+    onWorkspaceInputChange?.(path);
+    requestAnimationFrame(() => {
+      onOpenWorkspace?.({ preventDefault() {} });
+    });
+  };
+
   if (!visibleFiles.length) {
     return (
       <div className="sidebar-panel-content">
         <div className="sidebar-panel-header">
-          <h3>文件</h3>
+          <h3>项目</h3>
           <span className="sidebar-panel-subtitle">{shortPath(workspaceDir)}</span>
         </div>
         <div className="sidebar-panel-body">
@@ -98,6 +142,7 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, onWorkspaceInp
             onWorkspaceInputChange={onWorkspaceInputChange}
             onOpenWorkspace={onOpenWorkspace}
           />
+          <RecentProjects projects={recentProjects} onOpenProject={openProjectPath} />
           <div className="sidebar-empty">暂无文件</div>
         </div>
       </div>
@@ -160,7 +205,7 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, onWorkspaceInp
   return (
     <div className="sidebar-panel-content">
       <div className="sidebar-panel-header">
-        <h3>文件</h3>
+        <h3>项目</h3>
         <span className="sidebar-panel-subtitle">{shortPath(workspaceDir)}</span>
       </div>
       <div className="sidebar-panel-body">
@@ -170,6 +215,8 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, onWorkspaceInp
           onWorkspaceInputChange={onWorkspaceInputChange}
           onOpenWorkspace={onOpenWorkspace}
         />
+        <RecentProjects projects={recentProjects} onOpenProject={openProjectPath} />
+        <div className="sidebar-section-title">文件</div>
         <div className="file-tree">
           {renderTree(tree)}
         </div>
@@ -272,7 +319,7 @@ function UserProfileMenu({ onOpenSettings }) {
 
 const NAV_ITEMS = [
   { id: "sessions", icon: MessageSquare, label: "会话" },
-  { id: "files", icon: FolderOpen, label: "文件" },
+  { id: "files", icon: FolderOpen, label: "项目" },
 ];
 
 export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelectRun, onOpenWorkspace, onWorkspaceInputChange, onOpenSettings }) {
@@ -314,6 +361,14 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
             </span>
           </div>
           <div className="rail-divider" />
+          <button
+            className="rail-icon rail-primary"
+            onClick={onNewSession}
+            title="新建会话"
+            type="button"
+          >
+            <SquarePen size={20} />
+          </button>
           {NAV_ITEMS.map((item) => (
             <button
               key={item.id}
@@ -327,6 +382,9 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
           ))}
         </div>
         <div className="rail-bottom">
+          <button className="rail-icon" onClick={onOpenSettings} title="设置" type="button">
+            <Settings size={20} />
+          </button>
           <UserProfileMenu onOpenSettings={onOpenSettings} />
         </div>
       </div>
@@ -338,6 +396,7 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
             <RunList
               runs={state.runs}
               currentThreadId={state.currentThreadId}
+              currentConversationId={state.currentConversationId}
               onSelectRun={onSelectRun}
               onNewSession={onNewSession}
             />
@@ -347,6 +406,7 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
               workspaceFiles={state.workspaceFiles || []}
               workspaceDir={workspaceDir}
               workspaceInput={state.workspaceInput}
+              recentProjects={state.recentProjects || []}
               onWorkspaceInputChange={onWorkspaceInputChange}
               onOpenWorkspace={onOpenWorkspace}
             />

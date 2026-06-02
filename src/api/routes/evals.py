@@ -5,7 +5,14 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from src.api.dependencies import get_workspace, raise_404, raise_400
-from src.api.models import EvalScoreRequest, EvalSuiteRunRequest
+from src.api.models import AgentEvalRunRequest, EvalScoreRequest, EvalSuiteRunRequest, IntentEvalRunRequest
+from src.api.services.agent_eval_service import (
+    get_agent_eval_run,
+    list_agent_eval_runs,
+    list_agent_eval_catalog,
+    run_agent_eval_suite,
+    summarize_agent_eval_runs,
+)
 from src.api.services.eval_service import (
     compare_eval_runs, compare_eval_runs_detailed, get_eval_artifacts,
     get_eval_run, get_eval_task,
@@ -15,6 +22,11 @@ from src.api.services.eval_runner_service import (
     run_eval_with_command,
     run_eval_suite,
     get_eval_summary,
+)
+from src.api.services.intent_eval_service import (
+    get_intent_eval_run,
+    list_intent_eval_cases,
+    run_intent_eval_suite,
 )
 
 router = APIRouter(prefix="/api/evals", tags=["evals"])
@@ -29,6 +41,67 @@ async def list_eval_tasks():
 async def eval_summary():
     """Aggregate pass_rate and per-task stats across all eval runs."""
     return get_eval_summary(get_workspace())
+
+
+@router.get("/intent/catalog")
+async def list_intent_evals():
+    """Return the Intent Router V3 core eval catalog."""
+    return {"suite": "intent_core", "cases": list_intent_eval_cases()}
+
+
+@router.post("/intent/run")
+async def run_intent_evals(request: IntentEvalRunRequest):
+    """Run Intent Router V3 core routing evals."""
+    return run_intent_eval_suite(
+        request.case_ids or None,
+        workspace_dir=get_workspace(),
+        persist=request.persist,
+    )
+
+
+@router.get("/intent/runs/{eval_run_id}")
+async def get_intent_eval_result(eval_run_id: str):
+    try:
+        return get_intent_eval_run(eval_run_id, get_workspace())
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
+@router.get("/agent/catalog")
+async def list_agent_evals():
+    """Return aggregate agent-runtime eval catalog."""
+    return list_agent_eval_catalog()
+
+
+@router.post("/agent/run")
+async def run_agent_evals(request: AgentEvalRunRequest):
+    """Run aggregate agent-runtime evals."""
+    return run_agent_eval_suite(
+        request.suite,
+        workspace_dir=get_workspace(),
+        persist=request.persist,
+        task_eval_ids=request.task_eval_ids or None,
+    )
+
+
+@router.get("/agent/summary")
+async def agent_eval_summary(limit: int = 20):
+    """Return aggregate agent eval trend summary."""
+    return summarize_agent_eval_runs(get_workspace(), limit=min(max(limit, 1), 100))
+
+
+@router.get("/agent/runs")
+async def list_agent_eval_results(limit: int = 20):
+    """List recent aggregate agent eval runs."""
+    return list_agent_eval_runs(get_workspace(), limit=min(max(limit, 1), 100))
+
+
+@router.get("/agent/runs/{eval_run_id}")
+async def get_agent_eval_result(eval_run_id: str):
+    try:
+        return get_agent_eval_run(eval_run_id, get_workspace())
+    except ValueError as exc:
+        raise_404(str(exc))
 
 
 @router.get("/{eval_id}")

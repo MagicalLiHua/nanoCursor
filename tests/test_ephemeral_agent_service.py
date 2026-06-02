@@ -221,6 +221,83 @@ def test_spawn_agent_tool_requires_context_and_emits_rejection(tmp_path):
     assert "agent_spawn_rejected" in event_types
 
 
+def test_spawn_agent_blocks_lead_direct_reply_intent(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "run-spawn-direct-reply"
+    store = EventStore()
+    store.create_session(thread_id, "哈喽", str(workspace), status="running")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        intent_decision={
+            "route": "direct_answer",
+            "execution_route": "lead_direct_reply",
+            "confidence": 0.98,
+            "requires_workspace_read": False,
+            "requires_workspace_write": False,
+            "requires_shell": False,
+            "requires_approval": False,
+            "requires_execution": False,
+            "suggested_agents": ["Lead"],
+        },
+    )
+
+    with bind_runtime_context({"thread_id": thread_id, "workspace_dir": str(workspace), "agent": "Lead"}):
+        output = asyncio.run(
+            handle_spawn_agent(
+                name="Test Agent",
+                role="tester",
+                goal="不应该被创建",
+                tools=["read_file"],
+            )
+        )
+
+    assert output.startswith("Error:")
+    assert "直接回答" in output
+    assert list_ephemeral_agents(thread_id, str(workspace))["active_count"] == 0
+
+
+def test_read_only_intent_strips_ephemeral_write_scope(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "run-spawn-read-only"
+    store = EventStore()
+    store.create_session(thread_id, "帮我看看项目结构", str(workspace), status="running")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        intent_decision={
+            "route": "read_only",
+            "execution_route": "agenthub_delivery",
+            "confidence": 0.9,
+            "requires_workspace_read": True,
+            "requires_workspace_write": False,
+            "requires_shell": False,
+            "requires_approval": False,
+            "requires_execution": True,
+            "suggested_agents": ["Lead"],
+        },
+    )
+
+    agent = spawn_ephemeral_agent(
+        thread_id,
+        {
+            "name": "Read Scope Agent",
+            "role": "reader",
+            "goal": "只读分析",
+            "task_scope": {
+                "include": ["src"],
+                "allowed_actions": ["read_file", "write_file", "run_command", "search_codebase"],
+            },
+        },
+        str(workspace),
+    )
+
+    assert agent["task_scope"]["allowed_actions"] == ["read_file", "search_codebase"]
+    assert agent["task_scope"]["scope_policy"]["removed_actions"] == ["write_file", "run_command"]
+
+
 def test_spawn_agent_tool_run_now_submits_to_pool(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

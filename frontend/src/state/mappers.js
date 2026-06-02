@@ -6,6 +6,7 @@ export function mapRunHistoryItem(run, { runTitle, formatTime }) {
     status: run.status || "unknown",
     time: formatTime(run.updated_at || run.created_at),
     mode: run.mode || "agenthub_delivery",
+    workspaceDir: run.workspace_dir || "",
     prompt: run.prompt || "",
     eventCount: run.event_count || 0,
     changedFilesCount: run.changed_files_count || 0,
@@ -26,6 +27,7 @@ export function mapConversationItem(conversation, { runTitle, formatTime }) {
     status: conversation.status || "draft",
     time: formatTime(conversation.updated_at || conversation.created_at),
     prompt: conversation.prompt || "",
+    workspaceDir: conversation.workspace_dir || "",
     runIds: Array.isArray(conversation.run_ids) ? conversation.run_ids : [],
     agentCount: conversation.team_summary?.agent_count || conversation.team?.members?.length || 0,
   };
@@ -104,22 +106,40 @@ export function mapBackendTeam(members, { agentToneFromName }) {
 export function normalizeTask(task, { inferTaskCapabilities }) {
   if (!task?.id) return null;
   const title = String(task.title || task.subject || "").trim();
-  const description = String(task.description || "").trim();
+  const description = String(task.description || task.goal || "").trim();
   if (!title && !description) return null;
+  const rawStatus = String(task.status || "pending").toLowerCase();
+  const statusMap = {
+    passed: "completed",
+    ready: "pending",
+    blocked: "blocked",
+    running: "running",
+    failed: "failed",
+    skipped: "completed",
+    cancelled: "cancelled",
+  };
   const normalized = {
     id: task.id,
     title,
     description,
-    status: task.status || "pending",
-    owner: task.owner || "Agent",
+    status: statusMap[rawStatus] || rawStatus || "pending",
+    owner: task.owner || task.agent_role || "Agent",
+    kind: task.kind || task.type || "",
+    blockedBy: Array.isArray(task.blocked_by) ? task.blocked_by : Array.isArray(task.dependencies) ? task.dependencies : [],
+    writesFiles: Boolean(task.writes_files),
+    canParallel: Boolean(task.can_parallel),
+    source: task.source || "task_board",
     capabilities: Array.isArray(task.capabilities) ? task.capabilities : [],
     toolEvidence: Array.isArray(task.toolEvidence)
       ? task.toolEvidence
       : Array.isArray(task.tool_evidence)
         ? task.tool_evidence
         : [],
+    evidencePreview: Array.isArray(task.evidence_preview) ? task.evidence_preview : [],
+    outputPreview: Array.isArray(task.output_preview) ? task.output_preview : [],
+    evidenceCount: Number(task.evidence_count || 0),
+    outputCount: Number(task.output_count || 0),
     failure: task.failure || "",
-    source: task.source || "",
   };
   normalized.capabilities = normalized.capabilities.length ? normalized.capabilities : inferTaskCapabilities(normalized);
   return normalized;

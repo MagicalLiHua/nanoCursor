@@ -152,6 +152,10 @@ def _title_from_prompt(prompt: str) -> str:
     return text[:28] + ("..." if len(text) > 28 else "")
 
 
+def _is_placeholder_title(title: str | None) -> bool:
+    return not str(title or "").strip() or str(title).strip() == "新会话"
+
+
 def _unique(items: list[str]) -> list[str]:
     result: list[str] = []
     for item in items:
@@ -163,19 +167,161 @@ def _unique(items: list[str]) -> list[str]:
 
 def _build_conversation_summary(conversation: dict[str, Any]) -> str:
     """Build a compact, deterministic summary for future runs in this conversation."""
-    records = conversation.get("run_records") if isinstance(conversation.get("run_records"), list) else []
-    if not records:
-        return str(conversation.get("prompt", "") or "")[:800]
+    memory = _build_conversation_memory(conversation)
+    return _render_conversation_summary(memory)
 
-    lines = []
-    for record in records[-6:]:
+
+def _build_conversation_memory(conversation: dict[str, Any]) -> dict[str, Any]:
+    """Build structured deterministic memory for long-running conversations."""
+    records = conversation.get("run_records") if isinstance(conversation.get("run_records"), list) else []
+    title = str(conversation.get("title") or "")
+    prompt = str(conversation.get("prompt") or "")
+    if not records:
+        summary = " ".join(prompt.split())[:800]
+        return {
+            "schema_version": 1,
+            "title": title or _title_from_prompt(prompt),
+            "root_prompt": prompt[:500],
+            "summary": summary,
+            "recent_runs": [],
+            "stable_facts": _unique([summary] if summary else []),
+            "open_questions": [],
+            "changed_files": [],
+            "status_counts": {},
+            "agent_roles": [],
+            "run_count": 0,
+            "token_estimate": max(1, len(summary) // 3) if summary else 0,
+            "generated_at": time.time(),
+        }
+
+    recent_runs: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    changed_files: list[str] = []
+    open_questions: list[str] = []
+    agent_roles: list[str] = []
+    stable_facts: list[str] = []
+    for record in records:
         if not isinstance(record, dict):
             continue
-        prompt = " ".join(str(record.get("prompt", "") or "").split())[:100]
-        summary = " ".join(str(record.get("summary", "") or record.get("error", "") or "").split())[:220]
-        status = record.get("status", "unknown")
-        lines.append(f"Run#{record.get('run_index', '?')} [{status}] {prompt} -> {summary}")
-    return "\n".join(lines)[:1600]
+        status = str(record.get("status", "unknown") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        record_prompt = " ".join(str(record.get("prompt", "") or "").split())[:180]
+        record_summary = " ".join(str(record.get("summary", "") or record.get("error", "") or "").split())[:360]
+        for file_path in _extract_file_mentions(f"{record_prompt} {record_summary}"):
+            changed_files.append(file_path)
+        for member in record.get("team", []) if isinstance(record.get("team"), list) else []:
+            if isinstance(member, dict):
+                agent_roles.append(str(member.get("role") or member.get("name") or ""))
+        if status in {"failed", "blocked", "cancelled", "canceled"} or record.get("error"):
+            open_questions.append(record_summary or record_prompt)
+        if status in {"completed", "passed", "success"} and record_summary:
+            stable_facts.append(record_summary)
+        recent_runs.append(
+            {
+                "thread_id": record.get("thread_id"),
+                "run_index": record.get("run_index"),
+                "status": status,
+                "prompt": record_prompt,
+                "summary": record_summary,
+                "started_at": record.get("started_at"),
+                "completed_at": record.get("completed_at"),
+            }
+        )
+
+    summary_lines: list[str] = []
+    if title or prompt:
+        summary_lines.append(f"Conversation: {title or _title_from_prompt(prompt)}")
+    if stable_facts:
+        summary_lines.append("Stable facts: " + " | ".join(_unique(stable_facts)[-4:]))
+    if recent_runs:
+        summary_lines.append("Recent runs:")
+        for item in recent_runs[-6:]:
+            summary_lines.append(
+                f"- Run#{item.get('run_index', '?')} [{item.get('status', 'unknown')}] "
+                f"{item.get('prompt', '')[:90]} -> {item.get('summary', '')[:180]}"
+            )
+    if changed_files:
+        summary_lines.append("Likely files: " + ", ".join(_unique(changed_files)[-12:]))
+    if open_questions:
+        summary_lines.append("Open questions/risks: " + " | ".join(_unique(open_questions)[-4:]))
+
+    summary = "\n".join(line for line in summary_lines if line).strip()[:1800]
+    return {
+        "schema_version": 1,
+        "title": title or _title_from_prompt(prompt),
+        "root_prompt": prompt[:500],
+        "summary": summary,
+        "recent_runs": recent_runs[-8:],
+        "stable_facts": _unique(stable_facts)[-8:],
+        "open_questions": _unique(open_questions)[-8:],
+        "changed_files": _unique(changed_files)[-24:],
+        "status_counts": status_counts,
+        "agent_roles": _unique(agent_roles),
+        "run_count": len(recent_runs),
+        "token_estimate": max(1, len(summary) // 3) if summary else 0,
+        "generated_at": time.time(),
+    }
+
+
+def _render_conversation_summary(memory: dict[str, Any]) -> str:
+    summary = str(memory.get("summary") or "")
+    if summary:
+        return summary[:1800]
+    root_prompt = str(memory.get("root_prompt") or "")
+    return root_prompt[:800]
+
+
+def _extract_file_mentions(text: str) -> list[str]:
+    matches = re.findall(
+        r"(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]+|[\w.-]+\.(?:py|js|jsx|ts|tsx|css|html|md|json|yaml|yml|toml)",
+        text or "",
+    )
+    return _unique(matches)[:40]
+
+
+def refresh_conversation_memory(
+    conversation_id: str,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    """Refresh structured conversation memory and compact summary."""
+    conversation = get_conversation(conversation_id, workspace_dir)
+    if not conversation:
+        raise ValueError(f"会话不存在: {conversation_id}")
+    memory = _build_conversation_memory(conversation)
+    changes = {
+        "conversation_memory": memory,
+        "conversation_summary": _render_conversation_summary(memory),
+        "summary_compacted_at": memory.get("generated_at"),
+        "summary_stats": {
+            "run_count": memory.get("run_count", 0),
+            "token_estimate": memory.get("token_estimate", 0),
+            "changed_file_count": len(memory.get("changed_files", [])),
+            "open_question_count": len(memory.get("open_questions", [])),
+        },
+    }
+    touch_conversation(conversation_id, workspace_dir, **changes)
+    return get_conversation(conversation_id, workspace_dir) or {**conversation, **changes}
+
+
+def get_conversation_memory(
+    conversation_id: str,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    """Return structured conversation memory, refreshing it if absent."""
+    conversation = get_conversation(conversation_id, workspace_dir)
+    if not conversation:
+        raise ValueError(f"会话不存在: {conversation_id}")
+    memory = conversation.get("conversation_memory")
+    if not isinstance(memory, dict):
+        conversation = refresh_conversation_memory(conversation_id, workspace_dir)
+        memory = conversation.get("conversation_memory")
+    return {
+        "conversation_id": conversation_id,
+        "workspace_dir": conversation.get("workspace_dir"),
+        "conversation_summary": conversation.get("conversation_summary", ""),
+        "conversation_memory": memory if isinstance(memory, dict) else {},
+        "summary_stats": conversation.get("summary_stats", {}),
+    }
 
 
 def _capability_ids_for_agent(agent_name: str, recommendation: dict[str, Any]) -> list[str]:
@@ -207,7 +353,12 @@ def assess_task_complexity(prompt: str) -> dict[str, Any]:
         "indicators": intent["signals"],
         "intent": intent["intent"],
         "route": intent["route"],
+        "execution_route": intent["execution_route"],
+        "intent_decision": intent,
         "requires_workspace_write": intent["requires_workspace_write"],
+        "requires_workspace_read": intent["requires_workspace_read"],
+        "requires_shell": intent["requires_shell"],
+        "requires_approval": intent["requires_approval"],
         "requires_execution": intent["requires_execution"],
         "confidence": intent["confidence"],
     }
@@ -223,7 +374,12 @@ async def assess_task_complexity_async(prompt: str) -> dict[str, Any]:
         "indicators": intent["signals"],
         "intent": intent["intent"],
         "route": intent["route"],
+        "execution_route": intent["execution_route"],
+        "intent_decision": intent,
         "requires_workspace_write": intent["requires_workspace_write"],
+        "requires_workspace_read": intent["requires_workspace_read"],
+        "requires_shell": intent["requires_shell"],
+        "requires_approval": intent["requires_approval"],
         "requires_execution": intent["requires_execution"],
         "confidence": intent["confidence"],
     }
@@ -270,14 +426,14 @@ def _build_team_from_complexity(
     if level == "high_risk" and any(word in text for word in ["迁移", "数据库", "schema", "兼容", "回滚"]):
         agent_names.append("Migration")
 
-    should_recommend = level != "simple" or complexity.get("route") != "lead_direct_reply"
+    should_recommend = level != "simple" or complexity.get("execution_route") != "lead_direct_reply"
     recommendation = recommend_capabilities(prompt, str(_workspace(workspace_dir))) if should_recommend else {
         "agents": ["Lead"],
         "capabilities": [],
         "mcp_plan": [],
         "reasons": [],
     }
-    if level == "simple" and complexity.get("route") != "lead_direct_reply":
+    if level == "simple" and complexity.get("execution_route") != "lead_direct_reply":
         agent_names = _unique(["Lead", *[str(agent) for agent in recommendation.get("agents", [])]])
     recommendation["agents"] = agent_names
 
@@ -505,6 +661,29 @@ def list_conversations(workspace_dir: str | None = None, limit: int = 50) -> lis
     return conversations[: max(0, min(limit, 200))]
 
 
+def list_conversation_runs(
+    conversation_id: str,
+    workspace_dir: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any] | None:
+    """Return run records scoped to one conversation without listing workspace-global runs."""
+    conversation = get_conversation(conversation_id, workspace_dir)
+    if not conversation:
+        return None
+
+    records = conversation.get("run_records") if isinstance(conversation.get("run_records"), list) else []
+    records = [record for record in records if isinstance(record, dict)]
+    records.sort(key=lambda item: item.get("updated_at") or item.get("started_at") or 0, reverse=True)
+    safe_limit = max(0, min(limit, 200))
+    return {
+        "conversation_id": conversation_id,
+        "workspace_dir": conversation.get("workspace_dir") or str(_workspace(workspace_dir)),
+        "current_thread_id": conversation.get("current_thread_id"),
+        "run_count": len(records),
+        "runs": records[:safe_limit],
+    }
+
+
 def update_conversation_team(
     conversation_id: str,
     members: list[dict[str, Any]],
@@ -599,15 +778,25 @@ def link_run_to_conversation(
         run_records.append(record)
     else:
         existing.update(record)
+    first_run = len(run_records) == 1 and existing is None
+    conversation_title = conversation.get("title")
+    conversation_prompt = conversation.get("prompt", "")
+    metadata_updates = {
+        "status": "running",
+        "current_thread_id": thread_id,
+        "run_ids": run_ids,
+        "run_records": run_records,
+        "latest_prompt": prompt or conversation_prompt,
+    }
+    if first_run or _is_placeholder_title(conversation_title):
+        metadata_updates["title"] = _title_from_prompt(prompt or conversation_prompt)
+    if not str(conversation_prompt or "").strip():
+        metadata_updates["prompt"] = prompt or conversation_prompt
+
     updated = touch_conversation(
         conversation_id,
         workspace_dir,
-        status="running",
-        prompt=prompt or conversation.get("prompt", ""),
-        title=_title_from_prompt(prompt or conversation.get("prompt", "")),
-        current_thread_id=thread_id,
-        run_ids=run_ids,
-        run_records=run_records,
+        **metadata_updates,
     )
     return get_conversation(conversation_id, workspace_dir) or updated or {}
 
@@ -653,7 +842,16 @@ def finalize_conversation_run(
         "last_run_summary": summary[:500],
     }
     summary_seed = {**conversation, "run_records": run_records}
-    changes["conversation_summary"] = _build_conversation_summary(summary_seed)
+    memory = _build_conversation_memory(summary_seed)
+    changes["conversation_memory"] = memory
+    changes["conversation_summary"] = _render_conversation_summary(memory)
+    changes["summary_compacted_at"] = memory.get("generated_at")
+    changes["summary_stats"] = {
+        "run_count": memory.get("run_count", 0),
+        "token_estimate": memory.get("token_estimate", 0),
+        "changed_file_count": len(memory.get("changed_files", [])),
+        "open_question_count": len(memory.get("open_questions", [])),
+    }
     if conversation.get("current_thread_id") == thread_id:
         changes["status"] = status
 

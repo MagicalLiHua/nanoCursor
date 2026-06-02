@@ -26,10 +26,11 @@ const useStore = create(
       status: "idle",
       activeTab: "report",
       leftTab: "sessions",
-      rightTab: "tasks",
+      rightTab: "progress",
       runStartedAt: null,
       currentThreadId: "pending",
       currentConversationId: "",
+      runSnapshot: null,
 
       // --- Workspace ---
       workspaceDir: getStorageValue("workspaceDir") || "",

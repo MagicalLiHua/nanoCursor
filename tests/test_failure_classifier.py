@@ -159,6 +159,37 @@ class TestRunFailureClassification:
         finally:
             cfg.WORKSPACE_DIR = old
 
+    def test_failed_run_extracts_related_files(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        (ws / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (ws / "test_app.py").write_text("from app import add\n", encoding="utf-8")
+
+        from src.api.services.event_store import EventStore
+        store = EventStore()
+        thread_id = f"related_files_{uuid.uuid4().hex[:8]}"
+        store.create_session(
+            thread_id=thread_id,
+            prompt="fix tests",
+            workspace_dir=str(ws),
+            status="failed",
+        )
+        store.append_event(
+            thread_id=thread_id,
+            event_type="error",
+            title="pytest failed",
+            content="FAILED test_app.py::test_add - AssertionError",
+            payload={"error": "test_app.py failed"},
+            agent="tester",
+            workspace_dir=str(ws),
+        )
+
+        records = classify_run_failures(thread_id, str(ws))
+        failure = records[0]
+        assert failure.failure_class == FailureClass.TEST_FAILURE
+        assert failure.related_files == ["test_app.py"]
+        assert failure.evidence["related_files"] == ["test_app.py"]
+
     def test_failed_run_no_errors_produces_unknown(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)

@@ -5,9 +5,8 @@
 .env.*
 src/core/.env
 **/.env
-/docs
 /demo-workspaces/
-
+/docs
 /src/nanocursor.db
 
 # ==========================================

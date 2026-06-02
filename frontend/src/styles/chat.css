@@ -205,11 +205,11 @@
   width: min(100%, 900px);
 }
 
-.agent-runtime-message {
+.agent-work-message {
   margin-top: -6px;
 }
 
-.agent-runtime-message .bubble {
+.agent-work-message .bubble {
   display: grid;
   gap: 7px;
   padding-block: 8px;
@@ -217,8 +217,25 @@
   border-color: rgba(227, 231, 235, 0.82);
 }
 
-.agent-runtime-message .message-head {
+.agent-work-message .message-head {
   margin-bottom: 0;
+}
+
+.message-activity-line {
+  margin-top: 8px;
+  max-width: 100%;
+}
+
+.message-activity-line .agent-activity-stream,
+.agent-work-message .agent-activity-stream {
+  max-height: 36px;
+}
+
+.message-activity-line .agent-activity-item,
+.agent-work-message .agent-activity-item {
+  min-height: 30px;
+  padding: 4px 8px;
+  background: #fbfcfd;
 }
 
 .avatar,
@@ -792,7 +809,7 @@
   justify-content: center;
   flex: 1;
   min-height: 0;
-  padding: 32px 20px 96px;
+  padding: 72px 20px 56px;
 }
 
 .welcome-screen-content {
@@ -802,6 +819,7 @@
   gap: 22px;
   max-width: 760px;
   width: min(760px, calc(100vw - 110px));
+  transform: translateY(clamp(12px, 3vh, 30px));
 }
 
 .welcome-screen h1 {

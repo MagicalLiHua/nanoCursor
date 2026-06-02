@@ -11,10 +11,11 @@ export const demoState = {
   status: "idle",
   activeTab: "report",
   leftTab: "sessions",
-  rightTab: "tasks",
+  rightTab: "progress",
   runStartedAt: null,
   currentThreadId: "pending",
   currentConversationId: "",
+  runSnapshot: null,
   workspaceDir: getStorageValue("workspaceDir") || "",
   workspaceInput: getStorageValue("workspaceDir") || "",
   projectOverview: {

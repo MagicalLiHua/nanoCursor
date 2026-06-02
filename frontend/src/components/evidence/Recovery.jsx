@@ -1,4 +1,5 @@
 import React from "react";
+import EmptyState from "./EmptyState.jsx";
 
 const STATUS_LABELS = { safe: "安全", review: "需复核", attention: "需处理", unprotected: "未保护" };
 const SEVERITY_LABELS = { high: "高", medium: "中", low: "低" };
@@ -104,7 +105,7 @@ export default function Recovery({ center = {} }) {
             {points.length ? (
               points.map((p, i) => <RecoveryPoint key={p.id || i} point={p} />)
             ) : (
-              <div className="empty-mini">暂无快照或备份</div>
+              <EmptyState compact title="暂无恢复点" />
             )}
           </div>
         </div>
@@ -114,7 +115,7 @@ export default function Recovery({ center = {} }) {
             {risks.length ? (
               risks.map((r, i) => <RecoveryRisk key={i} risk={r} />)
             ) : (
-              <div className="recovery-ok">未发现阻塞风险</div>
+              <EmptyState compact title="暂无阻塞风险" />
             )}
           </div>
         </div>

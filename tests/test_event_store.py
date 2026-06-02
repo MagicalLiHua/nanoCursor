@@ -106,6 +106,51 @@ def test_list_run_history_sorts_and_summarizes_artifacts(tmp_path):
     assert [run["thread_id"] for run in index["runs"]] == ["newer", "older"]
 
 
+def test_list_run_history_summarizes_event_diff_and_delivery_report(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    store.create_session("run-1", "prompt", str(workspace), status="completed")
+    store.append_event(
+        "run-1",
+        "diff_updated",
+        workspace_dir=str(workspace),
+        payload={
+            "diff": "diff --git a/app.py b/app.py",
+            "changed_files": [
+                {"path": "app.py", "change_type": "created"},
+                {"path": "test_app.py", "change_type": "created"},
+            ],
+        },
+    )
+    run_dir = store.run_dir("run-1", str(workspace))
+    (run_dir / "delivery.md").write_text("# delivery", encoding="utf-8")
+
+    runs = list_run_history(str(workspace))
+
+    assert runs[0]["changed_files_count"] == 2
+    assert runs[0]["has_diff"] is True
+    assert runs[0]["has_report"] is True
+
+
+def test_list_run_history_ignores_lead_direct_placeholder_report(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    store.create_session("run-1", "哈喽", str(workspace), status="completed")
+    store.update_session("run-1", str(workspace), execution_plan={"strategy": "lead_direct_reply"})
+    run_dir = store.run_dir("run-1", str(workspace))
+    (run_dir / "delivery.md").write_text("# placeholder", encoding="utf-8")
+    (run_dir / "delivery.json").write_text("{}", encoding="utf-8")
+
+    runs = list_run_history(str(workspace))
+
+    assert runs[0]["changed_files_count"] == 0
+    assert runs[0]["has_report"] is False
+
+
 def test_list_run_history_filters_and_limits(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

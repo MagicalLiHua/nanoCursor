@@ -1,5 +1,6 @@
 import React from "react";
 import { shortPath } from "../../core/format.js";
+import EmptyState from "./EmptyState.jsx";
 
 const STATUS_LABELS = {
   ready: "就绪",
@@ -84,7 +85,12 @@ function ArtifactCard({ item }) {
 export default function Artifacts({ center }) {
   const artifacts = center?.artifacts || [];
   if (!artifacts.length) {
-    return <div className="empty">暂无交付物索引</div>;
+    return (
+      <EmptyState
+        title="暂无交付物"
+        detail="运行完成后，报告、Diff、测试结果和恢复证据会汇总在这里。"
+      />
+    );
   }
 
   const summary = center.summary || {};

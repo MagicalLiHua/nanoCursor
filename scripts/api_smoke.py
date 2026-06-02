@@ -172,9 +172,21 @@ def run_smoke() -> list[SmokeResult]:
                 ("GET", "/api/workspace/settings", None, (200,)),
                 ("GET", "/api/runs/active", None, (200,)),
                 ("GET", "/api/evals", None, (200,)),
+                ("GET", "/api/evals/intent/catalog", None, (200,)),
+                ("POST", "/api/evals/intent/run", {"case_ids": ["greeting_direct_answer"], "persist": False}, (200,)),
+                ("GET", "/api/evals/agent/catalog", None, (200,)),
+                (
+                    "POST",
+                    "/api/evals/agent/run",
+                    {"suite": "core", "task_eval_ids": ["bug_fix_import_error"], "persist": False},
+                    (200,),
+                ),
+                ("GET", "/api/evals/agent/summary", None, (200,)),
+                ("GET", "/api/evals/agent/runs", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events/history", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/outcome", None, (200,)),
+                ("GET", f"/api/runs/{thread_id}/snapshot", None, (200,)),
                 ("POST", "/api/capabilities/recommend", {"prompt": "build a todo app"}, (200,)),
                 ("POST", "/api/capabilities/skills", {"name": "Smoke Skill", "content": "Use smoke checks."}, (200,)),
                 ("POST", "/api/capabilities/mcp/validate", {"server_id": None}, (200,)),
@@ -245,6 +257,169 @@ def run_smoke() -> list[SmokeResult]:
             for method, path, body, expected in checks:
                 results.append(_request(client, method, path, body=body, expected=expected))
 
+            conversation_response = client.post(
+                "/api/conversations",
+                json={"prompt": "smoke conversation memory", "workspace_dir": str(workspace)},
+            )
+            conversation_ok = conversation_response.status_code == 200 and bool(
+                conversation_response.json().get("conversation", {}).get("conversation_id")
+            )
+            results.append(SmokeResult(
+                "POST",
+                "/api/conversations",
+                conversation_response.status_code,
+                conversation_ok,
+                _response_body(conversation_response),
+            ))
+            if conversation_ok:
+                conversation_id = conversation_response.json()["conversation"]["conversation_id"]
+                from src.api.services.conversation_service import finalize_conversation_run, link_run_to_conversation
+
+                link_run_to_conversation(
+                    conversation_id,
+                    thread_id,
+                    str(workspace),
+                    prompt="smoke updates README.md and src/api/services/conversation_service.py",
+                )
+                finalize_conversation_run(
+                    conversation_id,
+                    thread_id,
+                    "completed",
+                    str(workspace),
+                    summary="Updated README.md and src/api/services/conversation_service.py memory smoke.",
+                )
+                memory_response = client.get(f"/api/conversations/{conversation_id}/memory")
+                results.append(SmokeResult(
+                    "GET",
+                    f"/api/conversations/{conversation_id}/memory",
+                    memory_response.status_code,
+                    (
+                        memory_response.status_code == 200
+                        and memory_response.json().get("conversation_memory", {}).get("run_count", 0) >= 1
+                        and "README.md" in memory_response.json().get("conversation_memory", {}).get("changed_files", [])
+                    ),
+                    _response_body(memory_response),
+                ))
+                memory_refresh = client.post(f"/api/conversations/{conversation_id}/memory/refresh")
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/conversations/{conversation_id}/memory/refresh",
+                    memory_refresh.status_code,
+                    memory_refresh.status_code == 200 and memory_refresh.json().get("summary_stats", {}).get("run_count", 0) >= 1,
+                    _response_body(memory_refresh),
+                ))
+
+            state_response = client.get(f"/api/runs/{thread_id}/state")
+            state_ok = (
+                state_response.status_code == 200
+                and bool(state_response.json().get("tasks"))
+                and (workspace / ".nanocursor" / "runs" / thread_id / "run_state.json").exists()
+            )
+            results.append(SmokeResult(
+                "GET",
+                f"/api/runs/{thread_id}/state",
+                state_response.status_code,
+                state_ok,
+                _response_body(state_response),
+            ))
+            if state_response.status_code == 200 and state_response.json().get("tasks"):
+                first_task = state_response.json()["tasks"][0]["id"]
+                for method, path, body, expected in [
+                    ("GET", f"/api/runs/{thread_id}/state/tasks", None, (200,)),
+                    ("GET", f"/api/runs/{thread_id}/state/schedule", None, (200,)),
+                    ("GET", f"/api/runs/{thread_id}/state/tasks/{first_task}/context", None, (200,)),
+                    ("POST", f"/api/runs/{thread_id}/state/tasks/{first_task}/retry", None, (200,)),
+                ]:
+                    results.append(_request(client, method, path, body=body, expected=expected))
+
+            loop_action_check = client.post(
+                f"/api/runs/{thread_id}/loop/actions/check",
+                json={
+                    "action": {
+                        "type": "call_tool",
+                        "goal": "smoke dry-run tool action",
+                        "agent": "Lead",
+                        "tool_call": {"tool": "read_file", "input": {"path": "README.md"}},
+                    }
+                },
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/loop/actions/check",
+                loop_action_check.status_code,
+                (
+                    loop_action_check.status_code == 200
+                    and loop_action_check.json().get("allowed") is True
+                    and loop_action_check.json().get("code") == "allowed"
+                    and "finish_readiness" in loop_action_check.json()
+                ),
+                _response_body(loop_action_check),
+            ))
+
+            context_pack = client.get(f"/api/runs/{thread_id}/context-pack")
+            context_ok = (
+                context_pack.status_code == 200
+                and bool(context_pack.json().get("selected_files"))
+                and bool(context_pack.json().get("budget_report"))
+            )
+            results.append(SmokeResult(
+                "GET",
+                f"/api/runs/{thread_id}/context-pack",
+                context_pack.status_code,
+                context_ok,
+                _response_body(context_pack),
+            ))
+            context_packs = client.get(f"/api/runs/{thread_id}/context-packs")
+            packs_ok = (
+                context_packs.status_code == 200
+                and context_packs.json().get("total", 0) >= 1
+                and bool(context_packs.json().get("context_packs"))
+            )
+            results.append(SmokeResult(
+                "GET",
+                f"/api/runs/{thread_id}/context-packs",
+                context_packs.status_code,
+                packs_ok,
+                _response_body(context_packs),
+            ))
+            if packs_ok:
+                pack_id = context_packs.json()["context_packs"][0]["id"]
+                pack_detail = client.get(f"/api/runs/{thread_id}/context-packs/{pack_id}")
+                results.append(SmokeResult(
+                    "GET",
+                    f"/api/runs/{thread_id}/context-packs/{pack_id}",
+                    pack_detail.status_code,
+                    pack_detail.status_code == 200 and pack_detail.json().get("id") == pack_id,
+                    _response_body(pack_detail),
+                ))
+            pack_preview = client.post(
+                f"/api/runs/{thread_id}/context-packs/preview",
+                json={"objective": "smoke context preview"},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/context-packs/preview",
+                pack_preview.status_code,
+                pack_preview.status_code == 200 and pack_preview.json().get("preview") is True,
+                _response_body(pack_preview),
+            ))
+            file_outlines = client.get("/api/workspace/file-outlines")
+            results.append(SmokeResult(
+                "GET",
+                "/api/workspace/file-outlines",
+                file_outlines.status_code,
+                file_outlines.status_code == 200 and file_outlines.json().get("outline_count", 0) >= 1,
+                _response_body(file_outlines),
+            ))
+            refresh_outlines = client.post("/api/workspace/file-outlines/refresh")
+            results.append(SmokeResult(
+                "POST",
+                "/api/workspace/file-outlines/refresh",
+                refresh_outlines.status_code,
+                refresh_outlines.status_code == 200 and refresh_outlines.json().get("outline_count", 0) >= 1,
+                _response_body(refresh_outlines),
+            ))
+
             for method, path, body, expected in [
                 ("POST", f"/api/runs/{thread_id}/actions/execute", {"kind": "read_file", "target": "README.md"}, (200,)),
                 (
@@ -256,15 +431,32 @@ def run_smoke() -> list[SmokeResult]:
             ]:
                 results.append(_request(client, method, path, body=body, expected=expected))
 
-            pending_command = client.post(
+            safe_command = client.post(
                 f"/api/runs/{thread_id}/actions/execute",
                 json={"kind": "run_command", "target": "echo smoke-command"},
             )
             results.append(SmokeResult(
                 "POST",
-                f"/api/runs/{thread_id}/actions/execute run_command pending",
+                f"/api/runs/{thread_id}/actions/execute run_command safe",
+                safe_command.status_code,
+                safe_command.status_code == 200
+                and safe_command.json().get("requires_approval") is False
+                and safe_command.json().get("permission_level") == "shell_safe"
+                and "smoke-command" in safe_command.json().get("detail", {}).get("stdout", ""),
+                _response_body(safe_command),
+            ))
+
+            pending_command = client.post(
+                f"/api/runs/{thread_id}/actions/execute",
+                json={"kind": "run_command", "target": "rm -rf smoke-dist"},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/actions/execute run_command risky pending",
                 pending_command.status_code,
-                pending_command.status_code == 200 and pending_command.json().get("requires_approval") is True,
+                pending_command.status_code == 200
+                and pending_command.json().get("requires_approval") is True
+                and pending_command.json().get("permission_level") == "shell_risky",
                 _response_body(pending_command),
             ))
             if pending_command.status_code == 200 and pending_command.json().get("approval_id"):
@@ -273,16 +465,16 @@ def run_smoke() -> list[SmokeResult]:
                 resolve_tool_approval(thread_id, approval_id, True, "smoke approved", str(workspace))
                 command_result = client.post(
                     f"/api/runs/{thread_id}/actions/execute",
-                    json={"kind": "run_command", "target": "echo smoke-command", "approval_id": approval_id},
+                    json={"kind": "run_command", "target": "rm -rf smoke-dist", "approval_id": approval_id},
                 )
                 ok = (
                     command_result.status_code == 200
                     and command_result.json().get("result") == "success"
-                    and "smoke-command" in command_result.json().get("detail", {}).get("stdout", "")
+                    and command_result.json().get("permission_level") == "shell_risky"
                 )
                 results.append(SmokeResult(
                     "POST",
-                    f"/api/runs/{thread_id}/actions/execute run_command approved",
+                    f"/api/runs/{thread_id}/actions/execute run_command risky approved",
                     command_result.status_code,
                     ok,
                     _response_body(command_result),
@@ -505,6 +697,34 @@ def run_smoke() -> list[SmokeResult]:
                         body=body,
                         expected=expected,
                     ))
+                (workspace / "README.md").write_text("mutated before run restore\n", encoding="utf-8")
+                run_restore_without_confirm = client.post(
+                    f"/api/runs/{thread_id}/restore",
+                    json={"target_path": "README.md", "confirmed": False},
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/restore unconfirmed",
+                    run_restore_without_confirm.status_code,
+                    run_restore_without_confirm.status_code == 400,
+                    _response_body(run_restore_without_confirm),
+                ))
+                run_restore = client.post(
+                    f"/api/runs/{thread_id}/restore",
+                    json={"target_path": "README.md", "confirmed": True},
+                )
+                results.append(SmokeResult(
+                    "POST",
+                    f"/api/runs/{thread_id}/restore latest_for_file",
+                    run_restore.status_code,
+                    (
+                        run_restore.status_code == 200
+                        and run_restore.json().get("restore_mode") == "latest_for_file"
+                        and run_restore.json().get("filepath") == "README.md"
+                        and (workspace / "README.md").read_text(encoding="utf-8") != "mutated before run restore\n"
+                    ),
+                    _response_body(run_restore),
+                ))
 
             for method, path, body, expected in [
                 ("GET", f"/api/runs/{thread_id}/git/status", None, (200,)),

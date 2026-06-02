@@ -18,6 +18,7 @@ class ContextPack:
     execution_summary: str = ""
     workspace_summary: dict = field(default_factory=dict)
     relevant_files: list[str] = field(default_factory=list)
+    selected_files: list[dict] = field(default_factory=list)
     recent_changes: list[str] = field(default_factory=list)
     file_outlines: list[dict] = field(default_factory=list)
     symbols: list[str] = field(default_factory=list)
@@ -25,7 +26,11 @@ class ContextPack:
     user_preferences: list[str] = field(default_factory=list)
     selected_skills: list[str] = field(default_factory=list)
     current_plan: list[dict] = field(default_factory=list)
+    selection_reasons: list[str] = field(default_factory=list)
+    omitted: list[dict] = field(default_factory=list)
+    budget_report: dict = field(default_factory=dict)
     token_budget: dict = field(default_factory=lambda: {"max_tokens": 12000, "used_tokens_estimate": 0})
+    context_debug: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -34,6 +39,7 @@ class ContextPack:
             "execution_summary": self.execution_summary,
             "workspace_summary": self.workspace_summary,
             "relevant_files": self.relevant_files,
+            "selected_files": self.selected_files,
             "recent_changes": self.recent_changes,
             "file_outlines": self.file_outlines,
             "symbols": self.symbols,
@@ -41,7 +47,11 @@ class ContextPack:
             "user_preferences": self.user_preferences,
             "selected_skills": self.selected_skills,
             "current_plan": self.current_plan,
+            "selection_reasons": self.selection_reasons,
+            "omitted": self.omitted,
+            "budget_report": self.budget_report,
             "token_budget": self.token_budget,
+            "context_debug": self.context_debug,
         }
 
     def to_text(self) -> str:
@@ -64,6 +74,30 @@ class ContextPack:
         if self.relevant_files:
             lines.append(f"相关文件 ({len(self.relevant_files)}): "
                          + ", ".join(self.relevant_files[:10]))
+
+        if self.selected_files:
+            lines.append("相关文件选择依据:")
+            for item in self.selected_files[:8]:
+                reasons = item.get("reasons") if isinstance(item.get("reasons"), list) else []
+                reason_text = "；".join(str(reason) for reason in reasons[:3]) or "未记录原因"
+                lines.append(
+                    f"  - {item.get('path', '')} "
+                    f"(score={item.get('relevance_score', 0)}, mode={item.get('mode', 'outline')}): "
+                    f"{reason_text}"
+                )
+
+        if self.selection_reasons:
+            lines.append("选择摘要:")
+            for reason in self.selection_reasons[:6]:
+                lines.append(f"  - {reason}")
+
+        if self.omitted:
+            lines.append("已裁剪上下文:")
+            for item in self.omitted[:8]:
+                lines.append(
+                    f"  - {item.get('kind', 'context')} {item.get('path', '')}: "
+                    f"{item.get('reason', 'budget limit')}"
+                )
 
         if self.recent_changes:
             lines.append(f"最近变更: {', '.join(self.recent_changes[:8])}")
@@ -95,19 +129,33 @@ class ContextPack:
 
         if self.recent_failures:
             lines.append(f"最近失败 ({len(self.recent_failures)}):")
-            for f in self.recent_failures[:3]:
+            display_failures = sorted(
+                self.recent_failures,
+                key=lambda item: bool(item.get("related_files")) if isinstance(item, dict) else False,
+                reverse=True,
+            )
+            for f in display_failures[:3]:
                 cat = f.get("category", "unknown")
                 summary = f.get("summary", "")
-                lines.append(f"  - [{cat}] {summary}")
+                related_files = f.get("related_files") if isinstance(f.get("related_files"), list) else []
+                suffix = f"；关联文件: {', '.join(str(path) for path in related_files[:4])}" if related_files else ""
+                lines.append(f"  - [{cat}] {summary}{suffix}")
 
         if self.user_preferences:
             lines.append(f"用户偏好: {', '.join(self.user_preferences[:5])}")
 
         budget = self.token_budget
+        report = self.budget_report if isinstance(self.budget_report, dict) else {}
         lines.append(
             f"Token 预算: {budget.get('max_tokens', 12000)} max, "
             f"预估已用 {self.estimate_tokens()}"
         )
+        if report:
+            lines.append(
+                f"预算取舍: included={report.get('included_file_count', 0)}, "
+                f"trimmed={report.get('trimmed_file_count', 0)}, "
+                f"utilization={report.get('utilization', 0)}"
+            )
 
         return "\n".join(lines)
 
@@ -119,12 +167,18 @@ class ContextPack:
             self.execution_summary,
             str(self.workspace_summary),
             " ".join(self.relevant_files),
+            str(self.selected_files),
             " ".join(self.recent_changes),
             str(self.file_outlines),
             " ".join(self.symbols),
+            str(self.recent_failures),
             " ".join(self.selected_skills),
             " ".join(self.user_preferences),
             str(self.current_plan),
+            " ".join(self.selection_reasons),
+            str(self.omitted),
+            str(self.budget_report),
+            str(self.context_debug),
         ]
         total_chars = sum(len(p) for p in text_parts)
         return total_chars // 3

@@ -179,6 +179,7 @@ def create_app() -> FastAPI:
     from src.api.routes.workspaces import router as workspaces_router
     from src.api.routes.data import router as data_router
     from src.api.routes.config import router as config_router
+    from src.api.routes.conversations import router as conversations_router
     from src.api.routes.capabilities import router as capabilities_router
     from src.api.routes.run_analytics import router as run_analytics_router
     from src.api.routes.recovery import router as recovery_router
@@ -190,6 +191,7 @@ def create_app() -> FastAPI:
     app.include_router(workspaces_router)
     app.include_router(data_router)
     app.include_router(config_router)
+    app.include_router(conversations_router)
     app.include_router(capabilities_router)
     app.include_router(run_analytics_router)
     app.include_router(recovery_router)

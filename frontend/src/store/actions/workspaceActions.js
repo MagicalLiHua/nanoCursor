@@ -185,7 +185,7 @@ export function createWorkspaceActions(set, get) {
     }
 
     if (announce) {
-      refreshWorkspaceData({ allowEmpty: true }).catch(() => {});
+      refreshWorkspaceData({ allowEmpty: true, includeRunState: false }).catch(() => {});
     }
   }
 
@@ -334,6 +334,10 @@ export function createWorkspaceActions(set, get) {
     });
   }
 
+  function normalizeTask(task) {
+    return normalizeTaskBase(task, { inferTaskCapabilities });
+  }
+
   async function loadRecentProjects() {
     const api = getApiClient();
     try {
@@ -357,6 +361,7 @@ export function createWorkspaceActions(set, get) {
     openWorkspace,
     refreshWorkspaceData,
     syncTasksFromExecutionPlan,
+    normalizeTask,
     loadRecentProjects,
   };
 }

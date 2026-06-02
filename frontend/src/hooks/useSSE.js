@@ -2,8 +2,8 @@ import { useEffect, useRef } from "react";
 import useStore from "../store/index.js";
 import { getApiClient } from "../core/sharedApi.js";
 import { parseUnifiedDiff } from "../core/diff.js";
-import { loadRunSession, loadReplayEvents, loadRunArtifactsBundle } from "../actions/runActions.js";
-import { applyRunArtifactsBundle } from "../hydrators/runHydrator.js";
+import { loadRunSession, loadReplayEvents, loadRunArtifactsBundle, loadRunSnapshot } from "../actions/runActions.js";
+import { applyRunArtifactsBundle, applyRunSnapshot } from "../hydrators/runHydrator.js";
 import { registerSSEFunctions } from "../store/actions/runActions.js";
 
 const SSE_EVENT_TYPES = [
@@ -138,6 +138,66 @@ export function useSSE() {
 }
 
 async function hydrateAfterDone(threadId, apiClient) {
+  try {
+    const store = useStore.getState();
+    const snapshot = await loadRunSnapshot({ fetchJson: apiClient.fetchJson, threadId });
+    const tempState = {
+      ...store,
+      report: { ...store.report },
+      runOutcome: store.runOutcome,
+      diff: store.diff,
+      diffFiles: store.diffFiles,
+      metrics: { ...store.metrics },
+      artifactCenter: { ...store.artifactCenter },
+      recoveryCenter: { ...store.recoveryCenter },
+      ephemeralAgents: { ...store.ephemeralAgents },
+      team: Array.isArray(store.team) ? [...store.team] : [],
+      messages: Array.isArray(store.messages) ? [...store.messages] : [],
+      events: Array.isArray(store.events) ? [...store.events] : [],
+      replay: { ...store.replay },
+      approval: { ...store.approval },
+    };
+
+    applyRunSnapshot({
+      state: tempState,
+      snapshot,
+      replaceMessages: true,
+      setDiffState: (diff, changedFiles) => {
+        tempState.diff = diff || "";
+        tempState.diffFiles = parseUnifiedDiff(diff || "", changedFiles);
+      },
+    });
+
+    useStore.setState({
+      runSnapshot: tempState.runSnapshot,
+      status: tempState.status,
+      currentRunStatus: tempState.currentRunStatus,
+      currentThreadId: tempState.currentThreadId,
+      currentConversationId: tempState.currentConversationId,
+      workspaceDir: tempState.workspaceDir,
+      workspaceInput: tempState.workspaceInput,
+      messages: tempState.messages,
+      events: tempState.events,
+      replay: tempState.replay,
+      tasks: tempState.tasks,
+      metrics: tempState.metrics,
+      report: tempState.report,
+      runOutcome: tempState.runOutcome,
+      diff: tempState.diff,
+      diffFiles: tempState.diffFiles,
+      artifactCenter: tempState.artifactCenter,
+      recoveryCenter: tempState.recoveryCenter,
+      agentActivities: tempState.agentActivities,
+      ephemeralAgents: tempState.ephemeralAgents,
+      team: tempState.team,
+      approval: tempState.approval,
+      selectedDiffFile: tempState.diffFiles?.[0]?.path || "",
+    });
+    return;
+  } catch {
+    // Fall back to legacy artifact hydration below.
+  }
+
   try {
     const store = useStore.getState();
     const bundle = await loadRunArtifactsBundle({

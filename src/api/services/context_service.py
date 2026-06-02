@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.context_pack import ContextPack
+from src.api.services.context_budget_service import allocate_context_budget, trim_context_pack
+from src.api.services.file_outline_service import build_file_outlines_cache, select_cached_outlines
 from src.infra import config as config_module
 from src.indexer.indexer import get_project_index
 
@@ -58,26 +60,47 @@ def build_context_pack(
     conversation_symbols = _extract_conversation_symbols(
         pack.conversation_summary, pack.execution_summary
     )
-    pack.relevant_files = _select_relevant_files(
+    selected_file_details = _select_relevant_file_details(
         prompt, index_data, execution_plan,
         recent_changes=set(recent_change_list),
         conversation_symbols=conversation_symbols,
     )
+    pack.selected_files = selected_file_details
+    pack.relevant_files = [item["path"] for item in selected_file_details]
+    pack.selection_reasons = _selection_reason_summary(
+        selected_file_details,
+        prompt_terms=_prompt_terms(prompt),
+        recent_changes=recent_change_list,
+        conversation_symbols=conversation_symbols,
+    )
     pack.recent_changes = recent_change_list
-    pack.file_outlines = _file_outlines(index_data, pack.relevant_files)
+    outline_cache = build_file_outlines_cache(workspace, index_data)
+    pack.file_outlines = select_cached_outlines(workspace, pack.relevant_files, index_data)
+    if not pack.file_outlines:
+        pack.file_outlines = _file_outlines(index_data, pack.relevant_files)
     pack.symbols = _symbol_names(pack.file_outlines)
 
     # Recent failures from recovery
     from src.api.services.recovery_service import build_recovery_center
-    recovery = build_recovery_center(None, str(workspace))
-    pack.recent_failures = [
-        {
-            "category": r.get("evidence", {}).get("failure_category", "unknown"),
-            "summary": r.get("title", ""),
-            "detail": r.get("detail", ""),
-        }
-        for r in recovery.get("risks", [])[:5]
-    ]
+    recovery = build_recovery_center(thread_id, str(workspace))
+    failure_context = _failure_context_items(
+        recovery,
+        index_data,
+        selected_file_details,
+        recent_change_list,
+    )
+    selected_file_details = _merge_failure_related_files(
+        selected_file_details,
+        failure_context,
+        index_data,
+    )
+    pack.selected_files = selected_file_details
+    pack.relevant_files = [item["path"] for item in selected_file_details]
+    pack.file_outlines = select_cached_outlines(workspace, pack.relevant_files, index_data)
+    if not pack.file_outlines:
+        pack.file_outlines = _file_outlines(index_data, pack.relevant_files)
+    pack.symbols = _symbol_names(pack.file_outlines)
+    pack.recent_failures = failure_context[:5]
 
     # User preferences
     try:
@@ -109,12 +132,242 @@ def build_context_pack(
 
     # Token budget (strategy-dependent)
     strategy = (execution_plan or {}).get("strategy", "feature_delivery")
-    pack.token_budget = {
-        "max_tokens": _strategy_token_budget(strategy),
-        "used_tokens_estimate": pack.estimate_tokens(),
+    budget = allocate_context_budget(strategy, _strategy_token_budget(strategy))
+    pack.context_debug = {
+        "strategy": strategy,
+        "prompt_terms": sorted(_prompt_terms(prompt))[:30],
+        "conversation_symbols": sorted(conversation_symbols)[:30],
+        "recent_change_count": len(recent_change_list),
+        "selected_file_count": len(pack.selected_files),
+        "outline_cache": {
+            "schema_version": outline_cache.get("schema_version", 1),
+            "outline_count": outline_cache.get("outline_count", 0),
+            "generated_at": outline_cache.get("generated_at"),
+        },
+        "memory_inputs": {
+            "conversation_summary_chars": len(pack.conversation_summary),
+            "execution_summary_chars": len(pack.execution_summary),
+            "current_plan_items": len(pack.current_plan),
+            "user_preference_count": len(pack.user_preferences),
+        },
+        "failure_context": {
+            "risk_count": recovery.get("summary", {}).get("risk_count", 0),
+            "included_failure_count": len(pack.recent_failures),
+            "related_file_count": len({
+                path
+                for failure in pack.recent_failures
+                for path in failure.get("related_files", [])
+            }),
+            "recovery_action_count": recovery.get("summary", {}).get("action_count", 0),
+        },
+        "selection_version": "context-pack-2",
     }
+    pack = trim_context_pack(pack, budget)
 
     return pack
+
+
+def _selection_reason_summary(
+    selected_files: list[dict[str, Any]],
+    *,
+    prompt_terms: set[str],
+    recent_changes: list[str],
+    conversation_symbols: set[str],
+) -> list[str]:
+    """Summarize why this context pack was built this way."""
+    summary: list[str] = []
+    if prompt_terms:
+        summary.append(
+            "prompt_terms: " + ", ".join(sorted(prompt_terms)[:12])
+        )
+    if recent_changes:
+        summary.append(
+            "recent_changes: " + ", ".join(str(path) for path in recent_changes[:8])
+        )
+    if conversation_symbols:
+        summary.append(
+            "conversation_symbols: " + ", ".join(sorted(conversation_symbols)[:10])
+        )
+    if selected_files:
+        top = []
+        for item in selected_files[:5]:
+            path = item.get("path", "")
+            score = item.get("relevance_score", 0)
+            reasons = item.get("reasons") if isinstance(item.get("reasons"), list) else []
+            top_reason = str(reasons[0]) if reasons else "fallback"
+            top.append(f"{path} score={score} ({top_reason})")
+        summary.append("top_selected_files: " + " | ".join(top))
+    if not summary:
+        summary.append("fallback: no strong prompt or workspace signals were available")
+    return summary[:8]
+
+
+def _failure_context_items(
+    recovery: dict[str, Any],
+    index_data: dict[str, Any],
+    selected_files: list[dict[str, Any]],
+    recent_changes: list[str],
+) -> list[dict[str, Any]]:
+    """Convert recovery risks into compact context items with file relations."""
+    risks = recovery.get("risks") if isinstance(recovery.get("risks"), list) else []
+    actions = recovery.get("actions") if isinstance(recovery.get("actions"), list) else []
+    entries = index_data.get("entries") if isinstance(index_data.get("entries"), dict) else {}
+    known_paths = {str(path) for path in entries}
+    selected_paths = {str(item.get("path")) for item in selected_files if isinstance(item, dict) and item.get("path")}
+    recent_paths = {str(path) for path in recent_changes}
+    result: list[dict[str, Any]] = []
+
+    for risk in risks[:12]:
+        if not isinstance(risk, dict):
+            continue
+        evidence = risk.get("evidence") if isinstance(risk.get("evidence"), dict) else {}
+        text_blob = _jsonish_text(risk)
+        related_files = _extract_file_mentions(text_blob, known_paths)
+        for path in sorted(selected_paths | recent_paths):
+            if path and path in text_blob and path not in related_files:
+                related_files.append(path)
+        related_files = _unique(related_files)[:8]
+
+        related_tasks = _unique([
+            str(value)
+            for value in (
+                evidence.get("task_id"),
+                evidence.get("stage_id"),
+                risk.get("task_id"),
+            )
+            if value
+        ])
+        source_events = _unique([
+            str(value)
+            for value in (
+                evidence.get("event_id"),
+                risk.get("event_id"),
+            )
+            if value
+        ])
+        category = str(
+            evidence.get("failure_category")
+            or evidence.get("category")
+            or risk.get("category")
+            or "unknown"
+        )
+        confidence = _confidence_score(evidence.get("failure_confidence"))
+        if related_files and confidence < 0.5:
+            confidence = 0.65
+        elif not related_files and confidence <= 0:
+            confidence = 0.25
+
+        result.append(
+            {
+                "id": str(risk.get("id") or ""),
+                "category": category,
+                "severity": str(risk.get("severity") or "medium"),
+                "summary": str(risk.get("title") or evidence.get("failure_summary") or "")[:160],
+                "detail": str(risk.get("detail") or "")[:360],
+                "related_files": related_files,
+                "related_tasks": related_tasks,
+                "source_events": source_events,
+                "confidence": round(confidence, 3),
+                "recovery_actions": [
+                    str(action.get("id"))
+                    for action in actions[:5]
+                    if isinstance(action, dict) and action.get("id")
+                ],
+            }
+        )
+    return result
+
+
+def _merge_failure_related_files(
+    selected_files: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    index_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Promote files mentioned by failures so recovery context affects selection."""
+    entries = index_data.get("entries") if isinstance(index_data.get("entries"), dict) else {}
+    result = [dict(item) for item in selected_files]
+    by_path = {str(item.get("path")): item for item in result if item.get("path")}
+
+    for failure in failures:
+        if not isinstance(failure, dict):
+            continue
+        summary = str(failure.get("summary") or failure.get("category") or "recent failure")
+        for path in failure.get("related_files", [])[:6]:
+            path = str(path)
+            if not path:
+                continue
+            reason = f"recent failure related: {summary[:80]}"
+            if path in by_path:
+                item = by_path[path]
+                item.setdefault("reasons", []).append(reason)
+                item["reasons"] = _unique(item["reasons"])
+                item["relevance_score"] = round(float(item.get("relevance_score", 0)) + 1.25, 4)
+                continue
+            if path in entries:
+                item = _selected_file_item(path, entries.get(path, {}), 2.5, [reason], "outline")
+                result.append(item)
+                by_path[path] = item
+
+    result.sort(key=lambda item: float(item.get("relevance_score", 0)), reverse=True)
+    return result[:24]
+
+
+def _extract_file_mentions(text: str, known_paths: set[str]) -> list[str]:
+    """Extract workspace-relative file mentions from risk text."""
+    mentions: list[str] = []
+    lowered = text.lower()
+    for path in sorted(known_paths):
+        if path and _path_token_present(path.lower(), lowered):
+            mentions.append(path)
+
+    basename_index: dict[str, list[str]] = {}
+    for path in known_paths:
+        basename_index.setdefault(Path(path).name.lower(), []).append(path)
+
+    raw_matches = re.findall(
+        r"[\w./\\-]+\.(?:py|js|jsx|ts|tsx|css|md|json|toml|yaml|yml|txt|html|vue)",
+        text,
+    )
+    for raw in raw_matches:
+        candidate = raw.strip(".,;:()[]{}'\"`")
+        candidate = candidate.replace("\\", "/")
+        candidate = candidate.lstrip("./")
+        if candidate in known_paths:
+            mentions.append(candidate)
+            continue
+        matches = basename_index.get(Path(candidate).name.lower(), [])
+        if len(matches) == 1:
+            mentions.append(matches[0])
+
+    return _unique(mentions)
+
+
+def _path_token_present(path: str, text: str) -> bool:
+    pattern = r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])"
+    return re.search(pattern, text) is not None
+
+
+def _jsonish_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _confidence_score(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().lower()
+    if text in {"high", "certain", "strong"}:
+        return 0.85
+    if text in {"medium", "moderate"}:
+        return 0.6
+    if text in {"low", "weak"}:
+        return 0.35
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -214,15 +467,16 @@ def _build_haystack(entry: dict[str, Any]) -> str:
     return " ".join(parts).lower()
 
 
-def _score_file(
+def _score_file_detail(
     entry: dict[str, Any],
     prompt_terms: set[str],
     recent_changes: set[str],
     conversation_symbols: set[str],
     all_entries: dict[str, Any],
-) -> float:
+) -> tuple[float, list[str]]:
     """Multi-dimensional file relevance scoring."""
     score = 0.0
+    reasons: list[str] = []
 
     # \u2500\u2500 Dimension 1: Semantic match with TF-IDF weighting \u2500\u2500
     haystack = _build_haystack(entry)
@@ -234,6 +488,7 @@ def _score_file(
             )
             idf = math.log((doc_count + 1) / (containing + 1)) + 1
             score += idf * 2.0
+            reasons.append(f"prompt term matched: {term}")
 
     # \u2500\u2500 Dimension 2: Import relation matching \u2500\u2500
     imports = set(entry.get("imports", []))
@@ -241,6 +496,7 @@ def _score_file(
         for imp in imports:
             if term in imp.lower():
                 score += 1.5
+                reasons.append(f"import matched: {imp}")
                 break
 
     # \u2500\u2500 Dimension 3: Route matching \u2500\u2500
@@ -251,6 +507,7 @@ def _score_file(
         for term in prompt_terms:
             if term in route_path or term in handler:
                 score += 4.0
+                reasons.append(f"route matched: {route_path or handler}")
                 break
 
     # \u2500\u2500 Dimension 4: Call graph expansion \u2500\u2500
@@ -261,10 +518,12 @@ def _score_file(
     for term in prompt_terms:
         if term in all_callees:
             score += 2.0
+            reasons.append(f"call graph matched: {term}")
 
     # \u2500\u2500 Dimension 5: Recent edit bonus \u2500\u2500
     if entry.get("path") in recent_changes:
         score += 3.0
+        reasons.append("recently changed")
 
     # \u2500\u2500 Dimension 6: Conversation context symbol matching \u2500\u2500
     entry_symbols = {
@@ -275,19 +534,34 @@ def _score_file(
     for sym in conversation_symbols:
         if sym in entry_symbols:
             score += 2.0
+            reasons.append(f"conversation symbol matched: {sym}")
 
     # \u2500\u2500 Role weighting \u2500\u2500
     role = entry.get("role", "")
     if role == "entry_point":
         score += 1.5
+        reasons.append("entry point")
     elif role == "test":
         score += 0.5
+        reasons.append("test file")
 
     # \u2500\u2500 Length normalization \u2500\u2500
     loc = max(entry.get("loc", 1), 1)
     score = score / math.log2(max(loc, 2))
 
-    return score
+    return score, _unique(reasons)[:8]
+
+
+def _score_file(
+    entry: dict[str, Any],
+    prompt_terms: set[str],
+    recent_changes: set[str],
+    conversation_symbols: set[str],
+    all_entries: dict[str, Any],
+) -> float:
+    return _score_file_detail(
+        entry, prompt_terms, recent_changes, conversation_symbols, all_entries
+    )[0]
 
 
 def _extract_conversation_symbols(
@@ -337,6 +611,131 @@ def _select_relevant_files(
         selected = _augment_from_plan(selected, entries, execution_plan)
 
     return _unique(selected)[:12]
+
+
+def _select_relevant_file_details(
+    prompt: str,
+    index_data: dict[str, Any],
+    execution_plan: dict[str, Any] | None,
+    recent_changes: set[str] | None = None,
+    conversation_symbols: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return selected files with scores and reasons."""
+    entries = index_data.get("entries") if isinstance(index_data.get("entries"), dict) else {}
+    prompt_terms = _prompt_terms(prompt)
+    recent = recent_changes or set()
+    conv_symbols = conversation_symbols or set()
+
+    if not entries:
+        return [
+            _selected_file_item(path, {}, 0.1, ["fallback file"], "outline")
+            for path in _fallback_files(index_data)
+        ]
+
+    scored: list[dict[str, Any]] = []
+    for path, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        entry.setdefault("path", path)
+        score, reasons = _score_file_detail(entry, prompt_terms, recent, conv_symbols, entries)
+        if score > 0:
+            scored.append(_selected_file_item(path, entry, score, reasons, _selection_mode(entry, score)))
+
+    scored.sort(key=lambda item: float(item.get("relevance_score", 0)), reverse=True)
+
+    if not scored:
+        scored = [
+            _selected_file_item(path, entries.get(path, {}), 0.1, ["fallback: entry point or recent file"], "outline")
+            for path in _fallback_files(index_data)
+        ]
+
+    if execution_plan:
+        scored = _augment_details_from_plan(scored, entries, execution_plan)
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in scored:
+        path = str(item.get("path", ""))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(item)
+    return deduped[:24]
+
+
+def _selected_file_item(
+    path: str,
+    entry: dict[str, Any],
+    score: float,
+    reasons: list[str],
+    mode: str,
+) -> dict[str, Any]:
+    symbols = [
+        str(sym.get("name"))
+        for sym in entry.get("symbols", [])
+        if isinstance(sym, dict) and sym.get("name")
+    ]
+    loc = int(entry.get("loc", 0) or 0)
+    token_estimate = max(80, min(3000, loc * 8))
+    return {
+        "path": path,
+        "role": entry.get("role", "unknown"),
+        "language": entry.get("language", "text"),
+        "relevance_score": round(float(score), 4),
+        "reasons": _unique(reasons) or ["selected by fallback"],
+        "mode": mode,
+        "token_estimate": token_estimate,
+        "symbols": symbols[:20],
+        "related_tasks": [],
+    }
+
+
+def _selection_mode(entry: dict[str, Any], score: float) -> str:
+    loc = int(entry.get("loc", 0) or 0)
+    if score >= 6 and loc <= 220:
+        return "full"
+    if score >= 2:
+        return "snippet"
+    return "outline"
+
+
+def _augment_details_from_plan(
+    selected: list[dict[str, Any]],
+    entries: dict[str, Any],
+    execution_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    result = list(selected)
+    selected_paths = {str(item.get("path", "")) for item in result}
+
+    def add_path(path: str, reason: str) -> None:
+        if path in selected_paths:
+            for item in result:
+                if item.get("path") == path:
+                    item.setdefault("reasons", []).append(reason)
+                    item["reasons"] = _unique(item["reasons"])
+                    item["relevance_score"] = round(float(item.get("relevance_score", 0)) + 0.75, 4)
+                    break
+            return
+        entry = entries.get(path, {})
+        result.append(_selected_file_item(path, entry, 0.75, [reason], "outline"))
+        selected_paths.add(path)
+
+    for stage in execution_plan.get("stages", [])[:6]:
+        if not isinstance(stage, dict):
+            continue
+        for capability in stage.get("capabilities", []):
+            text = str(capability)
+            if "frontend" in text:
+                for path in entries:
+                    if Path(path).suffix in {".js", ".jsx", ".ts", ".tsx", ".css"}:
+                        add_path(path, "execution plan capability: frontend")
+            if "delivery" in text or "test" in text:
+                for path, entry in entries.items():
+                    if isinstance(entry, dict) and entry.get("role") == "test":
+                        add_path(path, "execution plan requires verification")
+
+    result.sort(key=lambda item: float(item.get("relevance_score", 0)), reverse=True)
+    return result
 
 
 def _fallback_files(index_data: dict[str, Any]) -> list[str]:

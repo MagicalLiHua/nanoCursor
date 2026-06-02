@@ -10,9 +10,11 @@ from src.api.services.mcp_status_service import update_mcp_status
 from src.api.services.conversation_service import (
     create_conversation,
     finalize_conversation_run,
+    get_conversation_memory,
     get_conversation,
     link_run_to_conversation,
     list_conversations,
+    refresh_conversation_memory,
     refresh_conversation_recommendation,
     update_conversation_team,
 )
@@ -356,6 +358,31 @@ def test_refresh_recommendation_and_link_run_to_conversation(tmp_path):
     assert linked["run_records"][0]["status"] == "running"
 
 
+def test_conversation_title_stays_stable_across_multiple_runs(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    conversation = create_conversation("", str(workspace))
+
+    first = link_run_to_conversation(
+        conversation["conversation_id"],
+        "run-1",
+        str(workspace),
+        prompt="哈喽",
+    )
+    second = link_run_to_conversation(
+        conversation["conversation_id"],
+        "run-2",
+        str(workspace),
+        prompt="你还记得我刚才说了什么吗",
+    )
+
+    assert first["title"] == "哈喽"
+    assert second["title"] == "哈喽"
+    assert second["prompt"] == "哈喽"
+    assert second["latest_prompt"] == "你还记得我刚才说了什么吗"
+    assert [record["thread_id"] for record in second["run_records"]] == ["run-1", "run-2"]
+
+
 def test_finalize_conversation_run_updates_record_and_status(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -384,6 +411,57 @@ def test_finalize_conversation_run_updates_record_and_status(tmp_path):
     assert finalized["latest_run"]["status"] == "completed"
     assert finalized["latest_run"]["summary"] == "会话状态已回写。"
     assert finalized["latest_run"]["team"] == [{"name": "Tester", "role": "tester"}]
+    assert finalized["conversation_memory"]["run_count"] == 1
+    assert finalized["summary_stats"]["token_estimate"] > 0
+
+
+def test_conversation_memory_compacts_runs_and_extracts_context(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    conversation = create_conversation("改进后端上下文管理", str(workspace))
+    conversation_id = conversation["conversation_id"]
+
+    link_run_to_conversation(
+        conversation_id,
+        "run-ok",
+        str(workspace),
+        prompt="修改 src/api/services/context_service.py",
+        team=[{"name": "Coder", "role": "coder"}],
+    )
+    finalize_conversation_run(
+        conversation_id,
+        "run-ok",
+        "completed",
+        str(workspace),
+        summary="完成 src/api/services/context_service.py 和 tests/test_context_pack_task_board.py 的上下文改进。",
+    )
+    link_run_to_conversation(
+        conversation_id,
+        "run-fail",
+        str(workspace),
+        prompt="继续修复摘要压缩",
+        team=[{"name": "Reviewer", "role": "reviewer"}],
+    )
+    finalized = finalize_conversation_run(
+        conversation_id,
+        "run-fail",
+        "failed",
+        str(workspace),
+        summary="仍需确认 execution_summary 是否会污染 direct_answer。",
+        error="direct_answer 不能创建任务。",
+    )
+
+    memory = finalized["conversation_memory"]
+    assert memory["run_count"] == 2
+    assert "src/api/services/context_service.py" in memory["changed_files"]
+    assert memory["open_questions"]
+    assert {"coder", "reviewer"} <= set(memory["agent_roles"])
+    assert "Recent runs" in finalized["conversation_summary"]
+
+    refreshed = refresh_conversation_memory(conversation_id, str(workspace))
+    fetched = get_conversation_memory(conversation_id, str(workspace))
+    assert refreshed["summary_stats"]["run_count"] == 2
+    assert fetched["conversation_memory"]["run_count"] == 2
 
 
 def test_capability_trace_for_tool_maps_tool_to_agent_capability():
@@ -1770,11 +1848,15 @@ def test_context_pack_to_text():
         task_summary="修复导入错误",
         relevant_files=["src/app.py", "tests/test_app.py"],
         selected_skills=["skill.delivery-review"],
+        selection_reasons=["top_selected_files: src/app.py score=3"],
+        budget_report={"included_file_count": 2, "trimmed_file_count": 0, "utilization": 0.2},
     )
     text = pack.to_text()
     assert "修复导入错误" in text
     assert "src/app.py" in text
     assert "skill.delivery-review" in text
+    assert "选择摘要" in text
+    assert "预算取舍" in text
     assert "Token 预算" in text
 
 

@@ -27,10 +27,7 @@ from src.api.models import (
     AgentEvent,
     BenchmarkRunRequest,
     CancelResponse,
-    ConversationCreateRequest,
     ConversationRunRequest,
-    ConversationTeamRecommendRequest,
-    ConversationTeamUpdateRequest,
     Message,
     RetryRunRequest,
     RunRequest,
@@ -243,11 +240,13 @@ def _build_retry_prompt(
         ])
     if failure:
         evidence = failure.get("evidence") if isinstance(failure.get("evidence"), dict) else {}
+        related_files = failure.get("related_files") if isinstance(failure.get("related_files"), list) else []
         lines.extend([
             "",
             "失败分类:",
             f"- 类型: {failure.get('failure_class') or 'unknown'}",
             f"- 标题: {failure.get('title') or '运行失败'}",
+            f"- 关联文件: {', '.join(str(path) for path in related_files[:12]) if related_files else '未识别'}",
             f"- 证据: {json.dumps(evidence, ensure_ascii=False)[:1200]}",
         ])
     if recent_errors:
@@ -284,6 +283,18 @@ def _messages_for_run(messages: list[Message] | None, prompt: str) -> list[Any]:
 
 def _is_simple_lead_message(prompt: str) -> bool:
     return is_lead_direct_intent(prompt)
+
+
+def _intent_session_fields(intent_decision: dict[str, Any] | None) -> dict[str, Any]:
+    intent = intent_decision if isinstance(intent_decision, dict) else {}
+    raw_decision = intent.get("raw_decision") if isinstance(intent.get("raw_decision"), dict) else {}
+    return {
+        "intent_decision": intent,
+        "intent_decision_normalized": intent,
+        "intent_decision_raw": raw_decision,
+        "intent_guard_hits": intent.get("guard_hits") if isinstance(intent.get("guard_hits"), list) else [],
+        "intent_corrections": [],
+    }
 
 
 def _lead_only_execution_plan(prompt: str, workspace_dir: str, team: list[dict[str, Any]]) -> dict[str, Any]:
@@ -373,16 +384,12 @@ async def _run_readonly_subagent(
 from src.agent.state import WorkflowCancelledError
 from src.api.services.benchmark_service import emit_benchmark_run, list_benchmarks
 from src.api.services.conversation_service import (
-    create_conversation,
     compose_runtime_team_async,
     finalize_conversation_run,
     get_conversation,
     link_run_to_conversation,
-    list_conversations,
-    refresh_conversation_recommendation,
-    update_conversation_team,
 )
-from src.api.services.intent_router import is_lead_direct_intent
+from src.api.services.intent_router import classify_user_intent, classify_user_intent_async, is_lead_direct_intent
 from src.api.services.demo_run import DEMO_PROMPT, emit_demo_run, write_demo_artifacts
 from src.api.services.event_store import get_event_store
 from src.api.services.sse_broker import stream_events_push, patch_event_store_for_push, get_sse_broker
@@ -476,6 +483,43 @@ def _emit_agenthub_event(
         payload=payload or {},
         workspace_dir=workspace_dir,
     )
+    if event_type in {
+        "task_created",
+        "task_updated",
+        "stage_updated",
+        "tool_call_finished",
+        "file_changed",
+        "diff_updated",
+        "test_finished",
+        "report_ready",
+        "done",
+        "assistant_message",
+        "quality_gate",
+        "delivery_scored",
+        "agent_run_started",
+        "agent_result_merged",
+        "agent_run_failed",
+        "parallel_agent_progress",
+        "parallel_agent_result",
+        "parallel_agent_failed",
+        "parallel_agents_completed",
+    }:
+        try:
+            from src.api.services.run_state_service import mirror_domain_event_to_task_board
+
+            mirror_domain_event_to_task_board(
+                thread_id=thread_id,
+                workspace_dir=workspace_dir,
+                event_type=event_type,
+                payload=payload or {},
+                title=title,
+                content=content,
+                agent=agent,
+                event_id=event.id,
+                timestamp=event.timestamp,
+            )
+        except Exception:
+            pass
 
     if legacy_event is not None:
         with runs_lock:
@@ -699,6 +743,8 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         execution_plan = run_info.get("execution_plan", {})
         run_team = run_info.get("team", [])
         conversation_id = run_info.get("conversation_id")
+        intent_decision = execution_plan.get("intent_decision", {}) if isinstance(execution_plan.get("intent_decision"), dict) else {}
+        is_lead_direct_run = intent_decision.get("execution_route") == "lead_direct_reply"
 
         tool_policy_data = execution_plan.get("tool_policy", {})
         if isinstance(tool_policy_data, dict):
@@ -769,6 +815,11 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             workspace_dir,
             context_pack=context_pack.to_dict(),
         )
+        try:
+            from src.api.services.run_state_service import save_run_context_pack
+            save_run_context_pack(thread_id, workspace_dir, context_pack.to_dict())
+        except Exception:
+            pass
         _emit_agenthub_event(
             thread_id=thread_id,
             event_type="context_pack_built",
@@ -783,6 +834,28 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             },
             workspace_dir=workspace_dir,
         )
+        try:
+            from src.api.services.agent_loop_state_service import append_loop_step
+
+            if not is_lead_direct_run:
+                append_loop_step(
+                    thread_id,
+                    workspace_dir,
+                    phase="observe",
+                    action={
+                        "type": "inspect_project",
+                        "goal": "Build and inject the run context pack.",
+                        "agent": "Lead",
+                        "context_requirements": {
+                            "selected_files": context_pack.relevant_files,
+                            "file_outline_count": len(context_pack.file_outlines),
+                        },
+                    },
+                    context_pack_id="run_context_pack",
+                    summary=f"Selected {len(context_pack.relevant_files)} files for this step.",
+                )
+        except Exception:
+            pass
         _emit_agent_activity(
             thread_id=thread_id,
             agent="lead",
@@ -815,6 +888,25 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
         return _should_cancel_run(thread_id)
 
     async def on_tool_check(tool_name: str, tool_input: dict):
+        try:
+            from src.api.services.agent_loop_state_service import check_loop_tool_guard
+
+            loop_decision = check_loop_tool_guard(thread_id, workspace_dir, tool_name, tool_input)
+        except Exception:
+            loop_decision = None
+        if loop_decision is not None:
+            pending_policy_decisions.append(loop_decision)
+            _emit_agenthub_event(
+                thread_id=thread_id,
+                event_type="loop_guard_blocked",
+                title=f"Loop Guard 拦截工具: {tool_name}",
+                content=loop_decision.reason,
+                agent="lead",
+                payload={"tool": tool_name, "decision": loop_decision.to_dict()},
+                workspace_dir=workspace_dir,
+            )
+            return loop_decision
+
         decision = policy_runtime.check(tool_name, tool_input)
         trace = capability_trace_for_tool(tool_name)
         target = (
@@ -866,6 +958,26 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
                 workspace_dir,
                 timeout_seconds=approval_timeout_seconds,
             )
+            try:
+                from src.api.services.agent_loop_state_service import append_loop_step
+
+                append_loop_step(
+                    thread_id,
+                    workspace_dir,
+                    phase="act",
+                    status="waiting",
+                    action={
+                        "type": "request_approval",
+                        "goal": decision.reason,
+                        "agent": "Lead",
+                        "tool_call": {"tool": tool_name, "input": tool_input},
+                        "approval": {"tool": tool_name, "timeout_seconds": approval_timeout_seconds},
+                    },
+                    summary=f"Waiting for approval: {tool_name}",
+                    pending_approval_id=tool_name,
+                )
+            except Exception:
+                pass
             _transition_runtime_state(thread_id, workspace_dir, RunStatus.WAITING_APPROVAL)
 
             # Emit both approval_required and run_waiting_approval events
@@ -1041,6 +1153,25 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event=legacy_event,
             workspace_dir=workspace_dir,
         )
+        try:
+            from src.api.services.agent_loop_state_service import append_loop_step
+
+            append_loop_step(
+                thread_id,
+                workspace_dir,
+                phase="act",
+                status="completed" if not str(output or "").startswith("Error:") else "failed",
+                action={
+                    "type": "call_tool",
+                    "goal": f"Call {tool_name}.",
+                    "agent": capability_trace["agent"],
+                    "tool_call": {"tool": tool_name, "input": tool_input},
+                },
+                summary=(output or "")[:500],
+                event_id=call_id or None,
+            )
+        except Exception:
+            pass
         for derived_event in derive_agenthub_events(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -1134,6 +1265,23 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             workspace_dir=workspace_dir,
             payload={"phase": "agent_loop", "can_cancel": True},
         )
+        try:
+            from src.api.services.agent_loop_state_service import append_loop_step
+
+            if not is_lead_direct_run:
+                append_loop_step(
+                    thread_id,
+                    workspace_dir,
+                    phase="decide",
+                    action={
+                        "type": "create_tasks",
+                        "goal": "Enter the Lead loop and decide the next action from context.",
+                        "agent": "Lead",
+                    },
+                    summary="Lead loop started.",
+                )
+        except Exception:
+            pass
         result = ""
         _token_broker = get_sse_broker()
         _token_counter = 0
@@ -1226,6 +1374,17 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "done", "status": "completed"},
             workspace_dir=workspace_dir,
         )
+        try:
+            from src.api.services.agent_loop_state_service import finalize_agent_loop_state
+
+            finalize_agent_loop_state(
+                thread_id,
+                workspace_dir,
+                status="completed",
+                final_message=result,
+            )
+        except Exception:
+            pass
         event_store.update_session(
             thread_id,
             workspace_dir,
@@ -1258,6 +1417,17 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "done", "status": "cancelled"},
             workspace_dir=workspace_dir,
         )
+        try:
+            from src.api.services.agent_loop_state_service import finalize_agent_loop_state
+
+            finalize_agent_loop_state(
+                thread_id,
+                workspace_dir,
+                status="cancelled",
+                final_message="Agent 运行已取消",
+            )
+        except Exception:
+            pass
         event_store.update_session(
             thread_id,
             workspace_dir,
@@ -1292,6 +1462,17 @@ async def _run_workflow_async(thread_id: str, initial_messages: list, max_retrie
             legacy_event={"type": "error", "message": str(e)},
             workspace_dir=workspace_dir,
         )
+        try:
+            from src.api.services.agent_loop_state_service import finalize_agent_loop_state
+
+            finalize_agent_loop_state(
+                thread_id,
+                workspace_dir,
+                status="failed",
+                final_message=str(e),
+            )
+        except Exception:
+            pass
         event_store.update_session(
             thread_id,
             workspace_dir,
@@ -1584,6 +1765,8 @@ async def start_run(request: RunRequest):
     run_workspace = _get_workspace()
     run_team = list(request.team or [])
     run_execution_plan = dict(request.execution_plan or {})
+    if "intent_decision" not in run_execution_plan:
+        run_execution_plan["intent_decision"] = classify_user_intent(prompt)
 
     with runs_lock:
         run_context = RunContext(
@@ -1609,6 +1792,56 @@ async def start_run(request: RunRequest):
     session_metadata = run_context.session_metadata()
     if session_metadata:
         event_store.update_session(thread_id, run_workspace, **session_metadata)
+    event_store.update_session(
+        thread_id,
+        run_workspace,
+        **_intent_session_fields(run_execution_plan.get("intent_decision", {})),
+    )
+    _emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="intent_routed",
+        title="用户意图已路由",
+        content=str(run_execution_plan.get("intent_decision", {}).get("rationale", "")),
+        agent="lead",
+        payload={"intent_decision": run_execution_plan.get("intent_decision", {})},
+        workspace_dir=run_workspace,
+    )
+    try:
+        from src.api.services.agent_loop_state_service import append_loop_step, init_agent_loop_state
+
+        init_agent_loop_state(
+            thread_id,
+            run_workspace,
+            user_request=prompt,
+            intent=run_execution_plan.get("intent_decision", {}),
+            conversation_id=request.conversation_id,
+        )
+        append_loop_step(
+            thread_id,
+            run_workspace,
+            phase="observe",
+            action={
+                "type": "answer" if run_execution_plan.get("intent_decision", {}).get("execution_route") == "lead_direct_reply" else "create_tasks",
+                "goal": "Route the user request before entering the runtime.",
+                "agent": "Lead",
+            },
+            summary=str(run_execution_plan.get("intent_decision", {}).get("rationale", "")),
+        )
+    except Exception:
+        pass
+    try:
+        from src.api.services.run_state_service import get_or_create_run_state
+        get_or_create_run_state(thread_id, run_workspace)
+    except Exception as exc:
+        _emit_agenthub_event(
+            thread_id=thread_id,
+            event_type="run_state_create_failed",
+            title="运行状态创建失败",
+            content=str(exc),
+            agent="system",
+            payload={"error": str(exc)},
+            workspace_dir=run_workspace,
+        )
     stage_updates = run_context.start_first_stage()
     _sync_run_context(thread_id, run_workspace)
     _emit_stage_updates(thread_id, run_workspace, stage_updates)
@@ -1677,61 +1910,6 @@ async def start_agenthub_run(request: RunRequest):
     return await start_run(request)
 
 
-@app.post("/api/conversations")
-async def create_agenthub_conversation(request: ConversationCreateRequest):
-    return {
-        "conversation": create_conversation(
-            prompt=request.prompt,
-            workspace_dir=request.workspace_dir or _get_workspace(),
-        )
-    }
-
-
-@app.get("/api/conversations")
-async def list_agenthub_conversations(limit: int = 50, workspace_dir: str | None = None):
-    safe_limit = min(max(limit, 0), 200)
-    return {
-        "conversations": list_conversations(
-            limit=safe_limit,
-            workspace_dir=workspace_dir or _get_workspace(),
-        )
-    }
-
-
-@app.get("/api/conversations/{conversation_id}")
-async def get_agenthub_conversation(conversation_id: str, workspace_dir: str | None = None):
-    conv = get_conversation(conversation_id, workspace_dir or _get_workspace())
-    if not conv:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    return conv
-
-
-@app.post("/api/conversations/{conversation_id}/team/recommend")
-async def recommend_agenthub_conversation_team(conversation_id: str, request: ConversationTeamRecommendRequest | None = None):
-    prompt = request.prompt if request else ""
-    try:
-        recommendation = refresh_conversation_recommendation(conversation_id, prompt, _get_workspace())
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        "conversation_id": conversation_id,
-        "recommendation": recommendation,
-    }
-
-
-@app.put("/api/conversations/{conversation_id}/team")
-async def update_agenthub_conversation_team(conversation_id: str, request: ConversationTeamUpdateRequest):
-    try:
-        team = update_conversation_team(
-            conversation_id=conversation_id,
-            members=request.members,
-            workspace_dir=request.workspace_dir or _get_workspace(),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"team": team}
-
-
 @app.post("/api/conversations/{conversation_id}/runs")
 async def create_agenthub_conversation_run(conversation_id: str, request: ConversationRunRequest):
     conversation = get_conversation(conversation_id, request.workspace_dir or _get_workspace())
@@ -1742,11 +1920,40 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
     team = conversation.get("team", {})
     members = list(team.get("members", []))
     runtime_team_source = team.get("source", "conversation")
-    is_simple = _is_simple_lead_message(request.prompt)
+    intent_decision = await classify_user_intent_async(
+        request.prompt,
+        conversation_summary=str(conversation.get("conversation_summary") or ""),
+    )
+    is_simple = intent_decision.get("execution_route") == "lead_direct_reply"
     runtime_composition = await compose_runtime_team_async(request.prompt, workspace_dir, conversation_id)
-    if len(members) <= 1:
+    if is_simple:
+        lead_member = next((member for member in members if str(member.get("role", "")).lower() == "lead"), None)
+        members = [lead_member or {"name": "Lead", "role": "lead"}]
+        runtime_team_source = "lead_direct"
+        runtime_composition["members"] = members
+        runtime_composition["complexity"] = {
+            **dict(runtime_composition.get("complexity") or {}),
+            "level": intent_decision.get("level", "simple"),
+            "route": intent_decision.get("route", "direct_answer"),
+            "execution_route": intent_decision.get("execution_route", "lead_direct_reply"),
+            "intent": intent_decision.get("intent", "direct_answer"),
+            "requires_workspace_write": intent_decision.get("requires_workspace_write", False),
+            "requires_workspace_read": intent_decision.get("requires_workspace_read", False),
+            "requires_shell": intent_decision.get("requires_shell", False),
+            "requires_approval": intent_decision.get("requires_approval", False),
+            "requires_execution": intent_decision.get("requires_execution", False),
+            "intent_decision": intent_decision,
+        }
+    elif len(members) <= 1:
         members = list(runtime_composition.get("members", []))
         runtime_team_source = "runtime_composed"
+    else:
+        runtime_composition["complexity"] = {
+            **dict(runtime_composition.get("complexity") or {}),
+            "intent_decision": intent_decision,
+            "route": intent_decision.get("route", runtime_composition.get("complexity", {}).get("route")),
+            "execution_route": intent_decision.get("execution_route", "agenthub_delivery"),
+        }
     execution_plan = (
         _lead_only_execution_plan(request.prompt, workspace_dir, members)
         if is_simple
@@ -1757,7 +1964,9 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         )
     )
     execution_plan["complexity"] = runtime_composition.get("complexity", {})
+    execution_plan["intent_decision"] = intent_decision
     execution_plan.setdefault("summary", {})["runtime_team_source"] = runtime_team_source
+    execution_plan.setdefault("summary", {})["intent_route"] = intent_decision.get("route")
     response = await start_run(
         RunRequest(
             prompt=request.prompt,
@@ -1792,6 +2001,7 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         agent_loop_policy=updated.get("agent_loop_policy", "run_per_message"),
         runtime_team_source=runtime_team_source,
         runtime_composition=runtime_composition,
+        **_intent_session_fields(intent_decision),
     )
     _emit_agenthub_event(
         thread_id=thread_id,
@@ -1802,6 +2012,7 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         payload={
             "conversation_id": conversation_id,
             "complexity": runtime_composition.get("complexity", {}),
+            "intent_decision": intent_decision,
             "members": members,
             "source": runtime_team_source,
         },
@@ -1816,6 +2027,7 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         payload={
             "phase": "complexity_assessed",
             "complexity": runtime_composition.get("complexity", {}),
+            "intent_decision": intent_decision,
             "members": [member.get("name") for member in members],
         },
     )
@@ -1852,6 +2064,7 @@ async def create_agenthub_conversation_run(conversation_id: str, request: Conver
         "run": response,
         "conversation": updated,
         "runtime_team": {"members": members, "source": runtime_team_source},
+        "intent_decision": intent_decision,
     }
 
 
@@ -1969,8 +2182,9 @@ async def start_agenthub_benchmark_run(request: BenchmarkRunRequest):
 
 
 @app.get("/api/runs")
-async def list_agenthub_runs():
-    return {"runs": list_run_history_with_active(run_manager, _get_workspace())}
+async def list_agenthub_runs(limit: int = 50, workspace_dir: str | None = None):
+    workspace = workspace_dir or _get_workspace()
+    return {"runs": list_run_history_with_active(run_manager, workspace, limit=min(max(limit, 1), 200))}
 
 
 @app.get("/api/runs/active")
@@ -2053,8 +2267,8 @@ async def cancel_run(thread_id: str):
     return CancelResponse(cancelled=True, thread_id=thread_id)
 
 
-@app.get("/api/runs/{thread_id}/state")
-async def get_run_state(thread_id: str):
+@app.get("/api/runs/{thread_id}/runtime-state")
+async def get_run_runtime_state(thread_id: str):
     sm = run_manager.get_state_machine(thread_id)
     if not sm:
         raise HTTPException(status_code=404, detail=f"Run 不在活跃列表中: {thread_id}")

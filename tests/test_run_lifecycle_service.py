@@ -306,6 +306,7 @@ class TestLifecycleAPI:
         client = TestClient(api_server.app)
         ws = tmp_path / "ws"
         ws.mkdir()
+        (ws / "LoginButton.vue").write_text("<template><button /></template>\n", encoding="utf-8")
         thread_id = "failed_retry_source"
         api_server.event_store.create_session(thread_id, "修复登录页按钮样式", str(ws), status="failed")
         api_server.event_store.update_session(
@@ -327,7 +328,7 @@ class TestLifecycleAPI:
             thread_id,
             "error",
             title="测试失败",
-            content="AssertionError: expected primary button color",
+            content="AssertionError: expected primary button color in LoginButton.vue",
             workspace_dir=str(ws),
         )
 
@@ -346,5 +347,6 @@ class TestLifecycleAPI:
         assert "原始 Run" in retry_session["prompt"]
         assert "优先重试失败阶段" in retry_session["prompt"]
         assert "AssertionError" in retry_session["prompt"]
+        assert "关联文件: LoginButton.vue" in retry_session["prompt"]
 
         api_server.run_manager.unregister(retry_thread_id)

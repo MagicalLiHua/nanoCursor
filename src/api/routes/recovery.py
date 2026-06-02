@@ -14,6 +14,7 @@ from src.api.models import (
     RecoveryActionRequest,
     RemediationRunRequest,
     RollbackRequest,
+    RunRestoreRequest,
 )
 from src.api.run_state import (
     active_runs,
@@ -230,6 +231,110 @@ async def restore_run_checkpoint(thread_id: str, checkpoint_id: str, request: Re
             result="failure",
             reason=str(exc),
             detail={"checkpoint_id": checkpoint_id},
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/runs/{thread_id}/restore")
+async def restore_run(thread_id: str, request: RunRestoreRequest):
+    """Restore a run checkpoint by id or by latest checkpoint for target_path."""
+    workspace = workspace_for_thread(thread_id)
+    if not request.confirmed:
+        audit_route_action(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            kind="run_restore",
+            target=request.checkpoint_id or request.target_path,
+            decision="denied",
+            result="failure",
+            reason="restore 需要 confirmed=true 确认。",
+            detail={"checkpoint_id": request.checkpoint_id, "target_path": request.target_path},
+        )
+        raise HTTPException(status_code=400, detail="restore 需要 confirmed=true 确认。")
+
+    checkpoint_id = request.checkpoint_id.strip()
+    restore_mode = "checkpoint_id"
+    if not checkpoint_id:
+        target_path = request.target_path.strip()
+        if not target_path:
+            audit_route_action(
+                thread_id=thread_id,
+                workspace_dir=workspace,
+                kind="run_restore",
+                target="",
+                decision="denied",
+                result="failure",
+                reason="restore 需要 checkpoint_id 或 target_path。",
+            )
+            raise HTTPException(status_code=400, detail="restore 需要 checkpoint_id 或 target_path。")
+        checkpoints = list_checkpoints(thread_id, workspace)
+        candidates = checkpoints.get("files", {}).get(target_path, [])
+        if not candidates:
+            audit_route_action(
+                thread_id=thread_id,
+                workspace_dir=workspace,
+                kind="run_restore",
+                target=target_path,
+                decision="denied",
+                result="failure",
+                reason=f"未找到 {target_path} 的 checkpoint。",
+            )
+            raise HTTPException(status_code=404, detail=f"未找到 {target_path} 的 checkpoint。")
+        checkpoint_id = str(candidates[0].get("checkpoint_id") or "")
+        restore_mode = "latest_for_file"
+
+    try:
+        result = restore_checkpoint(
+            checkpoint_id=checkpoint_id,
+            thread_id=thread_id,
+            confirmed=True,
+            workspace_dir=workspace,
+        )
+        response = {
+            **result,
+            "thread_id": thread_id,
+            "restore_mode": restore_mode,
+            "requested_target_path": request.target_path,
+        }
+        audit_route_action(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            kind="run_restore",
+            target=checkpoint_id,
+            decision="confirmed",
+            result="success",
+            reason=str(result.get("message", "")),
+            detail={
+                "checkpoint_id": checkpoint_id,
+                "filepath": result.get("filepath"),
+                "restore_mode": restore_mode,
+                "requested_target_path": request.target_path,
+            },
+        )
+        event_store.append_event(
+            thread_id=thread_id,
+            event_type="checkpoint_restored",
+            title="Run checkpoint 已恢复",
+            content=str(result.get("message", "")),
+            agent="system",
+            payload={
+                "checkpoint_id": checkpoint_id,
+                "filepath": result.get("filepath"),
+                "restore_mode": restore_mode,
+            },
+            workspace_dir=workspace,
+        )
+        return response
+    except ValueError as exc:
+        audit_route_action(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            kind="run_restore",
+            target=checkpoint_id,
+            decision="confirmed",
+            result="failure",
+            reason=str(exc),
+            detail={"checkpoint_id": checkpoint_id, "restore_mode": restore_mode},
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -37,6 +37,7 @@ def check_and_decide(
     target: str = "",
     thread_id: str = "",
     workspace_dir: str = "",
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pre-flight check: determine if an action is allowed and needs approval.
 
@@ -53,6 +54,9 @@ def check_and_decide(
         }
 
     effective_workspace = workspace_dir or config_module.WORKSPACE_DIR
+    loop_guard = _check_loop_guard(thread_id, effective_workspace, kind=kind, target=target, payload=payload)
+    if loop_guard:
+        return loop_guard
 
     # Path guard for file/delete actions
     if action_kind in (ActionKind.WRITE_FILE, ActionKind.DELETE_FILE, ActionKind.READ_FILE):
@@ -67,13 +71,32 @@ def check_and_decide(
                     "risk": "high",
                 }
 
-    decision = check_action(action_kind, target, thread_id, effective_workspace)
+    decision = check_action(action_kind, target, thread_id, effective_workspace, payload=payload)
     return {
         "allowed": decision.allowed,
         "requires_approval": decision.requires_approval,
         "reason": decision.reason,
         "risk": decision.risk,
+        "permission_level": decision.permission_level,
     }
+
+
+def _check_loop_guard(
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    kind: str,
+    target: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not thread_id:
+        return None
+    try:
+        from src.api.services.agent_loop_state_service import check_loop_action_guard
+
+        return check_loop_action_guard(thread_id, workspace_dir, kind=kind, target=target, payload=payload)
+    except Exception:
+        return None
 
 
 def execute_action(
@@ -101,6 +124,21 @@ def execute_action(
             workspace_dir=effective_workspace,
         )
 
+    loop_guard = _check_loop_guard(thread_id, effective_workspace, kind=kind, target=target, payload=payload)
+    if loop_guard:
+        return _audit_and_return(
+            thread_id=thread_id,
+            kind=kind,
+            target=target,
+            allowed=False,
+            decision="denied",
+            result="failure",
+            reason=loop_guard["reason"],
+            risk=loop_guard.get("risk", "high"),
+            workspace_dir=effective_workspace,
+            detail={"permission_level": loop_guard.get("permission_level", "")},
+        )
+
     # 1. Path guard
     if action_kind in (ActionKind.WRITE_FILE, ActionKind.DELETE_FILE, ActionKind.READ_FILE):
         if target:
@@ -116,7 +154,7 @@ def execute_action(
                 )
 
     # 2. Policy check
-    decision = check_action(action_kind, target, thread_id, effective_workspace)
+    decision = check_action(action_kind, target, thread_id, effective_workspace, payload=payload)
 
     if not decision.allowed:
         return _audit_and_return(
@@ -144,6 +182,7 @@ def execute_action(
                 reason=f"需要审批: {decision.reason}", risk=decision.risk,
                 approval_id=approval_id,
                 workspace_dir=effective_workspace,
+                detail={"permission_level": decision.permission_level},
             )
 
         approval = get_tool_approval(thread_id, approval_id, effective_workspace)
@@ -175,7 +214,7 @@ def execute_action(
                 approval_id=approval_id,
                 workspace_dir=effective_workspace,
                 duration_ms=duration_ms,
-                detail={"error": str(exc)},
+                detail={"error": str(exc), "permission_level": decision.permission_level},
             )
 
         duration_ms = round((time.monotonic() - started) * 1000)
@@ -186,7 +225,7 @@ def execute_action(
             approval_id=approval_id,
             workspace_dir=effective_workspace,
             duration_ms=duration_ms,
-            detail=execution.get("detail", {}),
+            detail={**execution.get("detail", {}), "permission_level": decision.permission_level},
         )
 
     # 4. Execute low/medium risk actions.
@@ -207,18 +246,18 @@ def execute_action(
             reason=str(exc), risk=decision.risk,
             workspace_dir=effective_workspace,
             duration_ms=duration_ms,
-            detail={"error": str(exc)},
+            detail={"error": str(exc), "permission_level": decision.permission_level},
         )
 
     duration_ms = round((time.monotonic() - started) * 1000)
     return _audit_and_return(
         thread_id=thread_id, kind=kind, target=target,
-        allowed=True, decision="auto_allowed", result=execution["result"],
-        reason=execution["reason"], risk=decision.risk,
-        workspace_dir=effective_workspace,
-        duration_ms=duration_ms,
-        detail=execution.get("detail", {}),
-    )
+            allowed=True, decision="auto_allowed", result=execution["result"],
+            reason=execution["reason"], risk=decision.risk,
+            workspace_dir=effective_workspace,
+            duration_ms=duration_ms,
+            detail={**execution.get("detail", {}), "permission_level": decision.permission_level},
+        )
 
 
 def _execute_low_risk_action(
@@ -271,6 +310,12 @@ def _execute_low_risk_action(
                 "checkpoint": checkpoint,
             },
         }
+
+    if action_kind == ActionKind.RUN_COMMAND:
+        return _run_command_action(target, payload, workspace_dir)
+
+    if action_kind == ActionKind.MCP_CALL:
+        return _run_mcp_call_action(target, payload, thread_id, workspace_dir)
 
     return {
         "result": "success",
@@ -333,23 +378,7 @@ def _execute_approved_action(
 ) -> dict[str, Any]:
     """Execute high-risk actions after approval has been verified."""
     if action_kind == ActionKind.RUN_COMMAND:
-        if not target.strip():
-            raise ValueError("run_command 需要 command target。")
-        timeout_seconds = int(payload.get("timeout_seconds") or 120)
-        timeout_seconds = max(1, min(timeout_seconds, 600))
-        result = run_command(
-            target,
-            cwd=resolve_workspace_path(workspace_dir, "."),
-            timeout_seconds=timeout_seconds,
-            max_stdout_chars=int(payload.get("max_stdout_chars") or 100_000),
-            max_stderr_chars=int(payload.get("max_stderr_chars") or 20_000),
-        )
-        ok = result.get("exit_code") == 0 and not result.get("timed_out")
-        return {
-            "result": "success" if ok else "failure",
-            "reason": "命令执行成功。" if ok else "命令执行失败。",
-            "detail": result,
-        }
+        return _run_command_action(target, payload, workspace_dir)
 
     if action_kind == ActionKind.DELETE_FILE:
         path = resolve_workspace_path(workspace_dir, target, must_exist=True)
@@ -386,27 +415,56 @@ def _execute_approved_action(
         }
 
     if action_kind == ActionKind.MCP_CALL:
-        server_id, tool_name = _parse_mcp_call_target(target, payload)
-        if not server_id or not tool_name:
-            raise ValueError("mcp_call 需要 server_id 和 tool_name。")
-        arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
-        timeout_seconds = int(payload.get("timeout_seconds") or 10)
-        result = call_mcp_tool(
-            server_id=server_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            workspace_dir=workspace_dir,
-            timeout_seconds=timeout_seconds,
-        )
-        if result.get("ok"):
-            record_mcp_usage(server_id, thread_id, workspace_dir)
-        return {
-            "result": "success" if result.get("ok") else "failure",
-            "reason": "MCP 工具调用成功。" if result.get("ok") else f"MCP 工具调用失败: {result.get('error', 'unknown')}",
-            "detail": result,
-        }
+        return _run_mcp_call_action(target, payload, thread_id, workspace_dir)
 
     raise ValueError(f"{action_kind.value} 审批后执行尚未接入。")
+
+
+def _run_mcp_call_action(
+    target: str,
+    payload: dict[str, Any],
+    thread_id: str,
+    workspace_dir: str,
+) -> dict[str, Any]:
+    server_id, tool_name = _parse_mcp_call_target(target, payload)
+    if not server_id or not tool_name:
+        raise ValueError("mcp_call 需要 server_id 和 tool_name。")
+    arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+    timeout_seconds = int(payload.get("timeout_seconds") or 10)
+    result = call_mcp_tool(
+        server_id=server_id,
+        tool_name=tool_name,
+        arguments=arguments,
+        workspace_dir=workspace_dir,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.get("ok"):
+        record_mcp_usage(server_id, thread_id, workspace_dir)
+    return {
+        "result": "success" if result.get("ok") else "failure",
+        "reason": "MCP 工具调用成功。" if result.get("ok") else f"MCP 工具调用失败: {result.get('error', 'unknown')}",
+        "detail": result,
+    }
+
+
+def _run_command_action(target: str, payload: dict[str, Any], workspace_dir: str) -> dict[str, Any]:
+    if not target.strip():
+        raise ValueError("run_command 需要 command target。")
+    timeout_seconds = int(payload.get("timeout_seconds") or 120)
+    timeout_seconds = max(1, min(timeout_seconds, 600))
+    result = run_command(
+        target,
+        cwd=resolve_workspace_path(workspace_dir, "."),
+        timeout_seconds=timeout_seconds,
+        max_stdout_chars=int(payload.get("max_stdout_chars") or 100_000),
+        max_stderr_chars=int(payload.get("max_stderr_chars") or 20_000),
+    )
+    ok = result.get("exit_code") == 0 and not result.get("timed_out")
+    return {
+        "result": "success" if ok else "failure",
+        "reason": "命令执行成功。" if ok else "命令执行失败。",
+        "detail": result,
+    }
 
 
 def _trash_root(workspace: Path, thread_id: str) -> Path:
@@ -513,6 +571,7 @@ def _audit_and_return(
         "requires_approval": decision == "approved" and result == "pending",
         "reason": reason,
         "risk": risk,
+        "permission_level": audit_detail.get("permission_level", ""),
         "approval_id": approval_id,
         "result": result,
         "detail": audit_detail,

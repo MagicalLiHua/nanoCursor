@@ -1,5 +1,6 @@
 import React from "react";
 import { shortPath } from "../../core/format.js";
+import EmptyState from "./EmptyState.jsx";
 
 function highlightDiff(diff) {
   return String(diff)
@@ -35,7 +36,12 @@ export default function DiffView({ state, onSelectFile }) {
   const selected = files.find((f) => f.path === state.selectedDiffFile) || files[0];
 
   if (!files.length) {
-    return <div className="empty">暂无 Diff 记录</div>;
+    return (
+      <EmptyState
+        title="暂无 Diff"
+        detail="当前运行还没有可展示的文件变更。"
+      />
+    );
   }
 
   return (

@@ -9,7 +9,7 @@ nanoCursor API Pydantic Models
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -22,6 +22,77 @@ class Message(BaseModel):
     """聊天消息结构"""
     role: str
     content: str
+
+
+IntentRoute = Literal[
+    "direct_answer",
+    "read_only",
+    "small_edit",
+    "feature_delivery",
+    "debug_fix",
+    "test_only",
+    "review_only",
+    "risky_operation",
+    "clarification_needed",
+]
+
+
+class IntentDecision(BaseModel):
+    """Structured pre-run routing decision.
+
+    ``route`` describes the product-level user intent. ``execution_route`` keeps
+    compatibility with the existing runtime entrypoints.
+    """
+
+    route: IntentRoute
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    requires_workspace_read: bool = False
+    requires_workspace_write: bool = False
+    requires_shell: bool = False
+    requires_approval: bool = False
+    requires_execution: bool = False
+    suggested_agents: list[str] = Field(default_factory=lambda: ["Lead"])
+    rationale: str = ""
+    missing_information: list[str] = Field(default_factory=list)
+
+    intent: str = ""
+    level: str = "simple"
+    complexity: str = "simple"
+    strategy: str = "analysis_only"
+    execution_route: Literal["lead_direct_reply", "agenthub_delivery"] = "lead_direct_reply"
+    signals: list[str] = Field(default_factory=list)
+    indicators: list[str] = Field(default_factory=list)
+    source: str = "deterministic_guard"
+    risk_level: Literal["low", "medium", "high"] = "low"
+    risk_reasons: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    context_requirements: dict[str, Any] = Field(default_factory=dict)
+    tool_permissions: dict[str, str] = Field(default_factory=dict)
+    suggested_agent_specs: list[dict[str, Any]] = Field(default_factory=list)
+    guard_hits: list[str] = Field(default_factory=list)
+    normalized_from: str = ""
+    raw_decision: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentIntentSpec(BaseModel):
+    """Suggested runtime Agent from a structured intent decision."""
+
+    role: str
+    mode: Literal["permanent", "temporary"] = "temporary"
+    goal: str = ""
+    permissions: list[str] = Field(default_factory=list)
+    exit_condition: str = ""
+
+
+class IntentDecisionV3(IntentDecision):
+    """Intent Router V3 contract.
+
+    Extends the stable V2 response with structured Agent, context, risk and
+    tool-permission metadata. Existing API consumers can keep reading the V2
+    fields while newer runtime paths consume the richer fields.
+    """
+
+    suggested_agent_specs: list[AgentIntentSpec] = Field(default_factory=list)
 
 
 class LLMProviderStatus(BaseModel):
@@ -105,6 +176,67 @@ class RetryRunRequest(BaseModel):
     retry_mode: str = Field(default="full", description="full | failed_stage")
     failure_id: str | None = Field(default=None, description="可选的失败记录 ID")
     instruction: str = Field(default="", max_length=2000, description="用户补充的重试指令")
+
+
+class IntentCorrectionRequest(BaseModel):
+    """Runtime correction for a persisted run intent decision."""
+    route: IntentRoute
+    complexity: Literal["simple", "small_code", "medium", "high_risk"] | None = None
+    reason: str = Field(..., min_length=1, max_length=1000)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    source: str = Field(default="runtime_correction", max_length=120)
+
+
+class TaskResultRequest(BaseModel):
+    """Apply a mutable task-board task result."""
+    status: str = Field(..., description="passed | failed | blocked | skipped")
+    summary: str = Field(default="", max_length=2000)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    outputs: list[dict[str, Any]] = Field(default_factory=list)
+    failure_category: str | None = Field(default=None)
+    retryable: bool = True
+
+
+GraphNodeResultRequest = TaskResultRequest
+
+
+class RunStateNodePatch(BaseModel):
+    """Add or update one task-board task.
+
+    The class name is kept stable for existing OpenAPI/client compatibility;
+    new code should treat each item as a task-board task, not a workflow node.
+    """
+    id: str = Field(..., min_length=1, max_length=120)
+    type: str = Field(default="analysis")
+    title: str = Field(..., min_length=1, max_length=200)
+    goal: str = Field(default="", max_length=1000)
+    agent_role: str = Field(default="lead", max_length=80)
+    dependencies: list[str] = Field(default_factory=list)
+    can_parallel: bool = False
+    writes_files: bool = False
+    resource_locks: list[str] = Field(default_factory=list)
+    tool_policy: dict[str, Any] = Field(default_factory=dict)
+    context_policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunStatePatchRequest(BaseModel):
+    """Mutable run-state patch emitted by Lead Agent loop or UI controls."""
+    reason: str = Field(default="agent_loop_update", max_length=500)
+    add_or_update_nodes: list[RunStateNodePatch] = Field(default_factory=list)
+    add_or_update_tasks: list[RunStateNodePatch] = Field(default_factory=list)
+    remove_nodes: list[str] = Field(default_factory=list)
+    remove_tasks: list[str] = Field(default_factory=list)
+    connect: list[dict[str, str]] = Field(default_factory=list)
+    disconnect: list[dict[str, str]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+RunStateTaskPatch = RunStateNodePatch
+
+
+class LoopActionCheckRequest(BaseModel):
+    """Dry-run a structured Lead loop action without mutating the ledger."""
+    action: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConversationCreateRequest(BaseModel):
@@ -193,6 +325,78 @@ class AgentEvent(BaseModel):
     title: str = ""
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSnapshotRun(BaseModel):
+    """Run snapshot: durable run metadata."""
+    thread_id: str
+    status: str = "missing"
+    mode: str = "agenthub_delivery"
+    prompt: str = ""
+    created_at: float | None = None
+    updated_at: float | None = None
+    strategy: str = ""
+    is_active: bool = False
+
+
+class RunSnapshotWorkspace(BaseModel):
+    """Run snapshot: workspace/environment summary."""
+    path: str
+    name: str = ""
+    git_branch: str = ""
+    dirty: bool = False
+    is_git_repo: bool = False
+
+
+class RunSnapshotConversation(BaseModel):
+    """Run snapshot: compact conversation state."""
+    conversation_id: str | None = None
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    summary: str = ""
+
+
+class RunSnapshotActivity(BaseModel):
+    """Run snapshot: current user-facing activity."""
+    current_agent: str = ""
+    current_action: str = ""
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RunSnapshotChanges(BaseModel):
+    """Run snapshot: change summary."""
+    files_changed: int = 0
+    insertions: int = 0
+    deletions: int = 0
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    source: str = "none"
+
+
+class RunSnapshotQuality(BaseModel):
+    """Run snapshot: quality and risk summary."""
+    status: str = "unknown"
+    score: int | None = None
+    gates: list[dict[str, Any]] = Field(default_factory=list)
+    risks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RunSnapshot(BaseModel):
+    """Frontend-facing aggregate for one run.
+
+    The snapshot is intentionally read-only: building it must not create a task
+    board, approvals, reports, or other run artifacts as a side effect.
+    """
+    run: RunSnapshotRun
+    workspace: RunSnapshotWorkspace
+    conversation: RunSnapshotConversation = Field(default_factory=RunSnapshotConversation)
+    activity: RunSnapshotActivity = Field(default_factory=RunSnapshotActivity)
+    agents: list[dict[str, Any]] = Field(default_factory=list)
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
+    changes: RunSnapshotChanges = Field(default_factory=RunSnapshotChanges)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    quality: RunSnapshotQuality = Field(default_factory=RunSnapshotQuality)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    outcome: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunSessionResponse(BaseModel):
@@ -694,6 +898,13 @@ class RecoveryActionRequest(BaseModel):
     confirmed: bool = False
 
 
+class RunRestoreRequest(BaseModel):
+    """Restore a run checkpoint by explicit id or latest checkpoint for a file."""
+    checkpoint_id: str = ""
+    target_path: str = ""
+    confirmed: bool = False
+
+
 class RecoveryActionResponse(BaseModel):
     """恢复动作执行结果"""
     ok: bool
@@ -788,6 +999,19 @@ class EvalSuiteRunRequest(BaseModel):
     eval_ids: list[str] = Field(default_factory=list)
     mode: str = "agent"
     stop_on_failure: bool = False
+
+
+class IntentEvalRunRequest(BaseModel):
+    """Intent routing eval suite request."""
+    case_ids: list[str] = Field(default_factory=list)
+    persist: bool = True
+
+
+class AgentEvalRunRequest(BaseModel):
+    """Aggregate agent-runtime eval suite request."""
+    suite: Literal["core"] = "core"
+    task_eval_ids: list[str] = Field(default_factory=list)
+    persist: bool = True
 
 
 class EvalScoreRequest(BaseModel):
@@ -916,6 +1140,7 @@ class ActionCheckRequest(BaseModel):
     kind: str           # ActionKind value
     target: str = ""    # file path, command, or tool name
     thread_id: str = ""
+    payload: dict | None = None
 
 
 class ActionExecuteRequest(BaseModel):

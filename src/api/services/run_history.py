@@ -138,6 +138,50 @@ def _changed_files_count(path: Path) -> int:
     return len(data) if isinstance(data, list) else 0
 
 
+def _latest_diff_metadata(path: Path) -> dict[str, Any]:
+    """Return lightweight diff metadata from the latest diff_updated event."""
+    if not path.exists():
+        return {"changed_files_count": 0, "has_diff": False}
+
+    latest: dict[str, Any] | None = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"changed_files_count": 0, "has_diff": False}
+
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "diff_updated" and isinstance(event.get("payload"), dict):
+            latest = event["payload"]
+
+    if not latest:
+        return {"changed_files_count": 0, "has_diff": False}
+
+    changed_files = latest.get("changed_files")
+    diff = latest.get("diff")
+    return {
+        "changed_files_count": len(changed_files) if isinstance(changed_files, list) else 0,
+        "has_diff": bool(diff) or bool(changed_files),
+    }
+
+
+def _is_lead_direct_reply(session: dict[str, Any], changed_files_count: int) -> bool:
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    return plan.get("strategy") == "lead_direct_reply" and changed_files_count == 0
+
+
+def _report_exists(run_dir: Path, session: dict[str, Any], changed_files_count: int) -> bool:
+    if _is_lead_direct_reply(session, changed_files_count):
+        return False
+    return any((run_dir / name).exists() for name in ("report.md", "delivery.md", "delivery.json"))
+
+
+
 def list_run_history(
     workspace_dir: str | None = None,
     status: str | None = None,
@@ -181,8 +225,11 @@ def list_run_history(
         if mode and session.get("mode") != mode:
             continue
 
-        event_count, last_event_type = _count_events(run_dir / "events.jsonl")
+        events_path = run_dir / "events.jsonl"
+        event_count, last_event_type = _count_events(events_path)
+        diff_metadata = _latest_diff_metadata(events_path)
         changed_files_count = _changed_files_count(run_dir / "changed_files.json")
+        changed_files_count = changed_files_count or diff_metadata["changed_files_count"]
 
         runs.append(
             {
@@ -195,8 +242,8 @@ def list_run_history(
                 "updated_at": session.get("updated_at"),
                 "event_count": event_count,
                 "changed_files_count": changed_files_count,
-                "has_diff": (run_dir / "diff.patch").exists(),
-                "has_report": (run_dir / "report.md").exists(),
+                "has_diff": (run_dir / "diff.patch").exists() or bool(diff_metadata["has_diff"]),
+                "has_report": _report_exists(run_dir, session, changed_files_count),
                 "last_event_type": last_event_type,
             }
         )

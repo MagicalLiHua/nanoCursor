@@ -23,6 +23,11 @@ DEFAULT_TTL_SECONDS = 30 * 60
 
 ACTIVE_STATUSES = {"suggested", "active", "working", "waiting_input"}
 ARCHIVED_STATUSES = {"archived", "expired"}
+READ_ONLY_ACTIONS = {"read_file", "list_directory", "search_codebase", "project_context"}
+SAFE_WRITE_ACTIONS = {"write_file", "edit_file"}
+SHELL_ACTIONS = {"run_command", "run_tests"}
+MCP_ACTIONS = {"mcp_call"}
+RISKY_ACTIONS = {"delete_file", "move_file", "bulk_replace", "git_operation"}
 
 
 def _now() -> float:
@@ -94,13 +99,16 @@ def _emit_agent_event(
         "name": agent.get("name", ""),
         "role": agent.get("role", ""),
         "status": agent.get("status", ""),
+        "terminal_status": agent.get("terminal_status", ""),
         "goal": agent.get("goal", ""),
         "reason": agent.get("reason", ""),
         "tools": agent.get("tools", []),
         "capabilities": agent.get("capabilities", []),
         "mcp_servers": agent.get("mcp_servers", []),
+        "task_scope": agent.get("task_scope", {}),
+        "result": agent.get("result", {}) if isinstance(agent.get("result"), dict) else {},
     }
-    get_event_store().append_event(
+    event = get_event_store().append_event(
         thread_id,
         event_type,
         title=f"{agent.get('name', 'Ephemeral Agent')}: {agent.get('status', '')}",
@@ -109,6 +117,22 @@ def _emit_agent_event(
         payload=payload,
         workspace_dir=workspace_dir,
     )
+    try:
+        from src.api.services.run_state_service import mirror_domain_event_to_task_board
+
+        mirror_domain_event_to_task_board(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            event_type=event_type,
+            payload=payload,
+            title=event.title,
+            content=event.content,
+            agent=event.agent,
+            event_id=event.id,
+            timestamp=event.timestamp,
+        )
+    except Exception:
+        pass
     _append_local_event(thread_id, workspace_dir, event_type, payload)
 
 
@@ -130,7 +154,7 @@ def _scope(include: list[str], exclude: list[str] | None = None, actions: list[s
     return {
         "include": include,
         "exclude": exclude or [],
-        "allowed_actions": actions or ["read_file", "write_file", "run_command"],
+        "allowed_actions": actions or ["read_file", "search_codebase", "project_context"],
     }
 
 
@@ -199,7 +223,7 @@ def suggest_ephemeral_agents(
             "实现或修复前端界面、交互和状态展示。",
             "检测到前端、界面或交互需求，需要独立前端执行者。",
             ["tool.file_ops", "tool.project_index", "skill.frontend-polish"],
-            task_scope=_scope(["frontend", "tests", "docs"], ["src/api"]),
+            task_scope=_scope(["frontend", "tests", "docs"], ["src/api"], ["read_file", "search_codebase", "write_file", "run_command"]),
             expected_output=_expected(tests=True),
         ))
 
@@ -210,7 +234,7 @@ def suggest_ephemeral_agents(
             "实现后端服务、路由、数据模型和相关测试。",
             "检测到后端接口、状态或服务层需求，需要独立后端执行者。",
             ["tool.file_ops", "tool.project_index", "skill.delivery-review"],
-            task_scope=_scope(["src/api", "src/runtime", "tests", "scripts"], ["frontend"]),
+            task_scope=_scope(["src/api", "src/runtime", "tests", "scripts"], ["frontend"], ["read_file", "search_codebase", "write_file", "run_command"]),
             expected_output=_expected(tests=True),
         ))
 
@@ -221,7 +245,7 @@ def suggest_ephemeral_agents(
             "补齐测试、运行验证命令并整理质量证据。",
             "检测到测试或质量验证需求，需要单独测试执行者。",
             ["skill.delivery-review", "tool.project_index", "tool.recovery"],
-            task_scope=_scope(["tests", "scripts", "src", "frontend"], []),
+            task_scope=_scope(["tests", "scripts", "src", "frontend"], [], ["read_file", "search_codebase", "write_file", "run_command"]),
             expected_output=_expected(tests=True),
         ))
 
@@ -273,7 +297,7 @@ def suggest_ephemeral_agents(
             "复核跨模块变更、风险、测试证据和最终交付可信度。",
             "检测到复杂或产品级任务，需要临时 Reviewer 收口风险。",
             ["skill.delivery-review", "tool.project_index", "tool.recovery"],
-            task_scope=_scope(["."], []),
+            task_scope=_scope(["."], [], ["read_file", "search_codebase", "project_context"]),
             expected_output=_expected(tests=True),
         ))
 
@@ -284,7 +308,7 @@ def suggest_ephemeral_agents(
             "完成本轮主要实现并提交结构化结果。",
             "未检测到专门领域，按通用实现任务创建一个临时执行者。",
             ["tool.file_ops", "tool.project_index", "skill.delivery-review"],
-            task_scope=_scope(["."], []),
+            task_scope=_scope(["."], [], ["read_file", "search_codebase", "write_file", "run_command"]),
             expected_output=_expected(tests=True),
         ))
 
@@ -330,6 +354,7 @@ def _normalise_agent_spec(
     spec: dict[str, Any],
     existing_ids: set[str],
     status: str = "active",
+    workspace_dir: str | None = None,
 ) -> dict[str, Any]:
     now = _now()
     role = str(spec.get("role") or "worker").strip() or "worker"
@@ -339,6 +364,7 @@ def _normalise_agent_spec(
         task_scope = _scope(["."], [], tools or None)
     elif tools and not task_scope.get("allowed_actions"):
         task_scope = {**task_scope, "allowed_actions": tools}
+    task_scope = _normalize_task_scope_for_run(thread_id, workspace_dir, task_scope)
     agent_id = str(spec.get("agent_id") or spec.get("id") or "").strip()
     if not agent_id:
         agent_id = _make_agent_id(role, existing_ids)
@@ -370,6 +396,70 @@ def _normalise_agent_spec(
     }
 
 
+def _current_intent_decision(thread_id: str, workspace_dir: str | None) -> dict[str, Any]:
+    if not workspace_dir:
+        return {}
+    session = get_event_store().get_session(thread_id, workspace_dir) or {}
+    intent = session.get("intent_decision") if isinstance(session.get("intent_decision"), dict) else {}
+    if not intent:
+        plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+        intent = plan.get("intent_decision") if isinstance(plan.get("intent_decision"), dict) else {}
+    return intent if isinstance(intent, dict) else {}
+
+
+def _normalize_task_scope_for_run(
+    thread_id: str,
+    workspace_dir: str | None,
+    task_scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize temporary-agent scope against the current run intent."""
+    include = _unique([str(item) for item in task_scope.get("include", []) if item]) or ["."]
+    exclude = _unique([str(item) for item in task_scope.get("exclude", []) if item])
+    requested_actions = _unique([str(item) for item in task_scope.get("allowed_actions", []) if item])
+    if not requested_actions:
+        requested_actions = ["read_file", "search_codebase", "project_context"]
+
+    intent = _current_intent_decision(thread_id, workspace_dir)
+    route = str(intent.get("route") or "")
+    execution_route = str(intent.get("execution_route") or "")
+    requires_write = bool(intent.get("requires_workspace_write"))
+
+    allowed_actions = list(requested_actions)
+    removed_actions: list[str] = []
+
+    if execution_route == "lead_direct_reply":
+        raise ValueError("当前是 Lead 直接回答任务，不允许创建临时子 Agent。")
+
+    if route in {"read_only", "review_only"} or (intent and not requires_write):
+        allowed_set = READ_ONLY_ACTIONS | MCP_ACTIONS
+        removed_actions = [action for action in allowed_actions if action not in allowed_set]
+        allowed_actions = [action for action in allowed_actions if action in allowed_set]
+    elif route == "test_only":
+        allowed_set = READ_ONLY_ACTIONS | SHELL_ACTIONS
+        removed_actions = [action for action in allowed_actions if action not in allowed_set]
+        allowed_actions = [action for action in allowed_actions if action in allowed_set]
+    elif route != "risky_operation":
+        removed_actions = [action for action in allowed_actions if action in RISKY_ACTIONS]
+        allowed_actions = [action for action in allowed_actions if action not in RISKY_ACTIONS]
+
+    if not allowed_actions:
+        allowed_actions = ["read_file", "search_codebase", "project_context"]
+
+    normalized = {
+        **task_scope,
+        "include": include,
+        "exclude": exclude,
+        "allowed_actions": _unique(allowed_actions),
+        "scope_policy": {
+            "route": route or "unknown",
+            "execution_route": execution_route or "unknown",
+            "requires_workspace_write": requires_write,
+            "removed_actions": _unique(removed_actions),
+        },
+    }
+    return normalized
+
+
 def spawn_ephemeral_agent(thread_id: str, spec: dict[str, Any], workspace_dir: str) -> dict[str, Any]:
     """Activate one ephemeral agent for a run."""
     state = _read_state(thread_id, workspace_dir)
@@ -378,7 +468,7 @@ def spawn_ephemeral_agent(thread_id: str, spec: dict[str, Any], workspace_dir: s
         raise ValueError(f"临时子 Agent 数量已达到上限: {MAX_ACTIVE_AGENTS}")
 
     existing_ids = {str(agent.get("agent_id")) for agent in agents}
-    agent = _normalise_agent_spec(thread_id, spec, existing_ids, status="active")
+    agent = _normalise_agent_spec(thread_id, spec, existing_ids, status="active", workspace_dir=workspace_dir)
     agents.append(agent)
     _write_state(thread_id, workspace_dir, state)
     _emit_agent_event(thread_id, workspace_dir, "ephemeral_agent_spawned", agent, agent.get("reason", ""))

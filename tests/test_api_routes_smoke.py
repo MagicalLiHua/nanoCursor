@@ -183,6 +183,23 @@ def test_agenthub_inline_routes_match_current_request_models(tmp_path):
         )
         assert restore_resp.status_code == 200
 
+        (workspace / "README.md").write_text("mutated", encoding="utf-8")
+        run_restore_without_confirm = client.post(
+            f"/api/runs/{thread_id}/restore",
+            json={"target_path": "README.md", "confirmed": False},
+        )
+        assert run_restore_without_confirm.status_code == 400
+
+        run_restore_resp = client.post(
+            f"/api/runs/{thread_id}/restore",
+            json={"target_path": "README.md", "confirmed": True},
+        )
+        assert run_restore_resp.status_code == 200
+        run_restore = run_restore_resp.json()
+        assert run_restore["restore_mode"] == "latest_for_file"
+        assert run_restore["filepath"] == "README.md"
+        assert (workspace / "README.md").read_text(encoding="utf-8") == "hello"
+
         git_status_resp = client.get(f"/api/runs/{thread_id}/git/status")
         assert git_status_resp.status_code == 200
 
@@ -209,6 +226,7 @@ def test_agenthub_inline_routes_match_current_request_models(tmp_path):
         audit_kinds = {item["kind"] for item in audit_resp.json()["records"]}
         assert "checkpoint_create" in audit_kinds
         assert "checkpoint_restore" in audit_kinds
+        assert "run_restore" in audit_kinds
         assert "git_operation" in audit_kinds
         assert "recovery_action" in audit_kinds
 

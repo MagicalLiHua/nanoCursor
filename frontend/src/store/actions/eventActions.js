@@ -355,7 +355,11 @@ export function createEventActions(set, get) {
 
     if (eventType === "plan_created" && event.payload?.tasks) {
       event.payload.tasks.forEach((task) => upsertTask(task));
-      if (shouldFocusPanel) set({ rightTab: "tasks" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
+    }
+
+    if (["run_state_created", "run_state_patched", "task_started"].includes(eventType) || eventType.startsWith("task_")) {
+      get().refreshRunState?.(get().currentThreadId, { focusPanel: shouldFocusPanel });
     }
 
     if (eventType === "agent_complexity_assessed" && event.payload?.members) {
@@ -364,7 +368,7 @@ export function createEventActions(set, get) {
 
     if (eventType === "stage_updated" && event.payload?.stage_id) {
       patchStageTask(event.payload);
-      if (shouldFocusPanel) set({ rightTab: "tasks" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     if (eventType === "approval_requested") {
@@ -432,7 +436,7 @@ export function createEventActions(set, get) {
 
     if (eventType === "task_created" && event.payload?.task) {
       upsertTask(event.payload.task);
-      if (shouldFocusPanel) set({ rightTab: "tasks" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     if (eventType === "task_updated" && event.payload?.task_id) {
@@ -443,12 +447,12 @@ export function createEventActions(set, get) {
         owner: event.payload.owner,
         capabilities: event.payload.capabilities,
       });
-      set({ rightTab: "tasks" });
+      set({ rightTab: "progress" });
     }
 
     if (eventType === "team_updated" && event.payload?.members) {
       set({ team: mapBackendTeam(event.payload.members) });
-      if (shouldFocusPanel) set({ rightTab: "team" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     if (eventType.startsWith("ephemeral_agent_") && event.payload?.agent_id) {
@@ -466,7 +470,7 @@ export function createEventActions(set, get) {
           eventType === "ephemeral_agent_completed" ? "completed"
             : eventType === "ephemeral_agent_expired" ? "expired" : "",
       });
-      if (shouldFocusPanel) set({ rightTab: "team" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     if (["agent_run_started", "agent_result_merged", "agent_run_failed"].includes(eventType) && event.payload?.agent_id) {
@@ -486,7 +490,7 @@ export function createEventActions(set, get) {
           eventType === "agent_result_merged" ? "completed"
             : eventType === "agent_run_failed" ? "failed" : "",
       });
-      if (shouldFocusPanel) set({ rightTab: "team" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     // Agent pool status events (agent_started, agent_completed, agent_failed, agent_cancelled)
@@ -503,7 +507,7 @@ export function createEventActions(set, get) {
         status: poolStatus,
         result: event.payload.result || event.payload.error || "",
       });
-      if (shouldFocusPanel) set({ rightTab: "team" });
+      if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
     if (eventType === "file_changed" && event.payload?.path) {
@@ -597,15 +601,28 @@ export function createEventActions(set, get) {
         : [],
       tasks: [],
       files: [],
+      metrics: {
+        tasks: 0,
+        files: 0,
+        toolCalls: 0,
+        tokens: "--",
+        tests: "--",
+      },
       diff: "",
       diffFiles: [],
       selectedDiffFile: "",
       report: blankReport(),
-      artifactCenter: blankArtifactCenter(),
+      artifactCenter: blankArtifactCenter("idle"),
+      recoveryCenter: blankRecoveryCenter("safe"),
+      runSnapshot: null,
       runOutcome: null,
       previewUrl: "",
       agentActivities: [],
       agentTokenCounts: {},
+      currentRunStatus: "idle",
+      showCompletedTasks: false,
+      approval: { status: "idle", planId: "", title: "", content: "", riskLevel: "", tasks: [], decision: "", comment: "" },
+      approvalComment: "",
       replay: { events: [], index: 0, speed: 1, status: "idle", prompt: "", startedAt: "" },
     });
   }

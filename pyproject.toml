@@ -47,12 +47,12 @@ dev = [
     "pre-commit>=3.0.0",
 ]
 
-[project.scripts]
-nanocursor = "run:main"
+[tool.setuptools]
+py-modules = ["api_server"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src/*", "api_server", "run"]
+include = ["src", "src.*"]
 
 # ---------------------------------------------------------------
 # Tool configurations
@@ -67,7 +67,7 @@ addopts = "-v --tb=short"
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["src", "api_server", "run"]
+source = ["src", "api_server"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",

@@ -1,6 +1,6 @@
 """
 Task Pool Manager for the Supervisor-driven architecture.
-Manages the DAG of tasks, dependency resolution, and task lifecycle.
+Manages task dependencies, readiness, and lifecycle.
 """
 
 import time
@@ -11,7 +11,7 @@ from src.infra.schemas import Task, TaskStatus, TaskUpdate
 
 class TaskPool:
     """
-    Thread-safe task pool managing the DAG of tasks.
+    Thread-safe task pool managing task dependency relationships.
 
     The Supervisor uses this to:
     - Get runnable tasks (all dependencies met)

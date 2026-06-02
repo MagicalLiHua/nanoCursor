@@ -16,6 +16,10 @@ from src.api.models import (
     WorkspaceSettingsValidateRequest,
 )
 from src.api.services.observability_service import build_workspace_observability
+from src.api.services.file_outline_service import (
+    build_file_outlines_cache,
+    load_file_outlines_cache,
+)
 from src.api.services.migration_service import (
     inspect_workspace_migrations,
     migrate_workspace,
@@ -38,6 +42,7 @@ from src.api.services.workspace_settings_service import (
     save_workspace_settings,
     validate_settings,
 )
+from src.indexer.indexer import get_project_index
 
 router = APIRouter(prefix="/api", tags=["workspace"])
 
@@ -155,3 +160,40 @@ async def open_workspace(request: OpenWorkspaceRequest):
 @router.get("/workspace/observability")
 async def get_workspace_observability_route():
     return build_workspace_observability(get_active_workspace())
+
+
+@router.get("/workspace/file-outlines")
+async def get_workspace_file_outlines(workspace_dir: str | None = None):
+    workspace = workspace_dir or get_active_workspace()
+    cache = load_file_outlines_cache(workspace)
+    if not cache.get("outlines"):
+        cache = build_file_outlines_cache(workspace, _workspace_index_data(workspace))
+    return cache
+
+
+@router.post("/workspace/file-outlines/refresh")
+async def refresh_workspace_file_outlines(workspace_dir: str | None = None):
+    workspace = workspace_dir or get_active_workspace()
+    return build_file_outlines_cache(workspace, _workspace_index_data(workspace), force=True)
+
+
+def _workspace_index_data(workspace: str):
+    idx = get_project_index(workspace)
+    idx.update()
+    return idx.summary() | {
+        "entries": {
+            rel: {
+                "path": entry.path,
+                "role": entry.role,
+                "language": entry.language,
+                "symbols": entry.symbols,
+                "imports": entry.imports,
+                "mtime": entry.mtime,
+                "size": entry.size,
+                "loc": entry.loc,
+                "routes": entry.routes or [],
+                "call_graph": entry.call_graph or {},
+            }
+            for rel, entry in idx.entries.items()
+        }
+    }

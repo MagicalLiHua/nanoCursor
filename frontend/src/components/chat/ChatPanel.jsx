@@ -72,7 +72,31 @@ function WelcomeScreen({ onSubmit }) {
   );
 }
 
-function Message({ message, index }) {
+function normalizeAgentKey(value = "") {
+  const clean = String(value || "Lead")
+    .replace(/\s*Agent$/i, "")
+    .trim()
+    .toLowerCase();
+  return clean || "lead";
+}
+
+function isRealAgentActivity(activity = {}) {
+  if (!activity.explicitAgentWork) return false;
+  if (!String(activity.text || "").trim()) return false;
+  return !["token", "metrics_updated", "assistant_message"].includes(activity.eventType);
+}
+
+function latestActivityByAgent(activities = []) {
+  const result = new Map();
+  for (const activity of activities) {
+    if (!isRealAgentActivity(activity)) continue;
+    const key = normalizeAgentKey(activity.agent);
+    if (!result.has(key)) result.set(key, activity);
+  }
+  return result;
+}
+
+function Message({ message, index, activity }) {
   const isUser = message.role === "user";
   const tone = isUser ? "user" : agentToneFromName(message.author);
   return (
@@ -88,21 +112,28 @@ function Message({ message, index }) {
         ) : (
           <div className="message-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
         )}
+        {!isUser && activity && (
+          <div className="message-activity-line">
+            <AgentActivityStream activities={[activity]} maxItems={1} />
+          </div>
+        )}
       </div>
     </article>
   );
 }
 
-function AgentRuntimeMessage({ activities }) {
+function AgentWorkMessage({ activity }) {
+  const agent = activity.agent || "Lead";
+  const tone = agentToneFromName(agent);
   return (
-    <article className="message assistant agent-runtime-message" data-message-role="assistant-runtime">
-      <AgentAvatar name="Lead" tone="lead" extraClass="avatar" />
+    <article className="message assistant agent-work-message" data-message-role="assistant-runtime">
+      <AgentAvatar name={agent} tone={tone} extraClass="avatar" />
       <div className="bubble">
         <div className="message-head">
-          <span className="message-author">Agent 运行动态</span>
-          <span className="message-time">实时</span>
+          <span className="message-author">{agent} Agent</span>
+          <span className="message-time">{activity.time || "实时"}</span>
         </div>
-        <AgentActivityStream activities={activities} maxItems={5} fallback="Lead 正在连接后端 Agent Runtime，并准备接收实时事件。" />
+        <AgentActivityStream activities={[activity]} maxItems={1} />
       </div>
     </article>
   );
@@ -210,10 +241,10 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
         : state.status === "waiting_approval" ? "warning"
           : state.status === "cancelling" ? "warning" : "";
   const sessionLabel =
-    state.currentThreadId && state.currentThreadId !== "pending"
-      ? shortId(state.currentThreadId, "Draft")
-      : state.currentConversationId
-        ? shortId(state.currentConversationId, "Draft")
+    state.currentConversationId
+      ? shortId(state.currentConversationId, "Draft")
+      : state.currentThreadId && state.currentThreadId !== "pending"
+        ? shortId(state.currentThreadId, "Draft")
         : "Draft";
 
   const messages = state.messages || [];
@@ -221,6 +252,17 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
   const isIdle = state.status === "idle";
   const hasUserMessage = messages.some((m) => m.role === "user");
   const showWelcome = isIdle && !hasUserMessage && messages.length <= 1;
+  const showInlineActivity = ["running", "waiting_approval", "cancelling"].includes(state.status);
+  const activityByAgent = showInlineActivity ? latestActivityByAgent(state.agentActivities || []) : new Map();
+  const representedAgentKeys = new Set(
+    messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => normalizeAgentKey(message.author)),
+  );
+  const unattachedActivities = Array.from(activityByAgent.entries())
+    .filter(([agentKey]) => !representedAgentKeys.has(agentKey))
+    .map(([, activity]) => activity)
+    .slice(0, 3);
 
   useEffect(() => {
     setDraft(state.prompt || "");
@@ -306,12 +348,15 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
       </div>
       <div className="chat-body">
         <div className="message-list" id="message-list" ref={messageListRef}>
-          {messages.map((msg, i) => (
-            <Message key={i} message={msg} index={i} />
+          {messages.map((msg, i) => {
+            const activity = msg.role === "assistant"
+              ? activityByAgent.get(normalizeAgentKey(msg.author))
+              : null;
+            return <Message key={i} message={msg} index={i} activity={activity} />;
+          })}
+          {running && unattachedActivities.map((activity, i) => (
+            <AgentWorkMessage key={`${activity.agent}-${activity.time}-${i}`} activity={activity} />
           ))}
-          {running && (
-            <AgentRuntimeMessage activities={state.agentActivities || []} />
-          )}
           {running && (state.events || [])
             .filter((e) => e.type === "tool_call_finished")
             .slice(-3)
