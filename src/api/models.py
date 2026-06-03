@@ -239,6 +239,14 @@ class LoopActionCheckRequest(BaseModel):
     action: dict[str, Any] = Field(default_factory=dict)
 
 
+class LoopStepRequest(BaseModel):
+    """Run one Agent Loop controller step."""
+    action: dict[str, Any] = Field(default_factory=dict)
+    commit: bool = False
+    auto_repair: bool = True
+    execute_tools: bool = False
+
+
 class ConversationCreateRequest(BaseModel):
     """创建 nanoCursor 会话上下文"""
     prompt: str = Field(default="", max_length=2000)

@@ -1,8 +1,14 @@
-"""Run routes: delivery contract, changes, ledger (R1-R3)."""
+"""Run routes: runtime views, delivery contract, changes, ledger, and loop APIs."""
 
 from __future__ import annotations
 
+import queue
+import threading
+import uuid
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.api.dependencies import get_workspace, raise_404
 from src.api.models import (
@@ -20,8 +26,11 @@ from src.api.models import (
     EphemeralAgentSuggestRequest,
     IntentCorrectionRequest,
     LoopActionCheckRequest,
+    LoopStepRequest,
     RemediationRequest,
+    RetryRunRequest,
     RunStatePatchRequest,
+    CancelResponse,
     TaskResultRequest,
 )
 from src.api.services.change_service import (
@@ -36,9 +45,23 @@ from src.api.services.delivery_service import (
     regenerate_delivery,
 )
 from src.api.services.event_store import get_event_store
+from src.api.services.run_context import RunContext
+from src.api.services.run_history import list_run_history_with_active
+from src.api.services.sse_broker import stream_events_push
 from src.api.services.workspace_registry_service import list_recent_projects
+from src.infra.messages import HumanMessage
+from src.runtime.run_state import TERMINAL_STATUSES
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
+runtime_router = APIRouter(prefix="/api", tags=["runs"])
+legacy_runtime_router = APIRouter(prefix="/api/run", tags=["runs"])
+
+
+def _runtime() -> Any:
+    """Return the legacy runtime module without importing it during app creation."""
+    import api_server
+
+    return api_server
 
 
 def _workspace_for_run(thread_id: str, *, require_session: bool = False) -> str:
@@ -62,6 +85,310 @@ def _workspace_for_run(thread_id: str, *, require_session: bool = False) -> str:
     if require_session:
         raise_404(f"Run {thread_id} not found")
     return current_workspace
+
+
+@runtime_router.get("/runs")
+async def list_agenthub_runs(limit: int = 50, workspace_dir: str | None = None):
+    runtime = _runtime()
+    workspace = workspace_dir or runtime._get_workspace()
+    return {
+        "runs": list_run_history_with_active(
+            runtime.run_manager,
+            workspace,
+            limit=min(max(limit, 1), 200),
+        )
+    }
+
+
+@runtime_router.get("/runs/active")
+async def list_active_runs():
+    return {"active_runs": _runtime().run_manager.list_active()}
+
+
+@runtime_router.get("/runs/{thread_id}")
+async def get_agenthub_run_detail(thread_id: str):
+    runtime = _runtime()
+    with runtime.runs_lock:
+        run_info = runtime.active_runs.get(thread_id)
+    if run_info:
+        return {
+            "thread_id": thread_id,
+            "status": run_info.get("status"),
+            "workspace_dir": run_info.get("workspace_dir", runtime._get_workspace()),
+            "conversation_id": run_info.get("conversation_id"),
+        }
+    session = runtime._session_for_thread(thread_id)
+    if session:
+        return session
+    raise HTTPException(status_code=404, detail="Run 不存在")
+
+
+@runtime_router.get("/runs/{thread_id}/events/history")
+async def get_agenthub_run_events_history(thread_id: str):
+    runtime = _runtime()
+    events = runtime.event_store.list_events(thread_id, runtime._workspace_for_thread(thread_id))
+    return {"events": [event.model_dump() for event in events]}
+
+
+@runtime_router.get("/runs/{thread_id}/events")
+async def get_run_events_push(thread_id: str):
+    runtime = _runtime()
+    workspace_dir = runtime._workspace_for_thread(thread_id)
+    return StreamingResponse(
+        stream_events_push(thread_id, workspace_dir),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _cancel_run_impl(thread_id: str):
+    runtime = _runtime()
+    with runtime.runs_lock:
+        run_info = runtime.active_runs.get(thread_id)
+
+    if not run_info:
+        raise HTTPException(status_code=404, detail="未找到该线程的运行记录")
+
+    current_status = run_info.get("status")
+    if current_status == "cancelling":
+        return CancelResponse(cancelled=True, thread_id=thread_id)
+    if current_status not in {"running", "waiting_approval"}:
+        raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
+
+    try:
+        runtime.run_manager.request_cancel(thread_id)
+    except ValueError:
+        pass
+    run_info.set_status("cancelling")
+    workspace_dir = run_info.get("workspace_dir") or runtime._workspace_for_thread(thread_id)
+    runtime._sync_run_context(thread_id, workspace_dir)
+    runtime.event_store.update_session(thread_id, workspace_dir, status="cancelling")
+    runtime._emit_agenthub_event(
+        thread_id=thread_id,
+        event_type="run_cancelling",
+        title="正在取消运行",
+        content="用户请求取消运行，Agent 会在下一个安全检查点停止。",
+        agent="lead",
+        payload={"status": "cancelling"},
+        workspace_dir=workspace_dir,
+    )
+    return CancelResponse(cancelled=True, thread_id=thread_id)
+
+
+@runtime_router.post("/runs/{thread_id}/cancel")
+async def cancel_run(thread_id: str):
+    return await _cancel_run_impl(thread_id)
+
+
+@legacy_runtime_router.post("/{thread_id}/cancel")
+async def cancel_legacy_run(thread_id: str):
+    return await _cancel_run_impl(thread_id)
+
+
+@runtime_router.get("/runs/{thread_id}/runtime-state")
+async def get_run_runtime_state(thread_id: str):
+    sm = _runtime().run_manager.get_state_machine(thread_id)
+    if not sm:
+        raise HTTPException(status_code=404, detail=f"Run 不在活跃列表中: {thread_id}")
+    return {"thread_id": thread_id, "state": sm.to_dict()}
+
+
+@runtime_router.post("/runs/{thread_id}/resume")
+async def resume_run(thread_id: str):
+    runtime = _runtime()
+    sm = runtime.run_manager.get_state_machine(thread_id)
+    if sm:
+        raise HTTPException(status_code=409, detail="Run 已在活跃列表中。")
+
+    session = runtime._session_for_thread(thread_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
+
+    resumable_statuses = {"interrupted", "failed", "cancelled"}
+    if session.get("status") not in resumable_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"只能恢复 interrupted/failed/cancelled 状态的 run，当前状态: {session.get('status')}",
+        )
+
+    saved_messages = session.get("saved_messages")
+    if not saved_messages:
+        raise HTTPException(status_code=400, detail="该 run 没有保存的消息历史，无法恢复。")
+
+    workspace_dir = session.get("workspace_dir") or runtime._workspace_for_thread(thread_id)
+    previous_status = session.get("status")
+
+    run_context = RunContext(
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+        queue=queue.Queue(),
+        status="running",
+        conversation_id=session.get("conversation_id"),
+    )
+    with runtime.runs_lock:
+        try:
+            runtime.run_manager.register(run_context)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    runtime.event_store.update_session(thread_id, workspace_dir, status="running")
+    runtime.event_store.append_event(
+        thread_id,
+        "run_resumed",
+        title="Run 已恢复",
+        content=f"从 {previous_status} 状态恢复运行，加载了 {len(saved_messages)} 条历史消息。",
+        agent="lead",
+        payload={"previous_status": previous_status, "message_count": len(saved_messages)},
+        workspace_dir=workspace_dir,
+    )
+
+    execution_plan = session.get("execution_plan", {})
+    run_team = session.get("team", [])
+    strategy = execution_plan.get("strategy", "feature_delivery")
+    from src.agent.prompt_builder import _build_core
+    from src.api.services.orchestration_service import build_runtime_instructions
+
+    system = _build_core(strategy)
+    system = f"{system}\n\n注意：工作目录已经是 {workspace_dir}，写文件名时直接用文件名，不要加 workspace/ 前缀。"
+    runtime_instructions = build_runtime_instructions(execution_plan, run_team)
+    if runtime_instructions:
+        system = f"{system}\n{runtime_instructions}"
+
+    worker = threading.Thread(
+        target=runtime._run_workflow_from_messages,
+        args=(thread_id, saved_messages, system, workspace_dir),
+        daemon=True,
+    )
+    with runtime.runs_lock:
+        runtime.active_runs[thread_id].thread = worker
+    worker.start()
+
+    return {"thread_id": thread_id, "status": "running", "ok": True, "resumed_from": previous_status}
+
+
+@runtime_router.get("/runs/{thread_id}/lifecycle")
+async def get_run_lifecycle(thread_id: str):
+    """Get the full lifecycle status, history, and stage progress of a run."""
+    runtime = _runtime()
+    sm = runtime.run_manager.get_state_machine(thread_id)
+    session = runtime._session_for_thread(thread_id)
+    if not sm and not session:
+        raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
+
+    session_status = str((session or {}).get("status", "unknown"))
+    status = sm.status.value if sm else session_status
+    terminal_statuses = {item.value for item in TERMINAL_STATUSES}
+    is_terminal = sm.is_terminal() if sm else status in terminal_statuses
+    return {
+        "thread_id": thread_id,
+        "status": status,
+        "history": sm.history() if sm else [],
+        "is_terminal": is_terminal,
+        "session": session or {},
+    }
+
+
+@runtime_router.post("/runs/{thread_id}/retry")
+async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
+    """Create a new run from a failed/cancelled previous run."""
+    runtime = _runtime()
+    session = runtime._session_for_thread(thread_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"原 run 不存在: {thread_id}")
+
+    original_status = session.get("status", "")
+    if original_status not in ("failed", "cancelled", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"只能重试已结束的 run，当前状态: {original_status}",
+        )
+
+    request = request or RetryRunRequest()
+    retry_mode = request.retry_mode if request.retry_mode in {"full", "failed_stage"} else "full"
+    new_thread_id = str(uuid.uuid4())
+    original_prompt = session.get("prompt", "")
+    run_workspace = session.get("workspace_dir", runtime._get_workspace())
+    team = session.get("team", [])
+    execution_plan = session.get("execution_plan", {})
+    retry_context = runtime._retry_context_for_run(thread_id, run_workspace, request.failure_id)
+    prompt = runtime._build_retry_prompt(
+        original_prompt=original_prompt,
+        original_thread_id=thread_id,
+        original_status=original_status,
+        retry_mode=retry_mode,
+        retry_context=retry_context,
+        instruction=request.instruction,
+    )
+
+    run_context = RunContext(
+        thread_id=new_thread_id,
+        workspace_dir=run_workspace,
+        queue=queue.Queue(),
+        status="running",
+        mode="retry",
+        team=team,
+        execution_plan=execution_plan,
+    )
+    with runtime.runs_lock:
+        try:
+            runtime.run_manager.register(run_context)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    runtime.event_store.create_session(
+        thread_id=new_thread_id,
+        prompt=prompt,
+        workspace_dir=run_workspace,
+        status="running",
+        mode="retry",
+    )
+    runtime.event_store.update_session(
+        new_thread_id,
+        run_workspace,
+        **run_context.session_metadata(),
+        original_thread_id=thread_id,
+        original_status=original_status,
+        original_prompt=original_prompt,
+        retry_mode=retry_mode,
+        retry_context=retry_context,
+    )
+    stage_updates = run_context.start_first_stage()
+    runtime._sync_run_context(new_thread_id, run_workspace)
+    runtime._emit_stage_updates(new_thread_id, run_workspace, stage_updates)
+    runtime.event_store.append_event(
+        thread_id=new_thread_id,
+        event_type="run_retried",
+        title="Run 已重试",
+        content=f"基于原 run {thread_id} 创建 {retry_mode} 重试。",
+        agent="lead",
+        payload={
+            "original_thread_id": thread_id,
+            "original_status": original_status,
+            "retry_mode": retry_mode,
+            "failure_id": request.failure_id or "",
+            "failed_stage_id": retry_context.get("failed_stage_id", ""),
+        },
+        workspace_dir=run_workspace,
+    )
+
+    worker = threading.Thread(
+        target=runtime._run_workflow,
+        args=(new_thread_id, [HumanMessage(content=prompt)], run_workspace),
+        daemon=True,
+    )
+    run_context.thread = worker
+    worker.start()
+
+    return {
+        "original_thread_id": thread_id,
+        "retry_thread_id": new_thread_id,
+        "status": "created",
+        "retry_mode": retry_mode,
+    }
 
 
 @router.get("/{thread_id}/delivery")
@@ -404,6 +731,31 @@ async def post_run_loop_action_check(thread_id: str, request: LoopActionCheckReq
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     return check_loop_action(thread_id, workspace, request.action)
+
+
+@router.get("/{thread_id}/loop/observation")
+async def get_run_loop_observation(thread_id: str):
+    """Return the read-only observation used by the Agent Loop controller."""
+    from src.api.services.agent_loop_controller_service import get_loop_observation
+
+    workspace = _workspace_for_run(thread_id, require_session=True)
+    return get_loop_observation(thread_id, workspace)
+
+
+@router.post("/{thread_id}/loop/step")
+async def post_run_loop_step(thread_id: str, request: LoopStepRequest):
+    """Preview or commit one Agent Loop controller step."""
+    from src.api.services.agent_loop_controller_service import run_loop_controller_step
+
+    workspace = _workspace_for_run(thread_id, require_session=True)
+    return run_loop_controller_step(
+        thread_id,
+        workspace,
+        action=request.action,
+        commit=request.commit,
+        auto_repair=request.auto_repair,
+        execute_tools=request.execute_tools,
+    )
 
 
 @router.patch("/{thread_id}/state")

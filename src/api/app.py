@@ -1,7 +1,8 @@
 """FastAPI application factory for nanoCursor.
 
 Creates and configures the FastAPI app with CORS, middleware, exception handlers,
-and modular route includes.  api_server.py imports from here as a thin entry point.
+and modular route includes. ``src.api.server`` is the public ASGI entrypoint;
+``api_server.py`` remains as a legacy compatibility module during migration.
 """
 
 from __future__ import annotations
@@ -174,7 +175,11 @@ def create_app() -> FastAPI:
 
     # ---- Modular routers ----
     from src.api.routes.evals import router as evals_router
-    from src.api.routes.runs import router as runs_router
+    from src.api.routes.runs import (
+        legacy_runtime_router as legacy_run_runtime_router,
+        router as runs_router,
+        runtime_router as run_runtime_router,
+    )
     from src.api.routes.system import router as system_router
     from src.api.routes.workspaces import router as workspaces_router
     from src.api.routes.data import router as data_router
@@ -184,10 +189,18 @@ def create_app() -> FastAPI:
     from src.api.routes.run_analytics import router as run_analytics_router
     from src.api.routes.recovery import router as recovery_router
     from src.api.routes.approvals import router as approvals_router
+    from src.api.routes.benchmarks import router as benchmarks_router
+    from src.api.routes.demo_runs import router as demo_runs_router
+    from src.api.routes.run_entry import router as run_entry_router
 
     app.include_router(system_router)
     app.include_router(evals_router)
+    app.include_router(run_entry_router)
+    app.include_router(run_runtime_router)
+    app.include_router(legacy_run_runtime_router)
     app.include_router(runs_router)
+    app.include_router(benchmarks_router)
+    app.include_router(demo_runs_router)
     app.include_router(workspaces_router)
     app.include_router(data_router)
     app.include_router(config_router)

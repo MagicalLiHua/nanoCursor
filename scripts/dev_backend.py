@@ -16,7 +16,7 @@ def main() -> int:
 
     try:
         subprocess.run(
-            [sys.executable, "-m", "uvicorn", "api_server:app",
+            [sys.executable, "-m", "uvicorn", "src.api.server:app",
              "--host", "127.0.0.1", "--port", "8100"],
             cwd=str(PROJECT_ROOT),
         )

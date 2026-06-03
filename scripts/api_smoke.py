@@ -355,6 +355,35 @@ def run_smoke() -> list[SmokeResult]:
                 ),
                 _response_body(loop_action_check),
             ))
+            loop_observation = client.get(f"/api/runs/{thread_id}/loop/observation")
+            results.append(SmokeResult(
+                "GET",
+                f"/api/runs/{thread_id}/loop/observation",
+                loop_observation.status_code,
+                (
+                    loop_observation.status_code == 200
+                    and "loop" in loop_observation.json()
+                    and "task_board" in loop_observation.json()
+                    and "finish_readiness" in loop_observation.json()
+                ),
+                _response_body(loop_observation),
+            ))
+            loop_step_preview = client.post(
+                f"/api/runs/{thread_id}/loop/step",
+                json={"commit": False, "auto_repair": True},
+            )
+            results.append(SmokeResult(
+                "POST",
+                f"/api/runs/{thread_id}/loop/step",
+                loop_step_preview.status_code,
+                (
+                    loop_step_preview.status_code == 200
+                    and loop_step_preview.json().get("committed") is False
+                    and bool(loop_step_preview.json().get("selected_action"))
+                    and "observation" in loop_step_preview.json()
+                ),
+                _response_body(loop_step_preview),
+            ))
 
             context_pack = client.get(f"/api/runs/{thread_id}/context-pack")
             context_ok = (

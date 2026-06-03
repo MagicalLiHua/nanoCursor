@@ -35,7 +35,7 @@ def main() -> None:
     # Backend
     print("[backend] Starting uvicorn on http://127.0.0.1:8100 ...")
     backend = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api_server:app", "--host", "127.0.0.1", "--port", "8100"],
+        [sys.executable, "-m", "uvicorn", "src.api.server:app", "--host", "127.0.0.1", "--port", "8100"],
         cwd=str(PROJECT_ROOT),
         env=env,
     )
