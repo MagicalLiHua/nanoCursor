@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-cd "$PROJECT_ROOT/go-indexer"
+cd "$PROJECT_ROOT/go-services/indexer"
 
 # Build if binary doesn't exist
 if [ ! -f nanocursor-indexer ]; then
