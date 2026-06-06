@@ -1,6 +1,6 @@
 pydantic>=2.0.0,<3.0.0
 tiktoken>=0.9.0,<0.10.0
-python-dotenv>=1.0.0,<1.1.0
+python-dotenv>=1.2.2,<2.0.0
 docker>=7.0.0,<8.0.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
@@ -10,3 +10,7 @@ httpx>=0.25.0
 # LLM providers - 使用原生 SDK
 openai>=1.0.0
 anthropic>=0.18.0
+
+# gRPC client for Go indexer service
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
