@@ -1,0 +1,112 @@
+syntax = "proto3";
+package nanocursor.filetools;
+option go_package = "nanocursor/go-services/filetools/internal/server";
+
+service FileTools {
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc ReadFunction(ReadFunctionRequest) returns (ReadFunctionResponse);
+  rpc ReadClass(ReadClassRequest) returns (ReadClassResponse);
+  rpc ReadFileRange(ReadFileRangeRequest) returns (ReadFileRangeResponse);
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc EditFile(EditFileRequest) returns (EditFileResponse);
+  rpc BackupFile(BackupFileRequest) returns (BackupFileResponse);
+  rpc RollbackFile(RollbackFileRequest) returns (RollbackFileResponse);
+  rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message ReadFileRequest {
+  string workspace = 1;
+  string filename = 2;
+}
+message ReadFileResponse {
+  string content = 1;
+}
+
+message ReadFunctionRequest {
+  string workspace = 1;
+  string filename = 2;
+  string function_name = 3;
+}
+message ReadFunctionResponse {
+  string content = 1;
+}
+
+message ReadClassRequest {
+  string workspace = 1;
+  string filename = 2;
+  string class_name = 3;
+}
+message ReadClassResponse {
+  string content = 1;
+}
+
+message ReadFileRangeRequest {
+  string workspace = 1;
+  string filename = 2;
+  int32 start_line = 3;
+  int32 end_line = 4;
+}
+message ReadFileRangeResponse {
+  string content = 1;
+}
+
+message ListDirectoryRequest {
+  string workspace = 1;
+  string path = 2;
+}
+message ListDirectoryResponse {
+  string content = 1;
+}
+
+message WriteFileRequest {
+  string workspace = 1;
+  string filename = 2;
+  string content = 3;
+}
+message WriteFileResponse {
+  string message = 1;
+}
+
+message EditFileRequest {
+  string workspace = 1;
+  string filename = 2;
+  string search_block = 3;
+  string replace_block = 4;
+}
+message EditFileResponse {
+  string result = 1;
+}
+
+message BackupFileRequest {
+  string workspace = 1;
+  string filename = 2;
+}
+message BackupFileResponse {
+  string backup_path = 1;
+}
+
+message RollbackFileRequest {
+  string workspace = 1;
+  string filename = 2;
+  int32 backup_index = 3;
+}
+message RollbackFileResponse {
+  string message = 1;
+}
+
+message ListBackupsRequest {
+  string workspace = 1;
+  string filename = 2;
+}
+message ListBackupsResponse {
+  string content = 1;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string service = 2;
+  string version = 3;
+}
