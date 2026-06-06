@@ -1,0 +1,68 @@
+syntax = "proto3";
+package nanocursor.policy;
+option go_package = "nanocursor/go-services/policy/internal/server";
+
+service Policy {
+  rpc CheckTool(CheckToolRequest) returns (CheckToolResponse);
+  rpc CheckAction(CheckActionRequest) returns (CheckActionResponse);
+  rpc RecordResult(RecordResultRequest) returns (RecordResultResponse);
+  rpc GetPolicyState(GetPolicyStateRequest) returns (GetPolicyStateResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message CheckToolRequest {
+  string tool_name = 1;
+  string tool_input = 2;
+  string run_id = 3;
+}
+
+message CheckToolResponse {
+  string decision = 1;
+  string reason = 2;
+  string risk_level = 3;
+}
+
+message CheckActionRequest {
+  string command = 1;
+  string run_id = 2;
+}
+
+message CheckActionResponse {
+  string decision = 1;
+  string reason = 2;
+  string risk_level = 3;
+  string command_type = 4;
+}
+
+message RecordResultRequest {
+  string tool_name = 1;
+  bool success = 2;
+  string run_id = 3;
+  string error_message = 4;
+}
+
+message RecordResultResponse {
+  bool policy_changed = 1;
+  string new_decision = 2;
+  string adaptation_reason = 3;
+}
+
+message GetPolicyStateRequest {
+  string run_id = 1;
+}
+
+message GetPolicyStateResponse {
+  int32 consecutive_failures = 1;
+  int32 consecutive_successes = 2;
+  int32 total_tool_calls = 3;
+  int32 total_failures = 4;
+  string current_risk_level = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string service = 2;
+  string version = 3;
+}
