@@ -1,0 +1,193 @@
+syntax = "proto3";
+package nanocursor.taskboard;
+option go_package = "nanocursor/go-services/taskboard/internal/server";
+
+service TaskBoard {
+  rpc AddTask(AddTaskRequest) returns (AddTaskResponse);
+  rpc UpdateTask(UpdateTaskRequest) returns (UpdateTaskResponse);
+  rpc RemoveTask(RemoveTaskRequest) returns (RemoveTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc ApplyTaskStatus(ApplyTaskStatusRequest) returns (ApplyTaskStatusResponse);
+  rpc GetReadyNodes(GetReadyNodesRequest) returns (GetReadyNodesResponse);
+  rpc ConnectTasks(ConnectTasksRequest) returns (ConnectTasksResponse);
+  rpc DisconnectTasks(DisconnectTasksRequest) returns (DisconnectTasksResponse);
+  rpc SaveBoard(SaveBoardRequest) returns (SaveBoardResponse);
+  rpc LoadBoard(LoadBoardRequest) returns (LoadBoardResponse);
+  rpc BuildBoard(BuildBoardRequest) returns (BuildBoardResponse);
+  rpc GetBoardState(GetBoardStateRequest) returns (GetBoardStateResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message TaskMessage {
+  string id = 1;
+  string type = 2;
+  string title = 3;
+  string goal = 4;
+  string owner_agent_id = 5;
+  string agent_role = 6;
+  string status = 7;
+  repeated string dependencies = 8;
+  bool can_parallel = 9;
+  bool writes_files = 10;
+  repeated string resource_locks = 11;
+  string tool_policy_json = 12;
+  string context_policy_json = 13;
+  repeated AcceptanceCriterionMessage acceptance = 14;
+  repeated string outputs_json = 15;
+  repeated string evidence_json = 16;
+  RetryPolicyMessage retry_policy = 17;
+}
+
+message AcceptanceCriterionMessage {
+  string id = 1;
+  string description = 2;
+  bool required = 3;
+}
+
+message RetryPolicyMessage {
+  int32 max_retries = 1;
+  int32 retry_count = 2;
+  string fallback_node = 3;
+}
+
+message EdgeMessage {
+  string from_node = 1;
+  string to_node = 2;
+  string type = 3;
+  string condition = 4;
+}
+
+message ResourceLockMessage {
+  string id = 1;
+  string owner_node_id = 2;
+  string status = 3;
+}
+
+message QualityGateMessage {
+  string id = 1;
+  string node_id = 2;
+  string title = 3;
+  string status = 4;
+}
+
+message BoardStateMessage {
+  string run_id = 1;
+  string conversation_id = 2;
+  string strategy = 3;
+  string status = 4;
+  repeated TaskMessage nodes = 5;
+  repeated EdgeMessage edges = 6;
+  repeated ResourceLockMessage resources = 7;
+  repeated QualityGateMessage gates = 8;
+  int32 revision = 9;
+  repeated string change_log_json = 10;
+  string metadata_json = 11;
+  double created_at = 12;
+  double updated_at = 13;
+}
+
+message AddTaskRequest {
+  string run_id = 1;
+  TaskMessage task = 2;
+  string reason = 3;
+}
+message AddTaskResponse {}
+
+message UpdateTaskRequest {
+  string run_id = 1;
+  TaskMessage task = 2;
+  string reason = 3;
+}
+message UpdateTaskResponse {}
+
+message RemoveTaskRequest {
+  string run_id = 1;
+  string task_id = 2;
+  string reason = 3;
+}
+message RemoveTaskResponse {}
+
+message GetTaskRequest {
+  string run_id = 1;
+  string task_id = 2;
+}
+message GetTaskResponse {
+  TaskMessage task = 1;
+  bool found = 2;
+}
+
+message ListTasksRequest {
+  string run_id = 1;
+}
+message ListTasksResponse {
+  repeated TaskMessage tasks = 1;
+}
+
+message ApplyTaskStatusRequest {
+  string run_id = 1;
+  string task_id = 2;
+  string status = 3;
+}
+message ApplyTaskStatusResponse {}
+
+message GetReadyNodesRequest {
+  string run_id = 1;
+}
+message GetReadyNodesResponse {
+  repeated TaskMessage tasks = 1;
+}
+
+message ConnectTasksRequest {
+  string run_id = 1;
+  string upstream_task = 2;
+  string downstream_task = 3;
+  string reason = 4;
+}
+message ConnectTasksResponse {}
+
+message DisconnectTasksRequest {
+  string run_id = 1;
+  string upstream_task = 2;
+  string downstream_task = 3;
+  string reason = 4;
+}
+message DisconnectTasksResponse {}
+
+message SaveBoardRequest {
+  string run_id = 1;
+  string run_dir = 2;
+}
+message SaveBoardResponse {
+  string path = 1;
+}
+
+message LoadBoardRequest {
+  string run_id = 1;
+  string run_dir = 2;
+}
+message LoadBoardResponse {
+  bool found = 1;
+}
+
+message BuildBoardRequest {
+  string run_id = 1;
+  string execution_plan_json = 2;
+  string conversation_id = 3;
+}
+message BuildBoardResponse {}
+
+message GetBoardStateRequest {
+  string run_id = 1;
+}
+message GetBoardStateResponse {
+  BoardStateMessage board = 1;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string service = 2;
+  string version = 3;
+  int32 active_boards = 4;
+}
