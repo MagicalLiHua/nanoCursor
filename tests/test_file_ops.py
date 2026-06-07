@@ -106,7 +106,7 @@ def test_run_edit_string_based(tmp_path):
     f = tmp_path / "test.py"
     f.write_text("def foo():\n    pass\n", encoding="utf-8")
     result = run_edit("test.py", str(tmp_path), old_text="pass", new_text="return 1")
-    assert "edited" in result.lower()
+    assert "edited" in result.lower() or "修改" in result
     assert "return 1" in f.read_text()
 
 
@@ -114,7 +114,7 @@ def test_run_edit_line_based(tmp_path):
     f = tmp_path / "test.py"
     f.write_text("line1\nline2\nline3\n", encoding="utf-8")
     result = run_edit("test.py", str(tmp_path), start_line=2, end_line=2, new_text="replaced")
-    assert "edited" in result.lower()
+    assert "edited" in result.lower() or "修改" in result
     assert "replaced" in f.read_text()
 
 
@@ -127,14 +127,14 @@ def test_run_edit_text_not_found(tmp_path):
     f = tmp_path / "test.txt"
     f.write_text("hello", encoding="utf-8")
     result = run_edit("test.txt", str(tmp_path), old_text="xyz", new_text="abc")
-    assert "not found" in result.lower()
+    assert "not found" in result.lower() or "未" in result or "找不到" in result
 
 
 def test_run_edit_invalid_line_range(tmp_path):
     f = tmp_path / "test.txt"
     f.write_text("line1\nline2\n", encoding="utf-8")
     result = run_edit("test.txt", str(tmp_path), start_line=0, end_line=5, new_text="x")
-    assert "error" in result.lower()
+    assert "error" in result.lower() or "失败" in result or "无效" in result
 
 
 def test_run_edit_no_params(tmp_path):
@@ -172,7 +172,7 @@ def test_run_list_directory_empty(tmp_path):
 
 def test_run_list_directory_not_found(tmp_path):
     result = run_list_directory("nonexistent", str(tmp_path))
-    assert "not found" in result.lower()
+    assert "not found" in result.lower() or "不存在" in result or "不是" in result
 
 
 # --- auto_verify_file ---

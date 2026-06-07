@@ -57,6 +57,28 @@ def _request(
     return SmokeResult(method, path, response.status_code, ok, detail)
 
 
+def _high_risk_action_gated(response: Any, permission_level: str) -> bool:
+    """Accept either approval-pending or capability-denied high-risk actions.
+
+    The action pipeline has two gates. Broad task modes can send high-risk
+    actions to approval, while narrow modes such as small_edit can deny them
+    before approval because the tool is outside the current run boundary. Both
+    outcomes are safe for a smoke test: the risky action did not execute.
+    """
+    if response.status_code != 200:
+        return False
+    data = response.json()
+    if data.get("permission_level") != permission_level:
+        return False
+    if data.get("requires_approval") is True:
+        return True
+    return (
+        data.get("allowed") is False
+        and data.get("requires_approval") is False
+        and data.get("result") == "failure"
+    )
+
+
 def _assert_json_has(response: Any, *keys: str) -> None:
     data = response.json()
     missing = [key for key in keys if key not in data]
@@ -493,11 +515,9 @@ def run_smoke() -> list[SmokeResult]:
             )
             results.append(SmokeResult(
                 "POST",
-                f"/api/runs/{thread_id}/actions/execute run_command risky pending",
+                f"/api/runs/{thread_id}/actions/execute run_command risky gated",
                 pending_command.status_code,
-                pending_command.status_code == 200
-                and pending_command.json().get("requires_approval") is True
-                and pending_command.json().get("permission_level") == "shell_risky",
+                _high_risk_action_gated(pending_command, "shell_risky"),
                 _response_body(pending_command),
             ))
             if pending_command.status_code == 200 and pending_command.json().get("approval_id"):
@@ -609,9 +629,9 @@ def run_smoke() -> list[SmokeResult]:
             )
             results.append(SmokeResult(
                 "POST",
-                f"/api/runs/{thread_id}/actions/execute mcp_call pending",
+                f"/api/runs/{thread_id}/actions/execute mcp_call gated",
                 pending_mcp.status_code,
-                pending_mcp.status_code == 200 and pending_mcp.json().get("requires_approval") is True,
+                _high_risk_action_gated(pending_mcp, "external_risky"),
                 _response_body(pending_mcp),
             ))
             if pending_mcp.status_code == 200 and pending_mcp.json().get("approval_id"):
@@ -657,11 +677,10 @@ def run_smoke() -> list[SmokeResult]:
             )
             results.append(SmokeResult(
                 "POST",
-                f"/api/runs/{thread_id}/actions/execute delete_file pending",
+                f"/api/runs/{thread_id}/actions/execute delete_file gated",
                 pending_delete.status_code,
                 (
-                    pending_delete.status_code == 200
-                    and pending_delete.json().get("requires_approval") is True
+                    _high_risk_action_gated(pending_delete, "risky_write")
                     and (workspace / "smoke-action.txt").exists()
                 ),
                 _response_body(pending_delete),

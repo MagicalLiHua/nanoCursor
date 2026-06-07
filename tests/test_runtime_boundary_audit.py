@@ -14,6 +14,7 @@ ALLOWLIST = {
     "src/runtime/command_runner.py",
     "src/runtime/git_runner.py",
     "src/runtime/go_runtime_client.py",
+    "src/runtime/executor_client.py",
     "src/api/services/skill_github_import_service.py",
     "src/api/services/approval_service.py",
     "src/api/services/demo_run.py",

@@ -47,15 +47,17 @@ class TestSessionCRUD:
 class TestEventOperations:
     def test_append_and_list(self):
         from src.runtime.eventstore_client import append_event, list_events, count_events
-        append_event("test-t3", "message", title="hi", workspace_dir="/tmp")
-        append_event("test-t3", "done", workspace_dir="/tmp")
+        import uuid
+        thread_id = f"test-t3-{uuid.uuid4().hex[:8]}"
+        append_event(thread_id, "message", title="hi", workspace_dir="/tmp")
+        append_event(thread_id, "done", workspace_dir="/tmp")
 
-        events = list_events("test-t3", "/tmp")
+        events = list_events(thread_id, "/tmp")
         assert len(events) == 2
         assert events[0]["type"] == "message"
         assert events[1]["type"] == "done"
 
-        assert count_events("test-t3", "/tmp") == 2
+        assert count_events(thread_id, "/tmp") == 2
 
     def test_workspace_for_thread(self):
         from src.runtime.eventstore_client import create_session, workspace_for_thread
