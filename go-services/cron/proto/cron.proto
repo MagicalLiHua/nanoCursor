@@ -1,0 +1,58 @@
+syntax = "proto3";
+package nanocursor.cron;
+option go_package = "nanocursor/go-services/cron/proto";
+
+service CronService {
+  rpc CreateTask(CreateTaskRequest) returns (Task);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
+  rpc ListTasks(ListTasksRequest) returns (TaskList);
+  rpc DrainEvents(DrainEventsRequest) returns (stream CronEvent);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message CreateTaskRequest {
+  string cron_expr = 1;
+  string prompt = 2;
+  bool recurring = 3;
+  bool durable = 4;
+}
+
+message Task {
+  string id = 1;
+  string cron_expr = 2;
+  string prompt = 3;
+  bool recurring = 4;
+  bool durable = 5;
+  int64 created_at = 6;
+  int64 last_fired_at = 7;
+  string status = 8;
+}
+
+message DeleteTaskRequest {
+  string task_id = 1;
+}
+message DeleteTaskResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListTasksRequest {}
+message TaskList {
+  repeated Task tasks = 1;
+}
+
+message DrainEventsRequest {}
+message CronEvent {
+  string type = 1;
+  string task_id = 2;
+  string prompt = 3;
+  bool recurring = 4;
+  int64 fired_at = 5;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string service = 2;
+  string version = 3;
+}
