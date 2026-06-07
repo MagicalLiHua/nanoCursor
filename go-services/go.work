@@ -6,6 +6,5 @@ use (
 	./indexer
 	./mcp
 	./policy
-	./runtime
 	./taskboard
 )

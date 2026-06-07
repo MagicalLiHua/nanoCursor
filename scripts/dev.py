@@ -2,6 +2,7 @@
 """nanoCursor dev — start backend + frontend together."""
 
 import os
+import argparse
 import signal
 import subprocess
 import sys
@@ -12,6 +13,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Start nanoCursor development services.")
+    parser.add_argument("--with-go-runtime", action="store_true", help="Start the optional Go executor and MCP services.")
+    parser.add_argument("--executor-port", type=int, default=50055, help="Go executor gRPC port when enabled.")
+    parser.add_argument("--mcp-port", type=int, default=50056, help="Go MCP gRPC port when enabled.")
+    args = parser.parse_args()
+
     print("nanoCursor Dev Server")
     print("=" * 40)
 
@@ -32,6 +39,33 @@ def main() -> None:
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
+    if args.with_go_runtime:
+        executor_addr = f"127.0.0.1:{args.executor_port}"
+        mcp_addr = f"127.0.0.1:{args.mcp_port}"
+        print(f"[go-executor] Starting on {executor_addr} ...")
+        print(f"[go-mcp] Starting on {mcp_addr} ...")
+        go_env = env.copy()
+        go_env["NANOCURSOR_GO_RUNTIME_ADDR"] = executor_addr
+        env["NANOCURSOR_GO_RUNTIME_ENABLED"] = "true"
+        env["NANOCURSOR_GO_RUNTIME_URL"] = f"http://{executor_addr}"
+        env["NANOCURSOR_EXECUTOR_ADDR"] = executor_addr
+        env["NANOCURSOR_MCP_ADDR"] = mcp_addr
+        go_executor = subprocess.Popen(
+            ["go", "run", "./cmd/nanocursor-executor"],
+            cwd=str(PROJECT_ROOT / "go-services" / "executor"),
+            env=go_env,
+        )
+        procs.append(go_executor)
+        go_mcp_env = env.copy()
+        go_mcp_env["NANOCURSOR_GO_RUNTIME_ADDR"] = mcp_addr
+        go_mcp = subprocess.Popen(
+            ["go", "run", "./cmd/nanocursor-mcp"],
+            cwd=str(PROJECT_ROOT / "go-services" / "mcp"),
+            env=go_mcp_env,
+        )
+        procs.append(go_mcp)
+        time.sleep(0.8)
+
     # Backend
     print("[backend] Starting uvicorn on http://127.0.0.1:8100 ...")
     backend = subprocess.Popen(
@@ -50,7 +84,7 @@ def main() -> None:
 
     print(f"[frontend] Starting dev server on http://127.0.0.1:5173 ...")
     frontend = subprocess.Popen(
-        ["npm", "run", "dev"],
+        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
         cwd=str(frontend_dir),
         env=env,
     )
@@ -58,6 +92,9 @@ def main() -> None:
 
     print("\n  Backend:  http://127.0.0.1:8100")
     print("  Frontend: http://127.0.0.1:5173")
+    if args.with_go_runtime:
+        print(f"  Go Executor: {executor_addr}")
+        print(f"  Go MCP: {mcp_addr}")
     print("\nPress Ctrl+C to stop.\n")
 
     # Wait for any child to exit

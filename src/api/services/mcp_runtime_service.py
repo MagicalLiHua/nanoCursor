@@ -26,6 +26,16 @@ from src.api.services.mcp_status_service import (
     record_mcp_usage,
     update_mcp_status,
 )
+from src.api.services.mcp_tool_catalog_service import build_mcp_tool_catalog
+from src.runtime.go_runtime_client import GoRuntimeError, GoRuntimeUnavailable
+from src.runtime.runtime_feature_flags import go_runtime_enabled
+from src.runtime import go_mcp_gateway_client
+
+try:
+    from src.runtime import mcp_client as _mcp_grpc
+    _MCP_GRPC_AVAILABLE = True
+except ImportError:
+    _MCP_GRPC_AVAILABLE = False
 
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -91,6 +101,82 @@ def _cached_tools(status: dict[str, Any], fingerprint: str, *, allow_stale: bool
         "cached_at": cached_at,
         "cache": "hit" if is_fresh else "stale",
     }
+
+
+def _fallback_payload(
+    *,
+    used: bool,
+    reason: str,
+    strategy: str,
+    can_continue: bool,
+    recommended_action: str,
+    source: str = "",
+) -> dict[str, Any]:
+    return {
+        "used": used,
+        "reason": reason,
+        "strategy": strategy,
+        "can_continue": can_continue,
+        "recommended_action": recommended_action,
+        "source": source,
+    }
+
+
+def _tool_discovery_fallback(
+    server_id: str,
+    server: dict[str, Any],
+    status: dict[str, Any],
+    fingerprint: str,
+    error: str,
+) -> dict[str, Any] | None:
+    cached = _cached_tools(status, fingerprint, allow_stale=True)
+    if not cached:
+        return None
+    return {
+        "server_id": server_id,
+        "command": server.get("command", ""),
+        "tools": cached["tools"],
+        "status": "degraded",
+        "ok": False,
+        "error": error,
+        "transport": "stdio",
+        "cache": "fallback_stale",
+        "cached_at": cached["cached_at"],
+        "fallback": _fallback_payload(
+            used=True,
+            reason=error,
+            strategy="stale_tool_catalog",
+            can_continue=True,
+            recommended_action="继续使用上一次成功发现的 MCP 工具目录；真正调用前仍需重新检查 server 状态。",
+            source="tools_cache",
+        ),
+    }
+
+
+def _call_failure_fallback(
+    server_id: str,
+    tool_name: str,
+    error: str,
+) -> dict[str, Any]:
+    lowered = f"{server_id}/{tool_name}".lower()
+    read_like = any(token in lowered for token in ("read", "list", "search", "get", "fetch", "query"))
+    if read_like:
+        return _fallback_payload(
+            used=False,
+            reason=error,
+            strategy="local_read_tools",
+            can_continue=True,
+            recommended_action="MCP 只读工具不可用；可退回项目索引、read_file、文件搜索等本地只读工具继续任务。",
+            source="runtime_policy",
+        )
+    return _fallback_payload(
+        used=False,
+        reason=error,
+        strategy="no_safe_automatic_fallback",
+        can_continue=False,
+        recommended_action="该 MCP 调用可能产生外部副作用，失败后不自动替代执行；需要用户确认或改用更安全的本地方案。",
+        source="runtime_policy",
+    )
 
 
 def _record_mcp_success(
@@ -315,6 +401,109 @@ def _normalise_mcp_error(error: Any) -> str:
     return str(error or "unknown MCP error")
 
 
+def _go_mcp_probe(server_id: str, server: dict[str, Any], workspace: Path) -> dict[str, Any] | None:
+    if _MCP_GRPC_AVAILABLE:
+        try:
+            result = _mcp_grpc.probe_server(
+                server_id=server_id,
+                command=str(server.get("command") or ""),
+                args=[str(item) for item in server.get("args", [])],
+                env_keys=[str(item) for item in server.get("env_keys", [])],
+                workspace_dir=str(workspace),
+            )
+            if result.get("ok"):
+                return result
+        except Exception:
+            pass
+    if not go_runtime_enabled():
+        return None
+    try:
+        return go_mcp_gateway_client.probe_mcp_server(
+            server_id=server_id,
+            workspace_dir=str(workspace),
+            command=str(server.get("command") or ""),
+            args=[str(item) for item in server.get("args", [])],
+            env_keys=[str(item) for item in server.get("env_keys", [])],
+            enabled=bool(server.get("enabled", True)),
+        )
+    except (GoRuntimeUnavailable, GoRuntimeError, OSError, RuntimeError):
+        return None
+
+
+def _go_mcp_tools(server_id: str, server: dict[str, Any], workspace: Path) -> dict[str, Any] | None:
+    if _MCP_GRPC_AVAILABLE:
+        try:
+            result = _mcp_grpc.list_mcp_tools(server_id)
+            if isinstance(result, dict) and result.get("ok"):
+                result.setdefault("transport", "go_grpc")
+                return result
+        except Exception:
+            pass
+    if _go_mcp_probe(server_id, server, workspace) is None:
+        return None
+    try:
+        result = go_mcp_gateway_client.list_mcp_tools(server_id)
+    except (GoRuntimeUnavailable, GoRuntimeError, OSError, RuntimeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    result.setdefault("transport", "go_stdio")
+    return result
+
+
+def _go_mcp_call(
+    server_id: str,
+    server: dict[str, Any],
+    workspace: Path,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    run_id: str = "",
+    permission_level: str = "",
+    requires_approval: bool = False,
+    approval_id: str = "",
+    approval_token: str = "",
+) -> dict[str, Any] | None:
+    if _MCP_GRPC_AVAILABLE:
+        try:
+            result = _mcp_grpc.call_mcp_tool(
+                server_id,
+                tool_name,
+                arguments,
+                workspace_dir=str(workspace),
+                permission_level=permission_level,
+                requires_approval=requires_approval,
+                approval_id=approval_id,
+                approval_token=approval_token,
+                run_id=run_id,
+            )
+            if isinstance(result, dict):
+                result.setdefault("transport", "go_grpc")
+                return result
+        except Exception:
+            pass
+    if _go_mcp_probe(server_id, server, workspace) is None:
+        return None
+    try:
+        result = go_mcp_gateway_client.call_mcp_tool(
+            server_id,
+            tool_name,
+            arguments,
+            run_id=run_id,
+            workspace_dir=str(workspace),
+            permission_level=permission_level,
+            requires_approval=requires_approval,
+            approval_id=approval_id,
+            approval_token=approval_token,
+        )
+    except (GoRuntimeUnavailable, GoRuntimeError, OSError, RuntimeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    result.setdefault("transport", "go_stdio")
+    return result
+
+
 def probe_mcp_server(
     server_id: str,
     workspace_dir: str | None = None,
@@ -333,6 +522,26 @@ def probe_mcp_server(
             "status": "failed",
             "checks": [{"id": "server_not_found", "label": "Server 查找",
                         "status": "failed", "detail": f"未找到 MCP server: {server_id}"}],
+        }
+
+    go_probe = _go_mcp_probe(server_id, server, Path(ws).resolve())
+    if go_probe is not None:
+        checks = [
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("id") or ""),
+                "status": str(item.get("status") or "warning"),
+                "detail": str(item.get("message") or ""),
+            }
+            for item in go_probe.get("checks", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "server_id": server_id,
+            "status": go_probe.get("status", "warning"),
+            "checks": checks,
+            "server": server,
+            "transport": "go_stdio",
         }
 
     # 1. Server enabled
@@ -428,15 +637,28 @@ def list_mcp_tools(
     fingerprint = _server_fingerprint(server)
     if circuit_remaining:
         cached = _cached_tools(status, fingerprint, allow_stale=True)
+        error = f"MCP server 熔断中，请 {circuit_remaining} 秒后重试。"
         return {
             "server_id": server_id,
             "command": server.get("command", ""),
             "tools": cached["tools"] if cached else [],
             "status": "circuit_open",
             "ok": False,
-            "error": f"MCP server 熔断中，请 {circuit_remaining} 秒后重试。",
+            "error": error,
             "cache": cached["cache"] if cached else "miss",
             "circuit_remaining_seconds": circuit_remaining,
+            "fallback": _fallback_payload(
+                used=bool(cached),
+                reason=error,
+                strategy="stale_tool_catalog" if cached else "none",
+                can_continue=bool(cached),
+                recommended_action=(
+                    "继续使用上一次成功发现的 MCP 工具目录；真正调用前仍需重新检查 server 状态。"
+                    if cached else
+                    "跳过该 MCP server，继续使用本地工具或其他可用 MCP server。"
+                ),
+                source="tools_cache" if cached else "runtime_policy",
+            ),
         }
 
     cached = None if force_refresh else _cached_tools(status, fingerprint)
@@ -452,18 +674,66 @@ def list_mcp_tools(
             "cached_at": cached["cached_at"],
         }
 
+    go_result = _go_mcp_tools(server_id, server, workspace)
+    if go_result is not None and go_result.get("ok"):
+        tools = go_result.get("tools") if isinstance(go_result.get("tools"), list) else []
+        cached_at = time.time()
+        _record_mcp_success(
+            server_id,
+            str(workspace),
+            {
+                "tools_cache": {
+                    "tools": tools,
+                    "cached_at": cached_at,
+                    "config_hash": fingerprint,
+                },
+                "last_tools_count": len(tools),
+            },
+        )
+        return {
+            "server_id": server_id,
+            "command": server.get("command", ""),
+            "tools": tools,
+            "status": go_result.get("status", "ready"),
+            "ok": True,
+            "transport": "go_stdio",
+            "cache": "miss",
+            "cached_at": cached_at,
+        }
+
     probe = probe_mcp_server(server_id, workspace_dir)
     if probe["status"] == "failed":
         error = probe["checks"][0]["detail"]
-        _record_mcp_failure(server_id, str(workspace), error)
-        return {"server_id": server_id, "tools": [], "error": error}
+        updated = _record_mcp_failure(server_id, str(workspace), error)
+        fallback = _tool_discovery_fallback(server_id, server, updated, fingerprint, error)
+        if fallback:
+            return fallback
+        return {
+            "server_id": server_id,
+            "tools": [],
+            "status": "failed",
+            "ok": False,
+            "error": error,
+            "cache": "miss",
+            "fallback": _fallback_payload(
+                used=False,
+                reason=error,
+                strategy="none",
+                can_continue=True,
+                recommended_action="跳过该 MCP server，继续使用本地工具或其他可用 MCP server。",
+                source="runtime_policy",
+            ),
+        }
 
     server = probe.get("server", {})
     try:
         response = _run_mcp_request(server, workspace, "tools/list", {})
     except Exception as exc:
         error = str(exc)
-        _record_mcp_failure(server_id, str(workspace), error)
+        updated = _record_mcp_failure(server_id, str(workspace), error)
+        fallback = _tool_discovery_fallback(server_id, server, updated, fingerprint, error)
+        if fallback:
+            return fallback
         return {
             "server_id": server_id,
             "command": server.get("command", ""),
@@ -472,11 +742,23 @@ def list_mcp_tools(
             "ok": False,
             "error": error,
             "cache": "miss",
+            "fallback": _fallback_payload(
+                used=False,
+                reason=error,
+                strategy="none",
+                can_continue=True,
+                recommended_action="跳过该 MCP server，继续使用本地工具或其他可用 MCP server。",
+                source="runtime_policy",
+            ),
         }
 
     if response.get("error"):
         error = _normalise_mcp_error(response.get("error"))
-        _record_mcp_failure(server_id, str(workspace), error)
+        updated = _record_mcp_failure(server_id, str(workspace), error)
+        fallback = _tool_discovery_fallback(server_id, server, updated, fingerprint, error)
+        if fallback:
+            fallback["stderr"] = response.get("stderr", "")
+            return fallback
         return {
             "server_id": server_id,
             "command": server.get("command", ""),
@@ -486,6 +768,14 @@ def list_mcp_tools(
             "error": error,
             "stderr": response.get("stderr", ""),
             "cache": "miss",
+            "fallback": _fallback_payload(
+                used=False,
+                reason=error,
+                strategy="none",
+                can_continue=True,
+                recommended_action="跳过该 MCP server，继续使用本地工具或其他可用 MCP server。",
+                source="runtime_policy",
+            ),
         }
 
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
@@ -517,42 +807,149 @@ def list_mcp_tools(
     }
 
 
+def list_all_mcp_tools(
+    workspace_dir: str | None = None,
+    *,
+    force_refresh: bool = False,
+    include_disabled: bool = False,
+) -> dict[str, Any]:
+    """List all MCP tools from configured servers with permission metadata."""
+    workspace = _workspace(workspace_dir)
+    servers = list_mcp_servers(str(workspace)).get("servers", [])
+    server_results: list[dict[str, Any]] = []
+    for server in servers:
+        if server.get("status") != "configured":
+            continue
+        if not include_disabled and server.get("enabled") is False:
+            server_results.append({
+                "server_id": server.get("id", ""),
+                "status": "disabled",
+                "ok": False,
+                "tools": [],
+                "error": "MCP server 已禁用。",
+                "cache": "skip",
+            })
+            continue
+        server_results.append(
+            list_mcp_tools(
+                str(server.get("id", "")),
+                str(workspace),
+                force_refresh=force_refresh,
+            )
+        )
+    catalog = build_mcp_tool_catalog(server_results)
+    return {
+        "workspace_dir": str(workspace),
+        "catalog": catalog["tools"],
+        "servers": catalog["servers"],
+        "summary": catalog["summary"],
+    }
+
+
 def call_mcp_tool(
     server_id: str,
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     workspace_dir: str | None = None,
+    run_id: str = "",
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    permission_level: str = "",
+    requires_approval: bool = False,
+    approval_id: str = "",
+    approval_token: str = "",
 ) -> dict[str, Any]:
     """Call an MCP tool through stdio JSON-RPC."""
     workspace = _workspace(workspace_dir)
     status = get_mcp_server_status(server_id, str(workspace))
     circuit_remaining = _circuit_remaining_seconds(status)
     if circuit_remaining:
+        error = f"MCP server 熔断中，请 {circuit_remaining} 秒后重试。"
         return {
             "server_id": server_id,
             "tool": tool_name,
             "arguments": arguments or {},
             "ok": False,
-            "error": f"MCP server 熔断中，请 {circuit_remaining} 秒后重试。",
+            "error": error,
             "transport": "stdio",
             "status": "circuit_open",
             "circuit_remaining_seconds": circuit_remaining,
+            "fallback": _call_failure_fallback(server_id, tool_name, error),
         }
 
     probe = probe_mcp_server(server_id, workspace_dir)
     if probe["status"] == "failed":
-        _record_mcp_failure(server_id, str(workspace), "MCP server 不可用。")
+        error = "MCP server 不可用。"
+        _record_mcp_failure(server_id, str(workspace), error)
         return {"server_id": server_id, "tool": tool_name, "ok": False,
-                "error": "MCP server 不可用。"}
+                "error": error,
+                "fallback": _call_failure_fallback(server_id, tool_name, error)}
 
     disabled_check = next((c for c in probe["checks"] if c["id"] == "enabled" and c["status"] == "failed"), None)
     if disabled_check:
-        _record_mcp_failure(server_id, str(workspace), "MCP server 已被禁用，无法调用工具。")
+        error = "MCP server 已被禁用，无法调用工具。"
+        _record_mcp_failure(server_id, str(workspace), error)
         return {"server_id": server_id, "tool": tool_name, "ok": False,
-                "error": "MCP server 已被禁用，无法调用工具。"}
+                "error": error,
+                "fallback": _call_failure_fallback(server_id, tool_name, error)}
 
     server = probe.get("server", {})
+    go_result = _go_mcp_call(
+        server_id,
+        server,
+        workspace,
+        tool_name,
+        arguments or {},
+        run_id=run_id,
+        permission_level=permission_level,
+        requires_approval=requires_approval,
+        approval_id=approval_id,
+        approval_token=approval_token,
+    )
+    if go_result is not None:
+        if go_result.get("ok"):
+            _record_mcp_success(server_id, str(workspace), {"last_tool": tool_name})
+            record_mcp_usage(server_id, "", str(workspace))
+            return {
+                "server_id": server_id,
+                "tool": tool_name,
+                "arguments": arguments or {},
+                "ok": True,
+                "result": go_result.get("result", {}),
+                "transport": "go_stdio",
+            }
+        error = str(go_result.get("error") or "MCP tool call failed")
+        error_code = str(go_result.get("error_code") or "")
+        if go_result.get("status") == "denied" or error_code in {"approval_required", "approval_invalid"}:
+            return {
+                "server_id": server_id,
+                "tool": tool_name,
+                "arguments": arguments or {},
+                "ok": False,
+                "error": error,
+                "error_code": error_code,
+                "status": "denied",
+                "transport": "go_stdio",
+                "permission_level": go_result.get("permission_level", permission_level),
+                "requires_approval": bool(go_result.get("requires_approval", requires_approval)),
+                "fallback": _fallback_payload(
+                    used=False,
+                    reason=error,
+                    strategy="approval_required",
+                    can_continue=False,
+                    recommended_action="该 MCP 工具需要用户审批；审批通过后会携带短期 approval token 重新调用。",
+                    source="runtime_policy",
+                ),
+            }
+        _record_mcp_failure(server_id, str(workspace), error)
+        return {
+            "server_id": server_id,
+            "tool": tool_name,
+            "arguments": arguments or {},
+            "ok": False,
+            "error": error,
+            "transport": "go_stdio",
+            "fallback": _call_failure_fallback(server_id, tool_name, error),
+        }
     try:
         response = _run_mcp_request(
             server,
@@ -571,6 +968,7 @@ def call_mcp_tool(
             "ok": False,
             "error": error,
             "transport": "stdio",
+            "fallback": _call_failure_fallback(server_id, tool_name, error),
         }
 
     if response.get("error"):
@@ -584,6 +982,7 @@ def call_mcp_tool(
             "error": error,
             "stderr": response.get("stderr", ""),
             "transport": "stdio",
+            "fallback": _call_failure_fallback(server_id, tool_name, error),
         }
 
     _record_mcp_success(server_id, str(workspace), {"last_tool": tool_name})
