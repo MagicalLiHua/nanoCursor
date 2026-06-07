@@ -11,6 +11,7 @@ httpx>=0.25.0
 openai>=1.0.0
 anthropic>=0.18.0
 
-# gRPC client for Go indexer service
-grpcio>=1.60.0
-grpcio-tools>=1.60.0
+# gRPC client for Go sidecar services. Keep this aligned with generated *_pb2_grpc.py.
+grpcio>=1.81.0
+grpcio-tools>=1.81.0
+protobuf>=6.33.5

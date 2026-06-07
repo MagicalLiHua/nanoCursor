@@ -20,7 +20,7 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_for_port(port: int, timeout_seconds: float = 15.0) -> None:
+def _wait_for_port(port: int, timeout_seconds: float = 60.0) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

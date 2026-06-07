@@ -8,6 +8,14 @@ import pytest
 from src.runtime.command_runner import run_command, run_command_async
 
 
+@pytest.fixture(autouse=True)
+def _isolate_executor_routing(monkeypatch):
+    monkeypatch.delenv("NANOCURSOR_GO_EXECUTOR_ENABLED", raising=False)
+    monkeypatch.delenv("NANOCURSOR_GO_EXECUTOR_FALLBACK", raising=False)
+    monkeypatch.delenv("NANOCURSOR_GO_RUNTIME_ENABLED", raising=False)
+    monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "never")
+
+
 class TestCommandRunner:
     def test_simple_command_echo(self, tmp_path):
         result = run_command("echo hello", cwd=str(tmp_path))
