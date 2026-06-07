@@ -4,6 +4,7 @@ use (
 	./executor
 	./filetools
 	./indexer
+	./mcp
 	./policy
 	./runtime
 	./taskboard
