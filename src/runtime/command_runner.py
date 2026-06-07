@@ -17,6 +17,7 @@ try:
 except ImportError:
     _EXECUTOR_AVAILABLE = False
 
+from src.runtime.executor_routing import choose_executor_backend
 from src.runtime.go_runtime_client import GoRuntimeUnavailable, run_command_via_go_runtime
 from src.runtime.runtime_feature_flags import (
     go_executor_enabled,
@@ -42,6 +43,78 @@ def _is_dangerous(command: str) -> str | None:
     return None
 
 
+def _base_result(
+    *,
+    backend: str,
+    route_reason: str,
+    fallback: bool,
+    command: str,
+    cwd: Path,
+    exit_code: int,
+    stdout: str = "",
+    stderr: str = "",
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+    duration_ms: int | float = 0,
+    timed_out: bool = False,
+) -> dict[str, Any]:
+    return {
+        "backend": backend,
+        "route_reason": route_reason,
+        "fallback": fallback,
+        "command": command,
+        "cwd": str(cwd),
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "duration_ms": duration_ms,
+        "timed_out": timed_out,
+    }
+
+
+def _emit_command_backend_decision(
+    callback: Callable[[dict[str, Any]], None] | None,
+    command: str,
+    decision: dict[str, Any],
+    permission_level: str,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback({
+            "type": "command_backend_decision",
+            "command": command,
+            "permission_level": permission_level,
+            **decision,
+        })
+    except Exception:
+        pass
+
+
+def _emit_command_backend_fallback(
+    callback: Callable[[dict[str, Any]], None] | None,
+    command: str,
+    *,
+    from_backend: str,
+    to_backend: str,
+    reason: str,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback({
+            "type": "command_backend_fallback",
+            "command": command,
+            "from_backend": from_backend,
+            "to_backend": to_backend,
+            "reason": reason,
+        })
+    except Exception:
+        pass
+
+
 def run_command(
     command: str,
     cwd: str | Path,
@@ -64,9 +137,45 @@ def run_command(
     if not cwd.is_dir():
         raise FileNotFoundError(f"工作目录不存在: {cwd}")
     backend = "python_subprocess"
+    route_reason = "default to Python subprocess"
+    fallback = False
 
-    # Try executor gRPC first only when explicitly enabled.
-    if _EXECUTOR_AVAILABLE and go_executor_enabled() and env is None:
+    blocked = _is_dangerous(command)
+    if blocked:
+        return _base_result(
+            backend=backend,
+            route_reason="dangerous command blocked before backend routing",
+            fallback=False,
+            command=command,
+            cwd=cwd,
+            exit_code=-1,
+            stderr=f"Error: 危险命令被拦截 (匹配 '{blocked}')",
+        )
+
+    decision = choose_executor_backend(
+        command=command,
+        timeout_seconds=timeout_seconds,
+        permission_level=permission_level or "shell_safe",
+        requires_streaming=on_runtime_event is not None,
+        env=env,
+    )
+    route_reason = decision.reason
+    _emit_command_backend_decision(on_runtime_event, command, decision.to_dict(), permission_level)
+
+    if decision.backend == "go_executor" and not _EXECUTOR_AVAILABLE:
+        if not go_executor_fallback_enabled():
+            raise RuntimeError("Go executor selected but executor client is unavailable")
+        fallback = True
+        route_reason = f"{decision.reason}; executor client unavailable, used Python fallback"
+        _emit_command_backend_fallback(
+            on_runtime_event,
+            command,
+            from_backend="go_executor",
+            to_backend="python_subprocess",
+            reason="executor client unavailable",
+        )
+
+    if _EXECUTOR_AVAILABLE and decision.backend == "go_executor":
         try:
             result = executor_client.run_command(
                 command,
@@ -76,16 +185,27 @@ def run_command(
                 permission_level=permission_level or "shell_safe",
                 on_event=on_runtime_event,
             )
+            result.setdefault("backend", "go_executor")
+            result["route_reason"] = decision.reason
+            result["fallback"] = False
             return result
-        except Exception:
+        except Exception as exc:
             if not go_executor_fallback_enabled():
                 raise
-            # fall through to next backend
+            fallback = True
+            route_reason = f"{decision.reason}; Go executor failed, used Python fallback: {exc}"
+            _emit_command_backend_fallback(
+                on_runtime_event,
+                command,
+                from_backend="go_executor",
+                to_backend="python_subprocess",
+                reason=str(exc),
+            )
 
     # Try go-runtime HTTP (secondary backend)
-    if go_runtime_enabled() and env is None:
+    if go_runtime_enabled() and not go_executor_enabled() and env is None:
         try:
-            return run_command_via_go_runtime(
+            result = run_command_via_go_runtime(
                 command,
                 cwd=cwd,
                 timeout_seconds=timeout_seconds,
@@ -97,24 +217,13 @@ def run_command(
                 run_id=thread_id,
                 on_runtime_event=on_runtime_event,
             )
+            result.setdefault("backend", "go_runtime")
+            result.setdefault("route_reason", "legacy Go runtime enabled")
+            result.setdefault("fallback", False)
+            return result
         except GoRuntimeUnavailable:
             if not go_runtime_fallback_enabled():
                 raise
-
-    blocked = _is_dangerous(command)
-    if blocked:
-        return {
-            "backend": backend,
-            "command": command,
-            "cwd": str(cwd),
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": f"Error: 危险命令被拦截 (匹配 '{blocked}')",
-            "stdout_truncated": False,
-            "stderr_truncated": False,
-            "duration_ms": 0,
-            "timed_out": False,
-        }
 
     try:
         import time
@@ -142,6 +251,8 @@ def run_command(
         stderr_truncated = len(stderr) > max_stderr_chars
         return {
             "backend": backend,
+            "route_reason": route_reason,
+            "fallback": fallback,
             "command": command,
             "cwd": str(cwd),
             "exit_code": result.returncode,
@@ -155,6 +266,8 @@ def run_command(
     except subprocess.TimeoutExpired:
         return {
             "backend": backend,
+            "route_reason": route_reason,
+            "fallback": fallback,
             "command": command,
             "cwd": str(cwd),
             "exit_code": -1,
@@ -168,6 +281,8 @@ def run_command(
     except FileNotFoundError:
         return {
             "backend": backend,
+            "route_reason": route_reason,
+            "fallback": fallback,
             "command": command,
             "cwd": str(cwd),
             "exit_code": -1,
@@ -181,6 +296,8 @@ def run_command(
     except Exception as exc:
         return {
             "backend": backend,
+            "route_reason": route_reason,
+            "fallback": fallback,
             "command": command,
             "cwd": str(cwd),
             "exit_code": -1,

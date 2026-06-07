@@ -23,6 +23,7 @@ class TestCommandRunner:
         from src.runtime import command_runner
 
         monkeypatch.delenv("NANOCURSOR_GO_EXECUTOR_ENABLED", raising=False)
+        monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "never")
         monkeypatch.setattr(command_runner, "_EXECUTOR_AVAILABLE", True)
 
         def fail_if_called(*args, **kwargs):
@@ -30,6 +31,87 @@ class TestCommandRunner:
 
         monkeypatch.setattr(command_runner.executor_client, "run_command", fail_if_called)
         result = command_runner.run_command("echo hello", cwd=str(tmp_path))
+        assert result["backend"] == "python_subprocess"
+        assert result["exit_code"] == 0
+
+    def test_executor_routing_keeps_short_command_on_python(self, tmp_path, monkeypatch):
+        from src.runtime import command_runner
+
+        monkeypatch.setenv("NANOCURSOR_GO_EXECUTOR_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "auto")
+        monkeypatch.setattr(command_runner, "_EXECUTOR_AVAILABLE", True)
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("short command should stay on Python")
+
+        monkeypatch.setattr(command_runner.executor_client, "run_command", fail_if_called)
+        result = command_runner.run_command("ls", cwd=str(tmp_path))
+
+        assert result["backend"] == "python_subprocess"
+        assert "low-latency" in result["route_reason"]
+
+    def test_executor_routing_sends_test_command_to_go(self, tmp_path, monkeypatch):
+        from src.runtime import command_runner
+
+        monkeypatch.setenv("NANOCURSOR_GO_EXECUTOR_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "auto")
+        monkeypatch.setattr(command_runner, "_EXECUTOR_AVAILABLE", True)
+
+        def fake_run_command(*args, **kwargs):
+            return {
+                "command": args[0],
+                "cwd": kwargs["cwd"],
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": "",
+                "duration_ms": 12,
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(command_runner.executor_client, "run_command", fake_run_command)
+        result = command_runner.run_command("pytest -q", cwd=str(tmp_path))
+
+        assert result["backend"] == "go_executor"
+        assert result["fallback"] is False
+        assert "long-running" in result["route_reason"]
+
+    def test_executor_routing_falls_back_when_go_fails(self, tmp_path, monkeypatch):
+        from src.runtime import command_runner
+
+        monkeypatch.setenv("NANOCURSOR_GO_EXECUTOR_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_GO_EXECUTOR_FALLBACK", "true")
+        monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "auto")
+        monkeypatch.setattr(command_runner, "_EXECUTOR_AVAILABLE", True)
+
+        def failing_run_command(*args, **kwargs):
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(command_runner.executor_client, "run_command", failing_run_command)
+        result = command_runner.run_command("pytest --version", cwd=str(tmp_path))
+
+        assert result["backend"] == "python_subprocess"
+        assert result["fallback"] is True
+        assert "connection refused" in result["route_reason"]
+
+    def test_legacy_go_runtime_is_skipped_when_go_executor_enabled(self, tmp_path, monkeypatch):
+        from src.runtime import command_runner
+
+        monkeypatch.setenv("NANOCURSOR_GO_EXECUTOR_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_GO_RUNTIME_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "auto")
+        monkeypatch.setattr(command_runner, "_EXECUTOR_AVAILABLE", True)
+
+        def fail_executor(*args, **kwargs):
+            raise AssertionError("short command should not use gRPC executor")
+
+        def fail_legacy(*args, **kwargs):
+            raise AssertionError("legacy HTTP go-runtime must not run when gRPC executor is enabled")
+
+        monkeypatch.setattr(command_runner.executor_client, "run_command", fail_executor)
+        monkeypatch.setattr(command_runner, "run_command_via_go_runtime", fail_legacy)
+
+        result = command_runner.run_command("python -c 'print(42)'", cwd=str(tmp_path))
+
         assert result["backend"] == "python_subprocess"
         assert result["exit_code"] == 0
 

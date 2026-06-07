@@ -74,3 +74,47 @@ def go_executor_fallback_enabled() -> bool:
 
 def go_executor_addr() -> str:
     return os.getenv("NANOCURSOR_GO_EXECUTOR_ADDR", "localhost:50055")
+
+
+def go_mcp_gateway_enabled() -> bool:
+    return env_flag("NANOCURSOR_GO_MCP_GATEWAY_ENABLED", False)
+
+
+def go_mcp_gateway_fallback_enabled() -> bool:
+    return env_flag("NANOCURSOR_GO_MCP_GATEWAY_FALLBACK", True)
+
+
+def go_mcp_gateway_addr() -> str:
+    return os.getenv("NANOCURSOR_GO_MCP_GATEWAY_ADDR", os.getenv("NANOCURSOR_MCP_ADDR", "localhost:50056"))
+
+
+def executor_routing_mode() -> str:
+    raw = os.getenv("NANOCURSOR_EXECUTOR_ROUTING_MODE", "auto").strip().lower()
+    return raw if raw in {"auto", "always", "never"} else "auto"
+
+
+def executor_go_min_timeout_seconds() -> int:
+    raw = os.getenv("NANOCURSOR_EXECUTOR_GO_MIN_TIMEOUT_SECONDS", "2")
+    try:
+        return max(1, min(int(raw), 600))
+    except ValueError:
+        return 2
+
+
+def executor_go_command_patterns() -> list[str]:
+    return _csv_env(
+        "NANOCURSOR_EXECUTOR_GO_COMMAND_PATTERNS",
+        "pytest,npm test,npm run build,npm run lint,go test,pnpm test,yarn test,ruff,mypy",
+    )
+
+
+def executor_python_command_patterns() -> list[str]:
+    return _csv_env(
+        "NANOCURSOR_EXECUTOR_PYTHON_COMMAND_PATTERNS",
+        "pwd,ls,cat,echo,python -c,node -e,git status",
+    )
+
+
+def _csv_env(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip().lower() for item in raw.split(",") if item.strip()]

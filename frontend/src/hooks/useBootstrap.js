@@ -17,6 +17,8 @@ export function useBootstrap() {
         store.loadRecentProjects(),
         store.loadFiletoolsStatus(),
         store.loadIndexerStatus(),
+        store.loadExecutorStatus(),
+        store.loadMcpGatewayStatus(),
         store.refreshWorkspaceData({ allowEmpty: false, includeRunState: false }),
       ]);
       await useStore.getState().restoreActiveSession();

@@ -8,6 +8,9 @@ from src.runtime.runtime_feature_flags import (  # noqa: F401
     go_executor_addr,
     go_executor_enabled,
     go_executor_fallback_enabled,
+    go_mcp_gateway_addr,
+    go_mcp_gateway_enabled,
+    go_mcp_gateway_fallback_enabled,
     go_indexer_addr,
     go_indexer_enabled,
     go_indexer_fallback_enabled,
@@ -16,4 +19,8 @@ from src.runtime.runtime_feature_flags import (  # noqa: F401
     go_runtime_fallback_enabled,
     go_runtime_timeout_ms,
     go_runtime_url,
+    executor_go_command_patterns,
+    executor_go_min_timeout_seconds,
+    executor_python_command_patterns,
+    executor_routing_mode,
 )

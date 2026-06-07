@@ -11,8 +11,10 @@ import { mapBackendTeam as mapBackendTeamBase, mapConversationItem, mapRunHistor
 import { agentToneFromName } from "../../core/format.js";
 import {
   createConversationDraft,
+  loadExecutorStatus as loadExecutorStatusApi,
   loadFiletoolsStatus as loadFiletoolsStatusApi,
   loadIndexerStatus as loadIndexerStatusApi,
+  loadMcpGatewayStatus as loadMcpGatewayStatusApi,
   loadRunHistorySnapshot,
   loadWorkspaceOverview as loadWorkspaceOverviewApi,
   loadWorkspaceState as loadWorkspaceStateApi,
@@ -284,6 +286,30 @@ export function createWorkspaceActions(set, get) {
     return indexer;
   }
 
+  async function loadExecutorStatus() {
+    const api = getApiClient();
+    const executor = await loadExecutorStatusApi({ fetchJson: api.fetchJson });
+    set((state) => ({
+      runtimeStatus: {
+        ...(state.runtimeStatus || {}),
+        executor,
+      },
+    }));
+    return executor;
+  }
+
+  async function loadMcpGatewayStatus() {
+    const api = getApiClient();
+    const mcpGateway = await loadMcpGatewayStatusApi({ fetchJson: api.fetchJson });
+    set((state) => ({
+      runtimeStatus: {
+        ...(state.runtimeStatus || {}),
+        mcpGateway,
+      },
+    }));
+    return mcpGateway;
+  }
+
   async function restoreActiveSession() {
     const state = get();
     const saved = loadActiveSession(state.workspaceDir);
@@ -341,6 +367,8 @@ export function createWorkspaceActions(set, get) {
         get().loadRecoveryCenter?.() || Promise.resolve(),
         loadFiletoolsStatus(),
         loadIndexerStatus(),
+        loadExecutorStatus(),
+        loadMcpGatewayStatus(),
         refreshWorkspaceData({ allowEmpty: true }),
       ]);
     } catch (error) {
@@ -438,6 +466,8 @@ export function createWorkspaceActions(set, get) {
     loadWorkspaceOverview,
     loadFiletoolsStatus,
     loadIndexerStatus,
+    loadExecutorStatus,
+    loadMcpGatewayStatus,
     restoreActiveSession,
     openWorkspace,
     refreshWorkspaceData,

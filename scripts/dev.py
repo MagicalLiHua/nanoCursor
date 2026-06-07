@@ -65,12 +65,16 @@ def main() -> None:
         print(f"[go-mcp] Starting on {mcp_addr} ...")
         go_env = env.copy()
         go_env["NANOCURSOR_GO_RUNTIME_ADDR"] = executor_addr
-        env["NANOCURSOR_GO_RUNTIME_ENABLED"] = "true"
-        env["NANOCURSOR_GO_RUNTIME_URL"] = f"http://{executor_addr}"
+        env["NANOCURSOR_GO_EXECUTOR_ENABLED"] = "true"
+        env["NANOCURSOR_GO_EXECUTOR_FALLBACK"] = env.get("NANOCURSOR_GO_EXECUTOR_FALLBACK", "true")
+        env["NANOCURSOR_GO_EXECUTOR_ADDR"] = executor_addr
         env["NANOCURSOR_EXECUTOR_ADDR"] = executor_addr
+        env["NANOCURSOR_GO_MCP_GATEWAY_ENABLED"] = "true"
+        env["NANOCURSOR_GO_MCP_GATEWAY_FALLBACK"] = env.get("NANOCURSOR_GO_MCP_GATEWAY_FALLBACK", "true")
+        env["NANOCURSOR_GO_MCP_GATEWAY_ADDR"] = mcp_addr
         env["NANOCURSOR_MCP_ADDR"] = mcp_addr
         go_executor = subprocess.Popen(
-            ["go", "run", "./cmd/nanocursor-executor"],
+            ["go", "run", "./cmd/nanocursor-executor", f"--addr={executor_addr}"],
             cwd=str(PROJECT_ROOT / "go-services" / "executor"),
             env=go_env,
         )
@@ -78,7 +82,7 @@ def main() -> None:
         go_mcp_env = env.copy()
         go_mcp_env["NANOCURSOR_GO_RUNTIME_ADDR"] = mcp_addr
         go_mcp = subprocess.Popen(
-            ["go", "run", "./cmd/nanocursor-mcp"],
+            ["go", "run", "./cmd/nanocursor-mcp", f"--addr={mcp_addr}"],
             cwd=str(PROJECT_ROOT / "go-services" / "mcp"),
             env=go_mcp_env,
         )

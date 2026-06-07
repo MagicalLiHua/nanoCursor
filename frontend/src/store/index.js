@@ -83,6 +83,8 @@ const useStore = create(
       runtimeStatus: {
         indexer: null,
         filetools: null,
+        executor: null,
+        mcpGateway: null,
       },
 
       // --- UI ---

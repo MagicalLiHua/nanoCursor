@@ -28,7 +28,11 @@ from src.api.services.mcp_status_service import (
 )
 from src.api.services.mcp_tool_catalog_service import build_mcp_tool_catalog
 from src.runtime.go_runtime_client import GoRuntimeError, GoRuntimeUnavailable
-from src.runtime.runtime_feature_flags import go_runtime_enabled
+from src.runtime.runtime_feature_flags import (
+    go_mcp_gateway_enabled,
+    go_mcp_gateway_fallback_enabled,
+    go_runtime_enabled,
+)
 from src.runtime import go_mcp_gateway_client
 
 try:
@@ -401,8 +405,15 @@ def _normalise_mcp_error(error: Any) -> str:
     return str(error or "unknown MCP error")
 
 
+def _go_mcp_gateway_required_error() -> str | None:
+    if go_mcp_gateway_enabled() and not go_mcp_gateway_fallback_enabled():
+        return "Go MCP gateway 已启用但不可用，且 Python fallback 已关闭。"
+    return None
+
+
 def _go_mcp_probe(server_id: str, server: dict[str, Any], workspace: Path) -> dict[str, Any] | None:
-    if _MCP_GRPC_AVAILABLE:
+    go_gateway_enabled = go_mcp_gateway_enabled()
+    if go_gateway_enabled and _MCP_GRPC_AVAILABLE:
         try:
             result = _mcp_grpc.probe_server(
                 server_id=server_id,
@@ -431,7 +442,7 @@ def _go_mcp_probe(server_id: str, server: dict[str, Any], workspace: Path) -> di
 
 
 def _go_mcp_tools(server_id: str, server: dict[str, Any], workspace: Path) -> dict[str, Any] | None:
-    if _MCP_GRPC_AVAILABLE:
+    if go_mcp_gateway_enabled() and _MCP_GRPC_AVAILABLE:
         try:
             result = _mcp_grpc.list_mcp_tools(server_id)
             if isinstance(result, dict) and result.get("ok"):
@@ -464,7 +475,7 @@ def _go_mcp_call(
     approval_id: str = "",
     approval_token: str = "",
 ) -> dict[str, Any] | None:
-    if _MCP_GRPC_AVAILABLE:
+    if go_mcp_gateway_enabled() and _MCP_GRPC_AVAILABLE:
         try:
             result = _mcp_grpc.call_mcp_tool(
                 server_id,
@@ -542,6 +553,20 @@ def probe_mcp_server(
             "checks": checks,
             "server": server,
             "transport": "go_stdio",
+        }
+    required_error = _go_mcp_gateway_required_error()
+    if required_error:
+        return {
+            "server_id": server_id,
+            "status": "failed",
+            "checks": [{
+                "id": "go_mcp_gateway",
+                "label": "Go MCP Gateway",
+                "status": "failed",
+                "detail": required_error,
+            }],
+            "server": server,
+            "transport": "go_grpc",
         }
 
     # 1. Server enabled
@@ -699,6 +724,30 @@ def list_mcp_tools(
             "transport": "go_stdio",
             "cache": "miss",
             "cached_at": cached_at,
+        }
+    required_error = _go_mcp_gateway_required_error()
+    if required_error:
+        updated = _record_mcp_failure(server_id, str(workspace), required_error)
+        fallback = _tool_discovery_fallback(server_id, server, updated, fingerprint, required_error)
+        if fallback:
+            return fallback
+        return {
+            "server_id": server_id,
+            "command": server.get("command", ""),
+            "tools": [],
+            "status": "failed",
+            "ok": False,
+            "error": required_error,
+            "transport": "go_grpc",
+            "cache": "miss",
+            "fallback": _fallback_payload(
+                used=False,
+                reason=required_error,
+                strategy="disabled_by_config",
+                can_continue=False,
+                recommended_action="启动 Go MCP gateway，或重新开启 NANOCURSOR_GO_MCP_GATEWAY_FALLBACK。",
+                source="runtime_policy",
+            ),
         }
 
     probe = probe_mcp_server(server_id, workspace_dir)

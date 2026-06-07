@@ -53,6 +53,34 @@ export async function loadIndexerStatus({ fetchJson }) {
   }
 }
 
+export async function loadExecutorStatus({ fetchJson }) {
+  try {
+    return await fetchJson("/api/runtime/executor/status");
+  } catch (error) {
+    return {
+      enabled: false,
+      fallback_enabled: true,
+      healthy: false,
+      backend: "python",
+      error: error?.message || "executor status unavailable",
+    };
+  }
+}
+
+export async function loadMcpGatewayStatus({ fetchJson }) {
+  try {
+    return await fetchJson("/api/runtime/mcp-gateway/status");
+  } catch (error) {
+    return {
+      enabled: false,
+      fallback_enabled: true,
+      healthy: false,
+      backend: "python",
+      error: error?.message || "mcp gateway status unavailable",
+    };
+  }
+}
+
 export async function loadWorkspaceOverview({ fetchJson, workspaceDir, previousOverview = {} }) {
   try {
     const query = workspaceDir ? `?workspace_dir=${encodeURIComponent(workspaceDir)}` : "";

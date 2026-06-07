@@ -8,9 +8,11 @@ import {
   GitCompare,
   HardDrive,
   Loader2,
+  Plug,
   Search,
   Settings2,
   ShieldCheck,
+  Terminal,
   Wrench,
 } from "lucide-react";
 import { shortPath, statusLabel } from "../../core/format.js";
@@ -187,8 +189,12 @@ function Environment({ state }) {
   const branch = workspace.is_git_repo ? workspace.git_branch || "unknown" : "非 Git 工作区";
   const indexer = state.runtimeStatus?.indexer || {};
   const filetools = state.runtimeStatus?.filetools || {};
+  const executor = state.runtimeStatus?.executor || {};
+  const mcpGateway = state.runtimeStatus?.mcpGateway || {};
   const indexerMuted = !indexer.healthy || indexer.backend !== "go";
   const filetoolsMuted = !filetools.healthy || filetools.backend !== "go";
+  const executorMuted = !executor.healthy || executor.backend !== "go";
+  const mcpGatewayMuted = !mcpGateway.healthy || mcpGateway.backend !== "go";
 
   return (
     <Section title="环境信息" action={<Settings2 size={16} />}>
@@ -216,6 +222,18 @@ function Environment({ state }) {
         label="文件工具"
         value={backendStatusLabel(filetools)}
         muted={filetoolsMuted}
+      />
+      <InfoRow
+        icon={Terminal}
+        label="命令执行"
+        value={backendStatusLabel(executor)}
+        muted={executorMuted}
+      />
+      <InfoRow
+        icon={Plug}
+        label="MCP Gateway"
+        value={backendStatusLabel(mcpGateway)}
+        muted={mcpGatewayMuted}
       />
     </Section>
   );
