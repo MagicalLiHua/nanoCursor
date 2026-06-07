@@ -1,0 +1,105 @@
+syntax = "proto3";
+package nanocursor.eventstore;
+option go_package = "nanocursor/go-services/eventstore/proto";
+
+service EventStoreService {
+  rpc CreateSession(CreateSessionRequest) returns (Session);
+  rpc GetSession(GetSessionRequest) returns (Session);
+  rpc UpdateSession(UpdateSessionRequest) returns (Session);
+  rpc AppendEvent(AppendEventRequest) returns (Event);
+  rpc ListEvents(ListEventsRequest) returns (EventList);
+  rpc CountEvents(CountEventsRequest) returns (CountEventsResponse);
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream Event);
+  rpc WorkspaceForThread(WorkspaceForThreadRequest) returns (WorkspaceForThreadResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message CreateSessionRequest {
+  string thread_id = 1;
+  string prompt = 2;
+  string workspace_dir = 3;
+  string status = 4;
+  string mode = 5;
+}
+
+message Session {
+  string thread_id = 1;
+  string workspace_dir = 2;
+  string status = 3;
+  string prompt = 4;
+  string mode = 5;
+  double created_at = 6;
+  double updated_at = 7;
+}
+
+message GetSessionRequest {
+  string thread_id = 1;
+  string workspace_dir = 2;
+}
+
+message UpdateSessionRequest {
+  string thread_id = 1;
+  string workspace_dir = 2;
+  map<string, string> changes = 3;
+}
+
+message AppendEventRequest {
+  string thread_id = 1;
+  string event_type = 2;
+  string title = 3;
+  string content = 4;
+  string agent = 5;
+  string payload_json = 6;
+  string workspace_dir = 7;
+}
+
+message Event {
+  string id = 1;
+  string thread_id = 2;
+  string type = 3;
+  double timestamp = 4;
+  string agent = 5;
+  string title = 6;
+  string content = 7;
+  string payload_json = 8;
+}
+
+message ListEventsRequest {
+  string thread_id = 1;
+  string workspace_dir = 2;
+  int32 after = 3;
+}
+
+message EventList {
+  repeated Event events = 1;
+}
+
+message CountEventsRequest {
+  string thread_id = 1;
+  string workspace_dir = 2;
+}
+
+message CountEventsResponse {
+  int32 count = 1;
+}
+
+message SubscribeEventsRequest {
+  string thread_id = 1;
+  string workspace_dir = 2;
+}
+
+message WorkspaceForThreadRequest {
+  string thread_id = 1;
+}
+
+message WorkspaceForThreadResponse {
+  string workspace_dir = 1;
+  bool found = 2;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string service = 2;
+  string version = 3;
+}
