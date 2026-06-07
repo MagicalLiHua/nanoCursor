@@ -124,7 +124,7 @@ class TestEvalSummary:
 
 class TestEvalAPI:
     def test_suite_run_api(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/evals/suite/run", json={
             "eval_ids": ["todo_web_app"],
@@ -135,7 +135,7 @@ class TestEvalAPI:
         assert "pass_rate" in data
 
     def test_summary_api(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/evals/summary")
         assert resp.status_code == 200
@@ -143,7 +143,7 @@ class TestEvalAPI:
         assert "pass_rate" in data
 
     def test_eval_run_with_mode_param(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/evals/todo_web_app/run?mode=agent")
         assert resp.status_code == 200

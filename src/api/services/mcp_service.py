@@ -11,6 +11,7 @@ from typing import Any
 from src.infra import config as config_module
 from src.infra.path_guard import safe_slug
 from src.api.services.capability_service import MCP_TEMPLATES
+from src.api.services.mcp_status_service import get_mcp_server_status, update_mcp_status
 
 MCP_PRESETS = [
     {
@@ -174,6 +175,12 @@ def _read_config(path: Path) -> dict[str, Any]:
     return data
 
 
+def _write_config(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data.setdefault("mcpServers", {})
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _scan_last_used_run(workspace: Path, server_id: str) -> str | None:
     """Find the most recent run that used a given MCP server."""
     runs_root = workspace / ".nanocursor" / "runs"
@@ -230,7 +237,6 @@ def upsert_mcp_server_config(
     ]
 
     path = _writable_mcp_config_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = _read_config(path)
     data.setdefault("mcpServers", {})
     data["mcpServers"][slug] = {
@@ -240,7 +246,7 @@ def upsert_mcp_server_config(
         "enabled": bool(enabled),
         "ignored_env_keys": normalized_ignored_env_keys,
     }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_config(path, data)
 
     return {
         "id": f"mcp.{slug}",
@@ -346,10 +352,15 @@ def list_mcp_servers(workspace_dir: str | None = None) -> dict[str, Any]:
             if not isinstance(ignored_env_keys, list):
                 ignored_env_keys = []
             status = "configured" if command else "missing"
+            server_status = get_mcp_server_status(server_id, str(workspace))
+            runtime_status = str(server_status.get("status") or "")
+            effective_status = runtime_status if runtime_status in {"ready", "failed", "circuit_open"} else status
             servers.append({
                 "id": server_id,
                 "name": f"{name} MCP",
-                "status": status,
+                "status": effective_status,
+                "config_status": status,
+                "health": runtime_status or "unknown",
                 "source": rel,
                 "command": command,
                 "args": args,
@@ -357,7 +368,10 @@ def list_mcp_servers(workspace_dir: str | None = None) -> dict[str, Any]:
                 "enabled": enabled,
                 "ignored_env_keys": ignored_env_keys,
                 "setup_hint": f"已从 {rel} 读取 {name} server 配置。" if command else f"在 {rel} 中找到 {name} 但未声明 command。",
-                "last_used_run_id": None,
+                "last_used_run_id": server_status.get("last_used_run_id"),
+                "last_error": server_status.get("last_error", ""),
+                "last_validated_at": server_status.get("last_validated_at"),
+                "last_tools_count": server_status.get("last_tools_count", 0),
             })
 
     # Add template servers for any that weren't found in real config
@@ -379,7 +393,7 @@ def list_mcp_servers(workspace_dir: str | None = None) -> dict[str, Any]:
 
     # Scan run history for last_used_run_id
     for server in servers:
-        if server["status"] in ("configured",):
+        if server.get("config_status") == "configured" and not server.get("last_used_run_id"):
             server["last_used_run_id"] = _scan_last_used_run(workspace, server["id"])
 
     servers.sort(key=lambda s: (
@@ -389,9 +403,12 @@ def list_mcp_servers(workspace_dir: str | None = None) -> dict[str, Any]:
 
     summary = {
         "total": len(servers),
-        "configured": sum(1 for s in servers if s["status"] == "configured"),
+        "configured": sum(1 for s in servers if s.get("config_status") == "configured"),
+        "ready": sum(1 for s in servers if s["status"] == "ready"),
+        "enabled": sum(1 for s in servers if s.get("enabled")),
         "planned": sum(1 for s in servers if s["status"] == "planned"),
         "missing": sum(1 for s in servers if s["status"] == "missing"),
+        "failed": sum(1 for s in servers if s["status"] in {"failed", "circuit_open"}),
     }
 
     return {
@@ -399,6 +416,61 @@ def list_mcp_servers(workspace_dir: str | None = None) -> dict[str, Any]:
         "config_paths": config_paths,
         "servers": servers,
         "summary": summary,
+    }
+
+
+def set_mcp_server_enabled(
+    server_id: str,
+    enabled: bool,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    """Persistently enable or disable a configured workspace MCP server."""
+    workspace = _workspace(workspace_dir)
+    slug = _server_slug(server_id)
+    path = _writable_mcp_config_path(workspace)
+    data = _read_config(path)
+    servers = data.setdefault("mcpServers", {})
+    if slug not in servers:
+        raise ValueError(f"未找到 MCP server: mcp.{slug}")
+    if not isinstance(servers[slug], dict):
+        raise ValueError(f"MCP server 配置格式无效: mcp.{slug}")
+    servers[slug]["enabled"] = bool(enabled)
+    _write_config(path, data)
+    update_mcp_status(f"mcp.{slug}", {"enabled": bool(enabled)}, str(workspace))
+    return {
+        "server_id": f"mcp.{slug}",
+        "enabled": bool(enabled),
+        "server": next(
+            (server for server in list_mcp_servers(str(workspace))["servers"] if server["id"] == f"mcp.{slug}"),
+            None,
+        ),
+    }
+
+
+def delete_mcp_server_config(
+    server_id: str,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    """Delete a workspace-local MCP server config."""
+    workspace = _workspace(workspace_dir)
+    slug = _server_slug(server_id)
+    path = _writable_mcp_config_path(workspace)
+    data = _read_config(path)
+    servers = data.setdefault("mcpServers", {})
+    if slug not in servers:
+        raise ValueError(f"未找到 MCP server: mcp.{slug}")
+    removed = servers.pop(slug)
+    _write_config(path, data)
+    update_mcp_status(
+        f"mcp.{slug}",
+        {"status": "deleted", "enabled": False, "last_error": ""},
+        str(workspace),
+    )
+    return {
+        "ok": True,
+        "server_id": f"mcp.{slug}",
+        "removed": removed,
+        "mcp": list_mcp_servers(str(workspace)),
     }
 
 

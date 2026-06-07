@@ -64,6 +64,8 @@ message WriteFileRequest {
   string workspace = 1;
   string filename = 2;
   string content = 3;
+  bool overwrite = 4;
+  bool backup_existing = 5;
 }
 message WriteFileResponse {
   string message = 1;
@@ -74,9 +76,22 @@ message EditFileRequest {
   string filename = 2;
   string search_block = 3;
   string replace_block = 4;
+  int32 start_line = 5;
+  int32 end_line = 6;
+  string new_text = 7;
+  reserved 8;
+  bool create_backup = 9;
+  string match_mode = 10;
 }
 message EditFileResponse {
   string result = 1;
+  string diff = 2;
+  string strategy = 3;
+  int32 matched_start_line = 4;
+  int32 matched_end_line = 5;
+  int32 changed_line_count = 6;
+  string backup_path = 7;
+  bool changed = 8;
 }
 
 message BackupFileRequest {

@@ -67,14 +67,32 @@ while True:
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "tools": [{
-                    "name": "echo",
-                    "description": "Echo input text",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo input text",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                        },
                     },
-                }]
+                    {
+                        "name": "read_echo",
+                        "description": "Read-only echo input text",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                        },
+                    },
+                    {
+                        "name": "write_note",
+                        "description": "Write a note",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                        },
+                    },
+                ]
             },
         })
     elif method == "tools/call":
@@ -183,6 +201,34 @@ class TestMCPTools:
         assert result["transport"] == "stdio"
         assert result["tools"][0]["name"] == "echo"
 
+    def test_list_tools_uses_go_gateway_when_enabled(self, tmp_path, monkeypatch):
+        from src.api.services import mcp_runtime_service as service
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        config = {"mcpServers": {"fake": {"command": "echo", "args": ["hello"]}}}
+        (nanodir / "mcp.json").write_text(json.dumps(config), encoding="utf-8")
+
+        monkeypatch.setattr(service, "go_runtime_enabled", lambda: True)
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "probe_mcp_server",
+            lambda **kwargs: {"status": "passed", "ok": True, "checks": [{"id": "command", "status": "passed", "message": "ok"}]},
+        )
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "list_mcp_tools",
+            lambda server_id: {"server_id": server_id, "status": "ready", "ok": True, "tools": [{"name": "read_echo"}]},
+        )
+
+        result = list_mcp_tools("mcp.fake", str(ws), force_refresh=True)
+
+        assert result["ok"] is True
+        assert result["transport"] == "go_stdio"
+        assert result["tools"] == [{"name": "read_echo"}]
+
     def test_list_tools_uses_cache_after_first_success(self, tmp_path):
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -223,6 +269,30 @@ class TestMCPTools:
         circuit = list_mcp_tools("mcp.bad", str(ws))
         assert circuit["status"] == "circuit_open"
         assert circuit["cache"] == "miss"
+        assert circuit["fallback"]["can_continue"] is False
+
+    def test_list_tools_falls_back_to_stale_catalog_when_refresh_fails(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        script = write_fake_mcp_server(ws)
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        config = {"mcpServers": {"fake": {"command": sys.executable, "args": [str(script)]}}}
+        (nanodir / "mcp.json").write_text(json.dumps(config), encoding="utf-8")
+
+        first = list_mcp_tools("mcp.fake", str(ws))
+        assert first["ok"] is True
+        assert first["tools"][0]["name"] == "echo"
+
+        script.write_text("raise SystemExit(2)\n", encoding="utf-8")
+        fallback = list_mcp_tools("mcp.fake", str(ws), force_refresh=True)
+
+        assert fallback["ok"] is False
+        assert fallback["status"] == "degraded"
+        assert fallback["cache"] == "fallback_stale"
+        assert fallback["fallback"]["used"] is True
+        assert fallback["fallback"]["strategy"] == "stale_tool_catalog"
+        assert fallback["tools"][0]["name"] == "echo"
 
 
 class TestMCPCall:
@@ -261,6 +331,87 @@ class TestMCPCall:
         assert result["transport"] == "stdio"
         assert result["result"]["content"][0]["text"] == "echo:hello"
 
+    def test_call_uses_go_gateway_when_enabled(self, tmp_path, monkeypatch):
+        from src.api.services import mcp_runtime_service as service
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        config = {"mcpServers": {"fake": {"command": "echo", "args": ["hello"]}}}
+        (nanodir / "mcp.json").write_text(json.dumps(config), encoding="utf-8")
+
+        monkeypatch.setattr(service, "go_runtime_enabled", lambda: True)
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "probe_mcp_server",
+            lambda **kwargs: {"status": "passed", "ok": True, "checks": [{"id": "command", "status": "passed", "message": "ok"}]},
+        )
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "call_mcp_tool",
+            lambda server_id, tool_name, arguments, **kwargs: {
+                "server_id": server_id,
+                "tool": tool_name,
+                "ok": True,
+                "result": {"content": []},
+                "permission_level": kwargs.get("permission_level", ""),
+            },
+        )
+
+        result = call_mcp_tool("mcp.fake", "read_echo", {"text": "hi"}, str(ws))
+
+        assert result["ok"] is True
+        assert result["transport"] == "go_stdio"
+        assert result["result"] == {"content": []}
+
+    def test_go_gateway_approval_required_does_not_count_as_server_failure(self, tmp_path, monkeypatch):
+        from src.api.services import mcp_runtime_service as service
+        from src.api.services.mcp_status_service import get_mcp_server_status
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        nanodir = ws / ".nanocursor"
+        nanodir.mkdir()
+        config = {"mcpServers": {"fake": {"command": "echo", "args": ["hello"]}}}
+        (nanodir / "mcp.json").write_text(json.dumps(config), encoding="utf-8")
+
+        monkeypatch.setattr(service, "go_runtime_enabled", lambda: True)
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "probe_mcp_server",
+            lambda **kwargs: {"status": "passed", "ok": True, "checks": [{"id": "command", "status": "passed", "message": "ok"}]},
+        )
+        monkeypatch.setattr(
+            service.go_mcp_gateway_client,
+            "call_mcp_tool",
+            lambda server_id, tool_name, arguments, **kwargs: {
+                "server_id": server_id,
+                "tool": tool_name,
+                "ok": False,
+                "status": "denied",
+                "error_code": "approval_required",
+                "error": "approved tool call is missing approval token",
+                "permission_level": "mcp_write",
+                "requires_approval": True,
+            },
+        )
+
+        result = call_mcp_tool(
+            "mcp.fake",
+            "write_note",
+            {"text": "hi"},
+            str(ws),
+            permission_level="mcp_write",
+            requires_approval=True,
+        )
+
+        assert result["ok"] is False
+        assert result["status"] == "denied"
+        assert result["error_code"] == "approval_required"
+        assert result["fallback"]["strategy"] == "approval_required"
+        assert get_mcp_server_status("mcp.fake", str(ws)).get("failure_count", 0) == 0
+
     def test_call_fails_fast_when_circuit_is_open(self, tmp_path):
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -277,11 +428,21 @@ class TestMCPCall:
         assert result["ok"] is False
         assert result["status"] == "circuit_open"
         assert result["circuit_remaining_seconds"] > 0
+        assert result["fallback"]["strategy"] == "no_safe_automatic_fallback"
+
+    def test_call_read_like_failure_recommends_local_read_fallback(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        result = call_mcp_tool("mcp.missing", "read_file", {}, str(ws))
+
+        assert result["ok"] is False
+        assert result["fallback"]["strategy"] == "local_read_tools"
+        assert result["fallback"]["can_continue"] is True
 
 
 class TestMCPRuntimeAPI:
     def test_probe_api(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/capabilities/mcp/nonexistent/probe")
         assert resp.status_code == 200
@@ -289,13 +450,13 @@ class TestMCPRuntimeAPI:
         assert data["status"] == "failed"
 
     def test_tools_api(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/capabilities/mcp/nonexistent/tools")
         assert resp.status_code == 200
 
     def test_call_api(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/capabilities/mcp/nonexistent/tools/tool1/call", json={})
         assert resp.status_code == 200

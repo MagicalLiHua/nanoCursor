@@ -6,7 +6,6 @@ Uses git when available; falls back to file-snapshot comparison for non-git proj
 from __future__ import annotations
 
 import json
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +13,10 @@ from typing import Any
 
 from src.infra import config as config_module
 from src.infra.path_guard import resolve_workspace_path
+from src.api.services.change_path_filter import should_hide_change_path
+from src.api.services.event_change_parser import collect_event_changes
 from src.runtime.change_set import ChangeSet, ChangeSetStatus, FilePatchSummary
+from src.runtime.git_runner import GitCompletedProcess, run_git
 
 
 def _workspace(workspace_dir: str | None = None) -> Path:
@@ -33,11 +35,8 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def _run_git(workspace: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(workspace), *args],
-        capture_output=True, text=True, timeout=15, check=False,
-    )
+def _run_git(workspace: Path, args: list[str]) -> GitCompletedProcess:
+    return run_git(workspace, args, timeout_seconds=15)
 
 
 def _is_git_repo(workspace: Path) -> bool:
@@ -107,8 +106,7 @@ def _parse_status(output: str) -> dict[str, str]:
 
 
 def _is_internal_path(path: str) -> bool:
-    normalized = path.replace("\\", "/").strip("/")
-    return normalized == ".nanocursor" or normalized.startswith((".nanocursor/", ".backups/", ".tasks/", ".snapshots/"))
+    return should_hide_change_path(path)
 
 
 def _safe_workspace_file(workspace: Path, path: str) -> Path | None:
@@ -139,7 +137,6 @@ def _expand_untracked_directories(workspace: Path, status_map: dict[str, str]) -
             expanded[path] = change_type
             continue
 
-        found = False
         for child in sorted(directory.rglob("*")):
             if not child.is_file():
                 continue
@@ -147,9 +144,6 @@ def _expand_untracked_directories(workspace: Path, status_map: dict[str, str]) -
             if _is_internal_path(relative) or "/.git/" in f"/{relative}/":
                 continue
             expanded[relative] = "added"
-            found = True
-        if not found:
-            expanded[path] = change_type
     return expanded
 
 
@@ -251,40 +245,31 @@ def collect_changes_fallback(workspace: Path, thread_id: str) -> list[FilePatchS
 
 def collect_changes_from_events(workspace: Path, thread_id: str) -> list[FilePatchSummary]:
     """Collect file changes from file_changed events recorded during a run."""
-    from src.api.services.event_store import get_event_store
+    _, event_files = collect_event_changes(thread_id, workspace)
+    files: list[FilePatchSummary] = []
+    for item in event_files:
+        filepath = str(item.get("path") or "")
+        change_type = str(item.get("change_type") or "modified")
+        additions = int(item.get("additions") or 0)
+        deletions = int(item.get("deletions") or 0)
+        hunks = int(item.get("hunks") or 1)
 
-    files_by_path: dict[str, FilePatchSummary] = {}
-    for event in get_event_store().list_events(thread_id, str(workspace)):
-        if event.type != "file_changed" or not isinstance(event.payload, dict):
-            continue
-
-        filepath = str(event.payload.get("path") or "").strip()
-        if not filepath:
-            continue
-
-        output = str(event.payload.get("output") or event.content or "")
-        created = output.startswith("Created ")
-        change_type = "added" if created else str(event.payload.get("change_type") or "modified")
-
-        additions = 0
         resolved = resolve_workspace_path(workspace, filepath)
-        if change_type in {"added", "created"} and resolved.exists() and resolved.is_file():
-            try:
-                additions = len(resolved.read_text(encoding="utf-8", errors="replace").splitlines())
-            except OSError:
-                additions = 0
+        if change_type in {"added", "created"} and additions == 0 and resolved.exists() and resolved.is_file():
+            additions = _line_count(workspace, filepath)
 
-        files_by_path[filepath] = FilePatchSummary(
+        normalized_change_type = "added" if change_type == "created" else change_type
+        files.append(FilePatchSummary(
             path=filepath,
-            change_type="added" if change_type == "created" else change_type,
+            change_type=normalized_change_type,
             additions=additions,
-            deletions=0,
-            hunks=1,
-            summary=output[:240],
-            risk=_classify_risk(filepath, change_type, additions, 0),
-        )
+            deletions=deletions,
+            hunks=hunks,
+            summary=str(item.get("summary") or "")[:240],
+            risk=_classify_risk(filepath, normalized_change_type, additions, deletions),
+        ))
 
-    return [files_by_path[path] for path in sorted(files_by_path)]
+    return files
 
 
 def collect_changes(thread_id: str, workspace_dir: str | None = None, include_untracked: bool = True) -> ChangeSet:

@@ -1,10 +1,18 @@
 import { getApiClient } from "../../core/sharedApi.js";
 import { nowTime, formatTime, runTitle, shortPath } from "../../core/format.js";
-import { STORAGE_KEYS } from "../../core/storage.js";
+import {
+  STORAGE_KEYS,
+  clearActiveSession,
+  getStorageValue,
+  loadActiveSession,
+  saveActiveSession,
+} from "../../core/storage.js";
 import { mapBackendTeam as mapBackendTeamBase, mapConversationItem, mapRunHistoryItem } from "../../state/mappers.js";
 import { agentToneFromName } from "../../core/format.js";
 import {
   createConversationDraft,
+  loadFiletoolsStatus as loadFiletoolsStatusApi,
+  loadIndexerStatus as loadIndexerStatusApi,
   loadRunHistorySnapshot,
   loadWorkspaceOverview as loadWorkspaceOverviewApi,
   loadWorkspaceState as loadWorkspaceStateApi,
@@ -28,6 +36,15 @@ function normalizeTask(task) {
 }
 
 export function createWorkspaceActions(set, get) {
+  function persistActiveSession(overrides = {}) {
+    const state = get();
+    saveActiveSession({
+      workspaceDir: overrides.workspaceDir ?? state.workspaceDir,
+      conversationId: overrides.conversationId ?? state.currentConversationId,
+      threadId: overrides.threadId ?? state.currentThreadId,
+    });
+  }
+
   function upsertRun(run) {
     if (!run?.id) return;
     set((state) => {
@@ -54,6 +71,10 @@ export function createWorkspaceActions(set, get) {
       updates.team = mapBackendTeam(conversation.team.members);
     }
     set(updates);
+    persistActiveSession({
+      conversationId: updates.currentConversationId,
+      threadId: updates.currentThreadId,
+    });
     upsertRun(mapConversationItem(conversation, { runTitle, formatTime }));
     if (reset) {
       get().resetRunView("");
@@ -151,6 +172,7 @@ export function createWorkspaceActions(set, get) {
       prompt: "",
       activeTab: "report",
     });
+    persistActiveSession({ conversationId, threadId: id });
     get().resetRunView("");
     set({
       messages: [{
@@ -209,10 +231,20 @@ export function createWorkspaceActions(set, get) {
     const snapshot = await loadWorkspaceStateApi({ fetchJson: api.fetchJson });
     if (!snapshot) return;
     const updates = { workspaceMeta: snapshot.meta };
-    if (snapshot.current) {
-      updates.workspaceDir = snapshot.current;
-      updates.workspaceInput = snapshot.current;
-      try { localStorage.setItem(STORAGE_KEYS.workspaceDir, snapshot.current); } catch {}
+    const savedWorkspace = getStorageValue("workspaceDir");
+    let currentWorkspace = snapshot.current || "";
+    if (savedWorkspace && savedWorkspace !== snapshot.current) {
+      try {
+        const restored = await openWorkspacePath({ requestJson: api.requestJson, path: savedWorkspace });
+        currentWorkspace = restored.path || savedWorkspace;
+      } catch {
+        currentWorkspace = snapshot.current || savedWorkspace;
+      }
+    }
+    if (currentWorkspace) {
+      updates.workspaceDir = currentWorkspace;
+      updates.workspaceInput = currentWorkspace;
+      try { localStorage.setItem(STORAGE_KEYS.workspaceDir, currentWorkspace); } catch {}
     }
     set(updates);
   }
@@ -226,6 +258,49 @@ export function createWorkspaceActions(set, get) {
       previousOverview: state.projectOverview,
     });
     set({ projectOverview: overview });
+  }
+
+  async function loadFiletoolsStatus() {
+    const api = getApiClient();
+    const filetools = await loadFiletoolsStatusApi({ fetchJson: api.fetchJson });
+    set((state) => ({
+      runtimeStatus: {
+        ...(state.runtimeStatus || {}),
+        filetools,
+      },
+    }));
+    return filetools;
+  }
+
+  async function loadIndexerStatus() {
+    const api = getApiClient();
+    const indexer = await loadIndexerStatusApi({ fetchJson: api.fetchJson });
+    set((state) => ({
+      runtimeStatus: {
+        ...(state.runtimeStatus || {}),
+        indexer,
+      },
+    }));
+    return indexer;
+  }
+
+  async function restoreActiveSession() {
+    const state = get();
+    const saved = loadActiveSession(state.workspaceDir);
+    if (!saved) return false;
+
+    if (saved.conversationId) {
+      const restored = await get().restoreConversation(saved.conversationId, { force: true, quiet: true });
+      if (restored) return true;
+    } else if (saved.threadId) {
+      const restored = await get().restoreRun(saved.threadId, { force: true, quiet: true });
+      if (restored) return true;
+    }
+
+    clearActiveSession(state.workspaceDir);
+    set({ currentConversationId: "", currentThreadId: "pending", status: "idle" });
+    get().resetRunView("");
+    return false;
   }
 
   async function openWorkspace() {
@@ -264,6 +339,8 @@ export function createWorkspaceActions(set, get) {
         get().loadBenchmarks?.() || Promise.resolve(),
         get().loadMemoryProfile?.() || Promise.resolve(),
         get().loadRecoveryCenter?.() || Promise.resolve(),
+        loadFiletoolsStatus(),
+        loadIndexerStatus(),
         refreshWorkspaceData({ allowEmpty: true }),
       ]);
     } catch (error) {
@@ -351,6 +428,7 @@ export function createWorkspaceActions(set, get) {
   return {
     upsertRun,
     applyConversation,
+    persistActiveSession,
     teamToBackendMembers,
     ensureConversation,
     saveConversationTeam,
@@ -358,6 +436,9 @@ export function createWorkspaceActions(set, get) {
     loadRunHistory,
     loadWorkspaceState,
     loadWorkspaceOverview,
+    loadFiletoolsStatus,
+    loadIndexerStatus,
+    restoreActiveSession,
     openWorkspace,
     refreshWorkspaceData,
     syncTasksFromExecutionPlan,

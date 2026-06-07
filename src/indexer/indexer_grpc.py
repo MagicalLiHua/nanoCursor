@@ -152,6 +152,16 @@ class ProjectIndexClient:
             logger.warning(f"[IndexerGRPC] SearchCallers failed: {e}")
             raise
 
+    def health_sync(self, timeout_seconds: float = 1.0) -> dict:
+        self._ensure_channel()
+        resp = self._stub.Health(indexer_pb2.HealthRequest(), timeout=timeout_seconds)
+        return {
+            "ok": bool(resp.ok),
+            "service": resp.service,
+            "version": resp.version,
+            "indexed_files": int(resp.indexed_files),
+        }
+
     def close(self):
         if self._channel:
             self._channel.close()

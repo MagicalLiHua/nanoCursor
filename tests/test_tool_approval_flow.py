@@ -238,14 +238,14 @@ class TestApprovalService:
 
 class TestApprovalAPI:
     def test_list_approvals_empty(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/runs/no_such_run/approvals")
         # May be 200 with empty list or 404
         assert resp.status_code in (200, 404)
 
     def test_resolve_approval_not_found(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post(
             "/api/runs/fake_run/approvals/fake_id",
@@ -254,7 +254,7 @@ class TestApprovalAPI:
         assert resp.status_code in (404, 400)
 
     def test_get_approval_not_found(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/runs/fake_run/approvals/fake_id")
         assert resp.status_code == 404

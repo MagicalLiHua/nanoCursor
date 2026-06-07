@@ -25,6 +25,7 @@ from src.api.services.ephemeral_agent_service import (
     update_ephemeral_agent_status,
 )
 from src.api.services.event_store import get_event_store
+from src.tools.tool_result import is_tool_error_output, tool_error_message
 
 
 Runner = Callable[..., Awaitable[str]]
@@ -430,8 +431,8 @@ async def run_single_ephemeral_agent(
             agent_type=agent.get("role") or agent.get("name") or "Worker",
             tools=tools,
         )
-        if str(output or "").lstrip().startswith("Error:"):
-            raise RuntimeError(str(output).removeprefix("Error:").strip() or "子 Agent 返回错误。")
+        if is_tool_error_output(output):
+            raise RuntimeError(tool_error_message(output) or "子 Agent 返回错误。")
         result = _normalise_worker_result(agent, output, started_at)
         completed = complete_ephemeral_agent(thread_id, agent["agent_id"], result, workspace_dir)
         emit_event(

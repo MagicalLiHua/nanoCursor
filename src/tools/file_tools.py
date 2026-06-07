@@ -1,14 +1,14 @@
-"""
-文件操作工具模块
-支持文件读取、写入、编辑，以及文件备份和回滚功能。
-新增 AST 感知的智能读取能力，避免大文件内容被压缩丢失。
+"""Legacy file tool compatibility module.
 
-文件操作工具模块 - 提供文件读取、写入、编辑、AST 感知读取、备份回滚等功能。
+The active Agent runtime uses :mod:`src.tools.file_ops` for read/write/edit/list
+so file operations can share Go sidecar fallback, structured evidence, and
+runtime policy checks. This module remains for older AST-oriented helpers,
+backup compatibility, and tests that exercise the previous API shape. Do not
+add new model-facing file tools here.
 """
 
 import ast
 import difflib
-import logging
 import os
 import shutil
 from datetime import datetime
@@ -25,9 +25,6 @@ from src.infra.logger import logger
 # 备份目录
 BACKUP_DIR = os.path.join(WORKSPACE_DIR, ".backups")
 os.makedirs(BACKUP_DIR, exist_ok=True)
-
-logger = logging.getLogger(__name__)
-
 
 # ==========================================
 # 路径安全检查
@@ -240,6 +237,76 @@ def _extract_class_source(filepath: str, class_name: str) -> str:
     return f"未找到类 '{class_name}'。请检查类名是否正确，或使用 read_file 查看文件完整内容。"
 
 
+def _line_span_for_offset(content: str, start_offset: int, block: str) -> tuple[int, int]:
+    """Return a 1-based inclusive line span for a matched block."""
+    start_line = content.count("\n", 0, start_offset) + 1
+    line_count = max(1, len(block.splitlines()) or 1)
+    return start_line, start_line + line_count - 1
+
+
+def _changed_line_count(before: str, after: str) -> int:
+    diff_lines = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        lineterm="",
+    )
+    count = 0
+    for line in diff_lines:
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if line.startswith(("+", "-")):
+            count += 1
+    return count
+
+
+def _diff_preview(filename: str, before: str, after: str, max_lines: int = 80) -> str:
+    lines = list(difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"a/{filename}",
+        tofile=f"b/{filename}",
+        lineterm="",
+    ))
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"... diff truncated, {len(lines) - max_lines} more lines"]
+    return "\n".join(lines)
+
+
+def _format_edit_success(
+    *,
+    filename: str,
+    match_strategy: str,
+    backup_path: str | None,
+    start_line: int,
+    end_line: int,
+    occurrence_count: int,
+    before: str,
+    after: str,
+) -> str:
+    backup_info = f" (原文件已备份到 {os.path.basename(backup_path)})" if backup_path else ""
+    changed_lines = _changed_line_count(before, after)
+    diff_preview = _diff_preview(filename, before, after)
+    warnings: list[str] = []
+    if changed_lines == 0:
+        warnings.append("empty_diff")
+    if occurrence_count != 1:
+        warnings.append(f"occurrence_count={occurrence_count}")
+    warning_text = ", ".join(warnings) if warnings else "none"
+    return (
+        f"成功修改 {filename}。使用策略: [{match_strategy}]。{backup_info}\n"
+        "Edit Receipt:\n"
+        f"- path: {filename}\n"
+        f"- strategy: {match_strategy}\n"
+        f"- matched_lines: {start_line}-{end_line}\n"
+        f"- occurrence_count: {occurrence_count}\n"
+        f"- changed_line_count: {changed_lines}\n"
+        f"- warnings: {warning_text}\n"
+        "```diff\n"
+        f"{diff_preview}\n"
+        "```"
+    )
+
+
 # ==========================================
 # 工具函数（注册到 ToolRegistry）
 # ==========================================
@@ -440,19 +507,37 @@ async def edit_file(workspace: str, filename: str, search_block: str, replace_bl
         with open(filepath, encoding="utf-8") as f:
             content = f.read()
 
-        backup_path = backup_file(filename)
-
         new_content = None
         match_strategy = ""
+        occurrence_count = 0
+        start_line = 0
+        end_line = 0
 
         # 策略 1: 完美精确匹配
         if search_block in content:
-            new_content = content.replace(search_block, replace_block)
+            occurrence_count = content.count(search_block)
+            if occurrence_count != 1:
+                return (
+                    f"修改失败：{filename} 中 search_block 出现 {occurrence_count} 次，"
+                    "为了避免误改，请提供更长且唯一的上下文块。"
+                )
+            start_offset = content.find(search_block)
+            start_line, end_line = _line_span_for_offset(content, start_offset, search_block)
+            new_content = content.replace(search_block, replace_block, 1)
             match_strategy = "精确匹配 (Exact Match)"
 
         # 策略 2: 忽略首尾空白与换行符匹配
         elif search_block.strip() in content:
-            new_content = content.replace(search_block.strip(), replace_block.strip())
+            stripped_search = search_block.strip()
+            occurrence_count = content.count(stripped_search)
+            if occurrence_count != 1:
+                return (
+                    f"修改失败：{filename} 中去空白后的 search_block 出现 {occurrence_count} 次，"
+                    "为了避免误改，请提供更长且唯一的上下文块。"
+                )
+            start_offset = content.find(stripped_search)
+            start_line, end_line = _line_span_for_offset(content, start_offset, stripped_search)
+            new_content = content.replace(stripped_search, replace_block.strip(), 1)
             match_strategy = "首尾去空匹配 (Stripped Match)"
 
         # 策略 3: 基于 difflib 的模糊匹配
@@ -488,6 +573,9 @@ async def edit_file(workspace: str, filename: str, search_block: str, replace_bl
                 new_content = _re.sub(r'\n{4,}', '\n\n\n', new_content)
                 if not new_content.endswith('\n'):
                     new_content += '\n'
+                occurrence_count = 1
+                start_line = best_start + 1
+                end_line = best_end
                 match_strategy = f"模糊匹配 (Fuzzy Match, 相似度 {best_ratio:.1%})"
             else:
                 return (
@@ -496,12 +584,28 @@ async def edit_file(workspace: str, filename: str, search_block: str, replace_bl
                     f"可能原因：你产生了文本幻觉，或者遗漏了重要注释。请先调用 read_file 重新确认文件内容。"
                 )
 
+        if new_content == content:
+            return (
+                f"修改失败：{filename} 的替换结果没有产生任何内容变化。\n"
+                "请重新读取目标区域，确认 search_block 和 replace_block 是否真的不同。"
+            )
+
+        backup_path = backup_file(filename)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        backup_info = f" (原文件已备份到 {os.path.basename(backup_path) if backup_path else '无'})" if backup_path else ""
+        backup_info = f" (原文件已备份到 {os.path.basename(backup_path)})" if backup_path else ""
         logger.info(f"修改文件: {filename} [{match_strategy}]{backup_info}")
-        return f"成功修改 {filename}。使用策略: [{match_strategy}]。{backup_info}"
+        return _format_edit_success(
+            filename=filename,
+            match_strategy=match_strategy,
+            backup_path=backup_path,
+            start_line=start_line,
+            end_line=end_line,
+            occurrence_count=occurrence_count,
+            before=content,
+            after=new_content,
+        )
     except Exception as e:
         return f"修改文件 {filename} 时发生错误: {e!s}"
 

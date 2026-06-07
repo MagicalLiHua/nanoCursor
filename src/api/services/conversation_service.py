@@ -434,7 +434,13 @@ def _build_team_from_complexity(
         "reasons": [],
     }
     if level == "simple" and complexity.get("execution_route") != "lead_direct_reply":
-        agent_names = _unique(["Lead", *[str(agent) for agent in recommendation.get("agents", [])]])
+        intent_decision = complexity.get("intent_decision")
+        suggested_agents = (
+            intent_decision.get("suggested_agents", [])
+            if isinstance(intent_decision, dict)
+            else []
+        )
+        agent_names = _unique(["Lead", *[str(agent) for agent in suggested_agents]])
     recommendation["agents"] = agent_names
 
     members = [_member_from_agent(name, recommendation, source="runtime_composed") for name in agent_names]

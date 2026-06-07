@@ -16,18 +16,21 @@ from src.api.models import (
     SkillUpdateRequest,
     TeamAgentCreateRequest,
 )
+from src.api.services.action_execution_service import execute_action_async
 from src.api.services.agent_state import add_team_member, list_task_items, list_team_members
 from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
 from src.api.services.ephemeral_agent_service import spawn_ephemeral_agent
 from src.api.services.mcp_service import (
+    delete_mcp_server_config,
     install_mcp_server_preset,
     list_mcp_server_presets,
     list_mcp_servers,
+    set_mcp_server_enabled,
     upsert_mcp_server_config,
     validate_mcp_config,
 )
-from src.api.services.mcp_status_service import get_mcp_server_status, get_mcp_status, set_mcp_enabled
-from src.api.services.mcp_runtime_service import probe_mcp_server, list_mcp_tools, call_mcp_tool
+from src.api.services.mcp_status_service import get_mcp_server_status, get_mcp_status
+from src.api.services.mcp_runtime_service import probe_mcp_server, list_mcp_tools
 from src.api.services.skill_manifest_service import (
     list_skill_versions, restore_skill_version, save_skill_version, validate_skill_content,
 )
@@ -185,7 +188,18 @@ async def get_mcp_server_route_status(server_id: str):
 
 @router.put("/api/capabilities/mcp/{server_id}/enabled")
 async def set_mcp_enabled_route(server_id: str, data: McpEnabledRequest):
-    return set_mcp_enabled(server_id, data.enabled, _get_workspace())
+    try:
+        return set_mcp_server_enabled(server_id, data.enabled, _get_workspace())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/api/capabilities/mcp/{server_id}")
+async def delete_mcp_server_route(server_id: str):
+    try:
+        return delete_mcp_server_config(server_id, _get_workspace())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/api/capabilities/mcp/{server_id}/probe")
@@ -200,7 +214,24 @@ async def list_mcp_tools_route(server_id: str, refresh: bool = False):
 
 @router.post("/api/capabilities/mcp/{server_id}/tools/{tool_name}/call")
 async def call_mcp_tool_route(server_id: str, tool_name: str, request: McpToolCallRequest | None = None):
-    return call_mcp_tool(server_id, tool_name, request.arguments if request else {}, _get_workspace())
+    data = request or McpToolCallRequest()
+    payload = {
+        "server_id": server_id,
+        "tool_name": tool_name,
+        "arguments": data.arguments,
+        "timeout_seconds": data.timeout_seconds,
+    }
+    if data.approval_id:
+        payload["approval_id"] = data.approval_id
+    if data.permission_level:
+        payload["permission_level"] = data.permission_level
+    return await execute_action_async(
+        kind="mcp_call",
+        target=f"{server_id}/{tool_name}",
+        payload=payload,
+        thread_id=data.thread_id,
+        workspace_dir=_get_workspace(),
+    )
 
 
 # --- Team Agents ---

@@ -64,7 +64,8 @@ def policy_for_strategy(strategy_id: str) -> ToolPolicy:
     if strategy_id == "small_patch":
         return ToolPolicy(
             allowed_tools=["read_file", "search_codebase", "edit_file", "write_file",
-                           "list_directory", "task_create", "task_update", "task_list", "spawn_agent"],
+                           "list_directory", "project_context", "git_status", "git_diff",
+                           "run_tests", "task_create", "task_update", "task_list", "spawn_agent"],
             denied_tools=["delete_file"],
             approval_required=[],
             budgets={"max_tool_calls": 15, "max_file_writes": 3, "max_test_runs": 2},

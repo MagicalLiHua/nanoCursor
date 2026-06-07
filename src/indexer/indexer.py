@@ -15,7 +15,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from src.infra.logger import logger
 
@@ -35,7 +35,7 @@ class FileEntry:
 
 
 # Python entry point file names
-ENTRY_POINT_NAMES = {"cli.py", "run.py", "main.py", "app.py", "api_server.py",
+ENTRY_POINT_NAMES = {"cli.py", "run.py", "main.py", "app.py",
                      "__main__.py", "setup.py"}
 
 # Config file extensions
@@ -539,24 +539,150 @@ class ProjectIndex:
             self.entries = {}
 
 
+# ── Optional Go gRPC facade ────────────────────────────────────────
+
+
+class HybridProjectIndex:
+    """ProjectIndex-compatible facade that prefers Go gRPC and falls back to Python.
+
+    The facade keeps the public ``ProjectIndex`` query surface stable for the
+    rest of the Python backend. Go indexer is enabled by default but remains
+    non-critical because every operation can fall back to the Python indexer.
+    """
+
+    def __init__(self, workspace: Path, server_addr: str | None = None, fallback_enabled: bool = True):
+        self.workspace = Path(workspace).resolve()
+        self.entries: dict[str, FileEntry] = {}
+        self._fallback_enabled = fallback_enabled
+        self._python = ProjectIndex(self.workspace)
+        self._go = None
+        try:
+            from src.indexer.indexer_grpc import ProjectIndexClient
+
+            self._go = ProjectIndexClient(self.workspace, server_addr=server_addr)
+        except Exception as exc:
+            if not self._fallback_enabled:
+                raise
+            logger.warning(f"[Indexer] Go gRPC client unavailable, using Python fallback: {exc}")
+
+    def _fallback(self, method: str, *args, **kwargs):
+        if not self._fallback_enabled:
+            raise RuntimeError(f"Go indexer {method} failed and Python fallback is disabled")
+        func = getattr(self._python, method)
+        result = func(*args, **kwargs)
+        self.entries = self._python.entries
+        return result
+
+    def _call(self, method: str, fallback: Callable, *args, **kwargs):
+        if self._go is None:
+            return fallback(*args, **kwargs)
+        if _go_indexer_on_cooldown(self._go._addr):
+            return fallback(*args, **kwargs)
+        try:
+            result = getattr(self._go, method)(*args, **kwargs)
+            _clear_go_indexer_failure(self._go._addr)
+            return result
+        except Exception as exc:
+            if not self._fallback_enabled:
+                raise
+            logger.warning(f"[Indexer] Go gRPC {method} failed, using Python fallback: {exc}")
+            _mark_go_indexer_failed(self._go._addr)
+            return fallback(*args, **kwargs)
+
+    def build(self, force: bool = False) -> bool:
+        return bool(self._call("build", lambda force=False: self._fallback("build", force), force))
+
+    def update(self) -> int:
+        return int(self._call("update", lambda: self._fallback("update")))
+
+    def search_symbol(self, query: str) -> list[dict]:
+        return list(self._call("search_symbol", lambda query: self._fallback("search_symbol", query), query))
+
+    def search_dependents(self, module: str) -> list[str]:
+        return list(self._call("search_dependents", lambda module: self._fallback("search_dependents", module), module))
+
+    def summary(self) -> dict:
+        return dict(self._call("summary", lambda: self._fallback("summary")))
+
+    def route_summary(self) -> list[dict]:
+        return list(self._call("route_summary", lambda: self._fallback("route_summary")))
+
+    def callers(self, function_name: str) -> list[str]:
+        return list(self._call("callers", lambda function_name: self._fallback("callers", function_name), function_name))
+
+    def summary_text(self) -> str:
+        return str(self._call("summary_text", lambda: self._fallback("summary_text")))
+
+    def close(self) -> None:
+        if self._go is not None:
+            try:
+                self._go.close()
+            except Exception:
+                pass
+
+
 # 全局单例
-_index: Optional[ProjectIndex] = None
+_index: Optional[ProjectIndex | HybridProjectIndex] = None
+_GO_INDEXER_DISABLED_UNTIL_BY_ADDR: dict[str, float] = {}
 
 
-def get_project_index(workspace: Path = None) -> ProjectIndex:
+def _go_indexer_failure_cooldown_seconds() -> float:
+    from src.runtime.runtime_feature_flags import go_indexer_failure_cooldown_seconds
+
+    return go_indexer_failure_cooldown_seconds()
+
+
+def _go_indexer_on_cooldown(address: str) -> bool:
+    until = _GO_INDEXER_DISABLED_UNTIL_BY_ADDR.get(address, 0.0)
+    if until <= time.monotonic():
+        _GO_INDEXER_DISABLED_UNTIL_BY_ADDR.pop(address, None)
+        return False
+    return True
+
+
+def _mark_go_indexer_failed(address: str) -> None:
+    cooldown = _go_indexer_failure_cooldown_seconds()
+    if cooldown > 0:
+        _GO_INDEXER_DISABLED_UNTIL_BY_ADDR[address] = time.monotonic() + cooldown
+
+
+def _clear_go_indexer_failure(address: str) -> None:
+    _GO_INDEXER_DISABLED_UNTIL_BY_ADDR.pop(address, None)
+
+
+def get_project_index(workspace: Path = None) -> ProjectIndex | HybridProjectIndex:
     global _index
     if _index is None:
         if workspace is None:
             from src.infra.config import WORKSPACE_DIR
             workspace = Path(WORKSPACE_DIR)
-        _index = ProjectIndex(workspace)
+        from src.runtime.runtime_feature_flags import (
+            go_indexer_addr,
+            go_indexer_enabled,
+            go_indexer_fallback_enabled,
+        )
+
+        address = go_indexer_addr()
+        if go_indexer_enabled() and not _go_indexer_on_cooldown(address):
+            _index = HybridProjectIndex(
+                workspace,
+                server_addr=address,
+                fallback_enabled=go_indexer_fallback_enabled(),
+            )
+        else:
+            _index = ProjectIndex(workspace)
     return _index
 
 
 def reset_index():
     """重置全局索引（工作区切换时调用）"""
     global _index
+    if hasattr(_index, "close"):
+        try:
+            _index.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
     _index = None
 
 
-__all__ = ["ProjectIndex", "get_project_index", "reset_index", "FileEntry"]
+__all__ = ["ProjectIndex", "HybridProjectIndex", "get_project_index", "reset_index", "FileEntry"]

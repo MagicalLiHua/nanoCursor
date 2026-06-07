@@ -5,6 +5,7 @@ R5 pipeline: request -> path guard -> policy check -> approval if needed -> exec
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 import shutil
@@ -20,8 +21,10 @@ from src.runtime.action_policy import (
     ActionDecision,
     ActionKind,
     ActionRequest,
+    classify_action_permission,
     check_action,
 )
+from src.runtime.approval_token import create_approval_token
 from src.runtime.audit_log import AuditRecord, get_audit_repo
 from src.runtime.command_runner import run_command
 from src.infra import config as config_module
@@ -260,6 +263,29 @@ def execute_action(
         )
 
 
+async def execute_action_async(
+    kind: str,
+    target: str = "",
+    payload: dict[str, Any] | None = None,
+    thread_id: str = "",
+    workspace_dir: str = "",
+) -> dict[str, Any]:
+    """Async boundary for action execution.
+
+    The action pipeline still includes filesystem work, MCP stdio calls and
+    command execution through synchronous adapters. FastAPI async routes should
+    call this wrapper so long-running tool work does not block the event loop.
+    """
+    return await asyncio.to_thread(
+        execute_action,
+        kind=kind,
+        target=target,
+        payload=payload,
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+    )
+
+
 def _execute_low_risk_action(
     action_kind: ActionKind,
     target: str,
@@ -312,10 +338,22 @@ def _execute_low_risk_action(
         }
 
     if action_kind == ActionKind.RUN_COMMAND:
-        return _run_command_action(target, payload, workspace_dir)
+        return _run_command_action(target, payload, workspace_dir, thread_id=thread_id)
 
     if action_kind == ActionKind.MCP_CALL:
-        return _run_mcp_call_action(target, payload, thread_id, workspace_dir)
+        permission_level = classify_action_permission(action_kind, target, payload=payload)
+        approval_id = str(payload.get("approval_id") or "")
+        approved_payload = dict(payload)
+        approved_payload["permission_level"] = permission_level
+        if approval_id:
+            server_id, tool_name = _parse_mcp_call_target(target, payload)
+            approved_payload["approval_token"] = create_approval_token(
+                approval_id=approval_id,
+                command=f"{server_id}/{tool_name}",
+                workspace_dir=str(resolve_workspace_path(workspace_dir, ".")),
+                permission_level=permission_level,
+            )
+        return _run_mcp_call_action(target, approved_payload, thread_id, workspace_dir)
 
     return {
         "result": "success",
@@ -378,7 +416,18 @@ def _execute_approved_action(
 ) -> dict[str, Any]:
     """Execute high-risk actions after approval has been verified."""
     if action_kind == ActionKind.RUN_COMMAND:
-        return _run_command_action(target, payload, workspace_dir)
+        permission_level = classify_action_permission(action_kind, target, payload=payload)
+        approval_id = str(payload.get("approval_id") or "")
+        approved_payload = dict(payload)
+        approved_payload["permission_level"] = permission_level
+        if approval_id:
+            approved_payload["approval_token"] = create_approval_token(
+                approval_id=approval_id,
+                command=target,
+                workspace_dir=str(resolve_workspace_path(workspace_dir, ".")),
+                permission_level=permission_level,
+            )
+        return _run_command_action(target, approved_payload, workspace_dir, thread_id=thread_id)
 
     if action_kind == ActionKind.DELETE_FILE:
         path = resolve_workspace_path(workspace_dir, target, must_exist=True)
@@ -415,7 +464,19 @@ def _execute_approved_action(
         }
 
     if action_kind == ActionKind.MCP_CALL:
-        return _run_mcp_call_action(target, payload, thread_id, workspace_dir)
+        permission_level = classify_action_permission(action_kind, target, payload=payload)
+        approval_id = str(payload.get("approval_id") or "")
+        approved_payload = dict(payload)
+        approved_payload["permission_level"] = permission_level
+        if approval_id:
+            server_id, tool_name = _parse_mcp_call_target(target, payload)
+            approved_payload["approval_token"] = create_approval_token(
+                approval_id=approval_id,
+                command=f"{server_id}/{tool_name}",
+                workspace_dir=str(resolve_workspace_path(workspace_dir, ".")),
+                permission_level=permission_level,
+            )
+        return _run_mcp_call_action(target, approved_payload, thread_id, workspace_dir)
 
     raise ValueError(f"{action_kind.value} 审批后执行尚未接入。")
 
@@ -436,7 +497,12 @@ def _run_mcp_call_action(
         tool_name=tool_name,
         arguments=arguments,
         workspace_dir=workspace_dir,
+        run_id=thread_id,
         timeout_seconds=timeout_seconds,
+        permission_level=str(payload.get("permission_level") or classify_action_permission(ActionKind.MCP_CALL, target, payload=payload)),
+        requires_approval=bool(payload.get("approval_id") or payload.get("approval_token")),
+        approval_id=str(payload.get("approval_id") or ""),
+        approval_token=str(payload.get("approval_token") or ""),
     )
     if result.get("ok"):
         record_mcp_usage(server_id, thread_id, workspace_dir)
@@ -447,24 +513,100 @@ def _run_mcp_call_action(
     }
 
 
-def _run_command_action(target: str, payload: dict[str, Any], workspace_dir: str) -> dict[str, Any]:
+def _run_command_action(target: str, payload: dict[str, Any], workspace_dir: str, *, thread_id: str = "") -> dict[str, Any]:
     if not target.strip():
         raise ValueError("run_command 需要 command target。")
     timeout_seconds = int(payload.get("timeout_seconds") or 120)
     timeout_seconds = max(1, min(timeout_seconds, 600))
+    recorded_runtime_event_ids: set[str] = set()
+
+    def record_runtime_event(event: dict[str, Any]) -> None:
+        if not thread_id or not isinstance(event, dict):
+            return
+        event_id = str(event.get("id") or "")
+        if event_id and event_id in recorded_runtime_event_ids:
+            return
+        _record_go_runtime_event(
+            thread_id,
+            workspace_dir,
+            event,
+            fallback_tool_run_id=str(event.get("tool_run_id") or ""),
+        )
+        if event_id:
+            recorded_runtime_event_ids.add(event_id)
+
     result = run_command(
         target,
         cwd=resolve_workspace_path(workspace_dir, "."),
         timeout_seconds=timeout_seconds,
         max_stdout_chars=int(payload.get("max_stdout_chars") or 100_000),
         max_stderr_chars=int(payload.get("max_stderr_chars") or 20_000),
+        permission_level=str(payload.get("permission_level") or classify_action_permission(ActionKind.RUN_COMMAND, target, payload=payload)),
+        approval_id=str(payload.get("approval_id") or "") or None,
+        approval_token=str(payload.get("approval_token") or "") or None,
+        thread_id=thread_id or None,
+        on_runtime_event=record_runtime_event if thread_id else None,
     )
+    if thread_id and result.get("backend") == "go_runtime":
+        _record_go_runtime_events(
+            thread_id,
+            workspace_dir,
+            result,
+            skip_event_ids=recorded_runtime_event_ids,
+        )
     ok = result.get("exit_code") == 0 and not result.get("timed_out")
     return {
         "result": "success" if ok else "failure",
         "reason": "命令执行成功。" if ok else "命令执行失败。",
         "detail": result,
     }
+
+
+def _record_go_runtime_events(
+    thread_id: str,
+    workspace_dir: str,
+    result: dict[str, Any],
+    *,
+    skip_event_ids: set[str] | None = None,
+) -> None:
+    runtime_events = result.get("runtime_events")
+    if not isinstance(runtime_events, list):
+        return
+    tool_run_id = str(result.get("tool_run_id") or "")
+    for event in runtime_events:
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("id") or "")
+        if event_id and skip_event_ids and event_id in skip_event_ids:
+            continue
+        _record_go_runtime_event(thread_id, workspace_dir, event, fallback_tool_run_id=tool_run_id)
+
+
+def _record_go_runtime_event(
+    thread_id: str,
+    workspace_dir: str,
+    event: dict[str, Any],
+    *,
+    fallback_tool_run_id: str = "",
+) -> None:
+    event_type = str(event.get("type") or "runtime.tool_event")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    content = str(payload.get("text") or payload.get("message") or payload.get("error") or "")
+    get_event_store().append_event(
+        thread_id,
+        "runtime_tool_event",
+        title=event_type,
+        content=content[:1000],
+        agent="runtime",
+        payload={
+            "backend": "go_runtime",
+            "tool_run_id": str(event.get("tool_run_id") or fallback_tool_run_id),
+            "runtime_event_id": event.get("id"),
+            "runtime_event_type": event_type,
+            "runtime_payload": payload,
+        },
+        workspace_dir=workspace_dir,
+    )
 
 
 def _trash_root(workspace: Path, thread_id: str) -> Path:
@@ -580,9 +722,15 @@ def _audit_and_return(
 
 def _emit_action_event(record: AuditRecord, workspace_dir: str | None = None) -> None:
     try:
+        if record.result == "pending":
+            event_type = "approval_requested"
+        elif record.result == "success":
+            event_type = "action_executed"
+        else:
+            event_type = "action_failed"
         get_event_store().append_event(
             thread_id=record.thread_id,
-            event_type="action_executed" if record.result == "success" else "action_failed",
+            event_type=event_type,
             title=f"Action {record.kind}: {record.result}",
             content=record.reason,
             agent="system",

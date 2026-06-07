@@ -7,10 +7,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.api.models import AgentEvent
 from src.infra import config as config_module
+from src.infra.logging import get_logger
+
+
+logger = get_logger()
+EventListener = Callable[[AgentEvent], None]
 
 
 class EventStore:
@@ -18,6 +23,28 @@ class EventStore:
 
     def __init__(self):
         self._lock = threading.RLock()
+        self._listeners: set[EventListener] = set()
+
+    def add_listener(self, listener: EventListener) -> bool:
+        """Register an event listener, returning whether it was newly added."""
+        with self._lock:
+            if listener in self._listeners:
+                return False
+            self._listeners.add(listener)
+            return True
+
+    def remove_listener(self, listener: EventListener) -> bool:
+        """Remove a previously registered event listener."""
+        with self._lock:
+            if listener not in self._listeners:
+                return False
+            self._listeners.remove(listener)
+            return True
+
+    def listener_count(self) -> int:
+        """Return the number of registered event listeners."""
+        with self._lock:
+            return len(self._listeners)
 
     def _root(self, workspace_dir: str | None = None) -> Path:
         root = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
@@ -143,6 +170,16 @@ class EventStore:
         with self._lock:
             with self.events_path(thread_id, workspace_dir).open("a", encoding="utf-8") as f:
                 f.write(event.model_dump_json() + "\n")
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.warning(
+                    "event_store_listener_failed",
+                    extra={"thread_id": thread_id, "event_type": event_type},
+                    exc_info=True,
+                )
         return event
 
     def list_events(
@@ -181,7 +218,14 @@ class EventStore:
             from src.api.services.run_history import upsert_run_index
             upsert_run_index(session, workspace_dir)
         except Exception:
-            pass
+            logger.warning(
+                "run_index_update_failed",
+                extra={
+                    "thread_id": str(session.get("thread_id") or ""),
+                    "workspace_id": str(workspace_dir or session.get("workspace_dir") or ""),
+                },
+                exc_info=True,
+            )
 
 
 event_store = EventStore()

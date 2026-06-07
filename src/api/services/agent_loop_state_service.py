@@ -295,6 +295,24 @@ def validate_loop_action(state: AgentLoopState, action: LeadAction) -> dict[str,
                 suggested_repair="ask_clarification",
             )
 
+    if state.intent.route == "small_edit":
+        allowed = {
+            "inspect_project",
+            "call_tool",
+            "request_approval",
+            "run_checks",
+            "summarize",
+            "finish",
+            "fail",
+        }
+        if action_type not in allowed:
+            return _loop_gate_decision(
+                False,
+                f"small_edit 只允许受控局部修改动作，不能执行 {action_type}。",
+                "small_edit_action_mismatch",
+                suggested_repair="inspect_project",
+            )
+
     if state.intent.route in {"read_only", "review_only"} and action_type in {"run_checks"}:
         return _loop_gate_decision(
             False,
@@ -302,6 +320,36 @@ def validate_loop_action(state: AgentLoopState, action: LeadAction) -> dict[str,
             "read_only_run_checks",
             suggested_repair="inspect_project",
         )
+
+    if action_type == "call_tool" and action.tool_call:
+        tool_name = str(action.tool_call.get("tool") or action.tool_call.get("kind") or "")
+        tool_input = action.tool_call.get("input") if isinstance(action.tool_call.get("input"), dict) else {}
+        permission = classify_tool_permission(tool_name, tool_input)
+        if state.intent.route in {"read_only", "review_only"} and permission in {
+            "safe_write",
+            "risky_write",
+            "mcp_write",
+            "shell_risky",
+            "external_risky",
+        }:
+            return _loop_gate_decision(
+                False,
+                f"{state.intent.route} 不能提交 {permission} 工具动作。",
+                "read_only_tool_action_mismatch",
+                suggested_repair="inspect_project",
+            )
+        if state.intent.route == "small_edit" and permission in {
+            "risky_write",
+            "shell_risky",
+            "external_risky",
+            "mcp_write",
+        }:
+            return _loop_gate_decision(
+                False,
+                f"small_edit 不能提交 {permission} 工具动作，应升级为更高风险路由。",
+                "small_edit_tool_action_mismatch",
+                suggested_repair="inspect_project",
+            )
 
     if action_type == "request_approval" and not action.approval:
         return _loop_gate_decision(
@@ -349,6 +397,20 @@ def suggest_loop_action_repair(
         return LeadAction(
             type="inspect_project",
             goal=action.goal or "Inspect project context without running commands.",
+            agent="Lead",
+            task_id=action.task_id,
+        ).model_dump()
+    if code == "read_only_tool_action_mismatch":
+        return LeadAction(
+            type="inspect_project",
+            goal="Inspect project context without write or risky tool actions.",
+            agent="Lead",
+            task_id=action.task_id,
+        ).model_dump()
+    if code in {"small_edit_action_mismatch", "small_edit_tool_action_mismatch"}:
+        return LeadAction(
+            type="inspect_project",
+            goal="Inspect project context before a controlled local edit.",
             agent="Lead",
             task_id=action.task_id,
         ).model_dump()
@@ -556,6 +618,8 @@ def check_loop_tool_guard(
         blocked_reason = f"{route} 不允许高风险 shell 或外部工具。"
     elif route == "test_only" and permission == "shell_risky":
         blocked_reason = "test_only 只允许安全测试/检查命令，禁止高风险 shell。"
+    elif route == "small_edit" and permission in {"risky_write", "shell_risky", "external_risky", "mcp_write"}:
+        blocked_reason = f"small_edit 只允许受控局部修改，禁止 {permission} 工具。"
 
     if not blocked_reason:
         return None
@@ -609,6 +673,8 @@ def check_loop_action_guard(
         blocked_reason = f"{route} 不允许高风险 shell 或外部工具。"
     elif route == "test_only" and permission == "shell_risky":
         blocked_reason = "test_only 只允许安全测试/检查命令，禁止高风险 shell。"
+    elif route == "small_edit" and permission in {"risky_write", "shell_risky", "external_risky", "mcp_write"}:
+        blocked_reason = f"small_edit 只允许受控局部修改，禁止 {permission} 工具。"
 
     if not blocked_reason:
         return None

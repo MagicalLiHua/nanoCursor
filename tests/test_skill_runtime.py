@@ -124,10 +124,9 @@ agents:
 Review the API changes for compatibility issues.""")
 
         skills = select_skills_for_run("review the API changes", workspace_dir=str(ws))
-        assert len(skills) == 1
-        assert skills[0]["name"] == "api review"
+        assert any(skill["name"] == "API Review" for skill in skills)
 
-    def test_team_role_match_boosts_score(self, tmp_path):
+    def test_team_role_match_boosts_relevant_skill_but_does_not_trigger_alone(self, tmp_path):
         ws = tmp_path / "ws"
         ws.mkdir()
         skill_dir = ws / ".nanocursor" / "skills" / "code-review"
@@ -144,7 +143,14 @@ Review code quality.""")
             team=[{"role": "reviewer"}],
             workspace_dir=str(ws),
         )
-        assert len(skills) == 1
+        assert all(skill["name"] != "Code Review" for skill in skills)
+
+        skills = select_skills_for_run(
+            "review code quality",
+            team=[{"role": "reviewer"}],
+            workspace_dir=str(ws),
+        )
+        assert any(skill["name"] == "Code Review" for skill in skills)
 
     def test_no_match_returns_empty(self, tmp_path):
         ws = tmp_path / "ws"

@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0.0,<3.0.0",
     "tiktoken>=0.9.0,<0.10.0",
-    "python-dotenv>=1.0.0,<1.1.0",
+    "python-dotenv>=1.2.2,<2.0.0",
     "docker>=7.0.0,<8.0.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
@@ -47,9 +47,6 @@ dev = [
     "pre-commit>=3.0.0",
 ]
 
-[tool.setuptools]
-py-modules = ["api_server"]
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src", "src.*"]
@@ -67,7 +64,7 @@ addopts = "-v --tb=short"
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["src", "api_server"]
+source = ["src"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
@@ -104,7 +101,7 @@ select = [
     "RUF",   # Ruff-specific rules
 ]
 ignore = [
-    "E402",   # module-level imports after path setup (intentional in api_server.py)
+    "E402",   # module-level imports after path setup (intentional in legacy runtime)
     "E501",   # line too long (handled by formatter)
     "RUF001", # Chinese/fullwidth punctuation in string literals (cosmetic)
     "RUF002", # Chinese/fullwidth punctuation in docstrings

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -590,3 +591,33 @@ def emit_demo_run(
     if status_callback:
         status_callback("completed")
     emit("done", "Demo Run 完成", "稳定演示流程已完成。", "lead", {"status": "completed"})
+
+
+def demo_event_delay() -> float:
+    """Return the bounded delay used by deterministic demo events."""
+    try:
+        return max(0.0, min(float(os.getenv("NANOCURSOR_DEMO_EVENT_DELAY", "0.08")), 2.0))
+    except ValueError:
+        return 0.08
+
+
+def run_demo_workflow(thread_id: str, workspace_dir: str, artifacts: dict[str, Any] | None = None) -> None:
+    """Execute and finalize a demo run without loading the legacy runtime."""
+    from src.api.services.deterministic_run_service import run_deterministic_worker
+    from src.api.services.runtime_registry_service import get_runtime_registry
+
+    registry = get_runtime_registry()
+    run_deterministic_worker(
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+        execute=lambda status_callback: emit_demo_run(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            store=registry.event_store,
+            delay=demo_event_delay(),
+            status_callback=status_callback,
+            artifacts=artifacts,
+        ),
+        error_title="Demo Run 异常",
+        registry=registry,
+    )

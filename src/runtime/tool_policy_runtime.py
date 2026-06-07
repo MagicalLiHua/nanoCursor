@@ -23,7 +23,6 @@ READ_ONLY_TOOLS = frozenset(
         "git_status",
         "git_diff",
         "task_list",
-        "TodoList",
         "recall_memories",
     }
 )
@@ -33,10 +32,8 @@ SAFE_WRITE_TOOLS = frozenset(
         "edit_file",
         "task_create",
         "task_update",
-        "TodoWrite",
         "add_memory",
         "spawn_agent",
-        "task",
     }
 )
 RISKY_WRITE_TOOLS = frozenset(
@@ -51,6 +48,63 @@ RISKY_WRITE_TOOLS = frozenset(
 SHELL_TOOLS = frozenset({"bash", "run_bash", "run_tests"})
 HIGH_RISK_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky", "mcp_write"})
 DEFAULT_APPROVAL_LEVELS = frozenset({"risky_write", "shell_risky", "external_risky", "mcp_write"})
+
+_SENSITIVE_FILE_NAMES = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.production",
+        ".gitignore",
+        "dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "requirements.txt",
+        "requirements-dev.txt",
+        "pyproject.toml",
+        "poetry.lock",
+        "uv.lock",
+        "go.mod",
+        "go.sum",
+        "cargo.toml",
+        "cargo.lock",
+        "pom.xml",
+        "build.gradle",
+        "settings.gradle",
+        "makefile",
+    }
+)
+_SENSITIVE_PATH_SEGMENTS = frozenset(
+    {
+        ".github",
+        ".gitlab",
+        ".circleci",
+        ".husky",
+        ".ssh",
+        ".aws",
+        ".kube",
+        "secrets",
+        "credentials",
+    }
+)
+_SENSITIVE_PATH_TOKENS = (
+    "secret",
+    "credential",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "token",
+    "password",
+)
+_LARGE_WRITE_BYTES = 200 * 1024
+_LARGE_EDIT_TEXT_BYTES = 12_000
+_LARGE_EDIT_LINES = 200
 
 _SHELL_SAFE_PREFIXES = (
     ("ls",),
@@ -246,6 +300,10 @@ def classify_tool_permission(tool_name: str, tool_input: dict[str, Any] | None =
     if name in RISKY_WRITE_TOOLS:
         return "risky_write"
     if name in SAFE_WRITE_TOOLS:
+        if name in {"write_file", "edit_file"} and _is_sensitive_write_target(payload):
+            return "risky_write"
+        if name == "write_file" and _is_large_write_payload(payload):
+            return "risky_write"
         if name == "edit_file":
             old_text = str(payload.get("old_text", "") or "")
             new_text = str(payload.get("new_text", "") or "")
@@ -255,12 +313,41 @@ def classify_tool_permission(tool_name: str, tool_input: dict[str, Any] | None =
                 line_span = int(end_line) - int(start_line) + 1 if start_line and end_line else 0
             except (TypeError, ValueError):
                 line_span = 0
-            if max(len(old_text), len(new_text)) > 12000 or line_span > 250:
+            if max(len(old_text), len(new_text)) > _LARGE_EDIT_TEXT_BYTES or line_span > _LARGE_EDIT_LINES:
                 return "risky_write"
         return "safe_write"
     if name.startswith("mcp_") or name == "mcp_call":
         return _classify_mcp_tool_permission(name, payload)
     return "external_risky"
+
+
+def _file_tool_path(payload: dict[str, Any]) -> str:
+    return str(
+        payload.get("path")
+        or payload.get("file_path")
+        or payload.get("filename")
+        or payload.get("target")
+        or ""
+    ).strip()
+
+
+def _is_sensitive_write_target(payload: dict[str, Any]) -> bool:
+    path = _file_tool_path(payload).replace("\\", "/").strip()
+    if not path:
+        return False
+    lowered = path.lower().strip("/")
+    parts = [part for part in lowered.split("/") if part and part not in {".", ".."}]
+    basename = parts[-1] if parts else lowered
+    if basename in _SENSITIVE_FILE_NAMES:
+        return True
+    if any(part in _SENSITIVE_PATH_SEGMENTS for part in parts):
+        return True
+    return any(token in lowered for token in _SENSITIVE_PATH_TOKENS)
+
+
+def _is_large_write_payload(payload: dict[str, Any]) -> bool:
+    content = str(payload.get("content") or payload.get("new_text") or "")
+    return len(content.encode("utf-8", errors="ignore")) > _LARGE_WRITE_BYTES
 
 
 def _classify_mcp_tool_permission(tool_name: str, payload: dict[str, Any]) -> str:
@@ -386,6 +473,7 @@ class ToolPolicyRuntime:
 
     def check(self, tool_name: str, tool_input: dict[str, Any] | None = None) -> ToolPolicyDecision:
         permission_level = classify_tool_permission(tool_name, tool_input)
+        payload = tool_input if isinstance(tool_input, dict) else {}
 
         # 1. Denied
         if tool_name in self.denied_tools:
@@ -415,6 +503,19 @@ class ToolPolicyRuntime:
             d = ToolPolicyDecision(
                 tool=tool_name, allowed=False,
                 reason=f"预算超限: {exceeded}", budget_exceeded=exceeded,
+                risk_level=self.risk_level,
+                permission_level=permission_level,
+            )
+            self.decisions.append(d.to_dict())
+            return d
+
+        # 3.5. Invalid shell calls should be repaired by the agent, not approved by the user.
+        if tool_name in SHELL_TOOLS and tool_name != "run_tests" and not str(payload.get("command") or "").strip():
+            d = ToolPolicyDecision(
+                tool=tool_name,
+                allowed=False,
+                status="blocked",
+                reason=f"{tool_name} 缺少 command 参数，无法执行或审批。",
                 risk_level=self.risk_level,
                 permission_level=permission_level,
             )

@@ -1,5 +1,6 @@
 """Action policy and audit log tests."""
 
+import asyncio
 import json
 import sys
 import uuid
@@ -17,6 +18,7 @@ from src.runtime.audit_log import AuditLogRepository, AuditRecord, get_audit_rep
 from src.api.services.action_execution_service import (
     check_and_decide,
     execute_action,
+    execute_action_async,
     get_audit_trail,
     record_action_result,
 )
@@ -321,6 +323,103 @@ class TestActionExecutionService:
         assert result["result"] == "success"
         assert "hello" in result["detail"]["stdout"]
 
+    def test_safe_run_command_async_executes_without_approval(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        result = asyncio.run(execute_action_async(
+            kind="run_command", target="echo hello",
+            thread_id="run_cmd_safe_async", workspace_dir=str(ws),
+        ))
+        assert result["allowed"] is True
+        assert result["requires_approval"] is False
+        assert result["risk"] == "medium"
+        assert result["permission_level"] == "shell_safe"
+        assert result["result"] == "success"
+        assert "hello" in result["detail"]["stdout"]
+
+    def test_go_runtime_events_are_recorded_in_event_store(self, tmp_path, monkeypatch):
+        from src.api.services import action_execution_service as service
+        from src.api.services.event_store import get_event_store
+
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+
+        def fake_run_command(command, cwd, **kwargs):
+            return {
+                "backend": "go_runtime",
+                "tool_run_id": "tr_event",
+                "command": command,
+                "cwd": str(cwd),
+                "exit_code": 0,
+                "stdout": "hello\n",
+                "stderr": "",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "duration_ms": 1,
+                "timed_out": False,
+                "runtime_events": [
+                    {"id": "evt_1", "type": "tool.stdout", "payload": {"text": "hello\n"}},
+                    {"id": "evt_2", "type": "tool.completed", "payload": {"exit_code": 0}},
+                ],
+            }
+
+        monkeypatch.setattr(service, "run_command", fake_run_command)
+
+        result = execute_action(
+            kind="run_command", target="echo hello",
+            thread_id="run_go_events", workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        events = get_event_store().list_events("run_go_events", str(ws))
+        runtime_events = [event for event in events if event.type == "runtime_tool_event"]
+        assert [event.title for event in runtime_events] == ["tool.stdout", "tool.completed"]
+        assert runtime_events[0].payload["tool_run_id"] == "tr_event"
+
+    def test_go_runtime_live_events_are_not_recorded_twice(self, tmp_path, monkeypatch):
+        from src.api.services import action_execution_service as service
+        from src.api.services.event_store import get_event_store
+
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+
+        live_event = {"id": "evt_live", "tool_run_id": "tr_live", "type": "tool.stdout", "payload": {"text": "hello\n"}}
+        done_event = {"id": "evt_done", "tool_run_id": "tr_live", "type": "tool.completed", "payload": {"exit_code": 0}}
+
+        def fake_run_command(command, cwd, **kwargs):
+            callback = kwargs.get("on_runtime_event")
+            assert callback is not None
+            callback(live_event)
+            callback(done_event)
+            return {
+                "backend": "go_runtime",
+                "tool_run_id": "tr_live",
+                "command": command,
+                "cwd": str(cwd),
+                "exit_code": 0,
+                "stdout": "hello\n",
+                "stderr": "",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "duration_ms": 1,
+                "timed_out": False,
+                "runtime_events": [live_event, done_event],
+            }
+
+        monkeypatch.setattr(service, "run_command", fake_run_command)
+
+        result = execute_action(
+            kind="run_command",
+            target="echo hello",
+            thread_id="run_go_live_events",
+            workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        events = get_event_store().list_events("run_go_live_events", str(ws))
+        runtime_events = [event for event in events if event.type == "runtime_tool_event"]
+        assert [event.payload["runtime_event_id"] for event in runtime_events] == ["evt_live", "evt_done"]
+
     def test_high_risk_execute_creates_pending_approval(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
@@ -365,6 +464,54 @@ class TestActionExecutionService:
         assert result["detail"]["exit_code"] == 0
         trail = get_audit_trail("run_cmd_approved", str(ws))
         assert trail["records"][-1]["decision"] == "approved"
+
+    def test_approved_run_command_passes_runtime_approval_token(self, tmp_path, monkeypatch):
+        from src.api.services import action_execution_service as service
+
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        captured = {}
+
+        def fake_run_command(command, cwd, **kwargs):
+            captured.update({"command": command, "cwd": str(cwd), **kwargs})
+            return {
+                "backend": "fake",
+                "command": command,
+                "cwd": str(cwd),
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": "",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "duration_ms": 1,
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(service, "run_command", fake_run_command)
+
+        pending = execute_action(
+            kind="run_command", target="rm -rf dist",
+            thread_id="run_cmd_token", workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_cmd_token",
+            pending["approval_id"],
+            approved=True,
+            comment="允许",
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="run_command", target="rm -rf dist",
+            payload={"approval_id": pending["approval_id"]},
+            thread_id="run_cmd_token", workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        assert captured["permission_level"] == "shell_risky"
+        assert captured["approval_id"] == pending["approval_id"]
+        assert captured["approval_token"]
 
     def test_rejected_run_command_does_not_execute(self, tmp_path):
         ws = tmp_path / "workspace"
@@ -539,6 +686,59 @@ class TestActionExecutionService:
         trail = get_audit_trail("run_mcp_approved", str(ws))
         assert trail["records"][-1]["kind"] == "mcp_call"
 
+    def test_approved_mcp_call_passes_runtime_approval_token(self, tmp_path, monkeypatch):
+        from src.api.services import action_execution_service as service
+
+        ws = tmp_path / "workspace"
+        ws.mkdir(parents=True)
+        captured = {}
+
+        def fake_call_mcp_tool(**kwargs):
+            captured.update(kwargs)
+            return {
+                "server_id": kwargs["server_id"],
+                "tool": kwargs["tool_name"],
+                "ok": True,
+                "result": {"content": [{"type": "text", "text": "ok"}]},
+                "transport": "go_stdio",
+            }
+
+        monkeypatch.setattr(service, "call_mcp_tool", fake_call_mcp_tool)
+
+        pending = execute_action(
+            kind="mcp_call",
+            target="mcp.fake/write_note",
+            payload={"server_id": "mcp.fake", "tool_name": "write_note", "arguments": {"text": "hello"}},
+            thread_id="run_mcp_token",
+            workspace_dir=str(ws),
+        )
+        from src.api.services.approval_service import resolve_tool_approval
+        resolve_tool_approval(
+            "run_mcp_token",
+            pending["approval_id"],
+            approved=True,
+            workspace_dir=str(ws),
+        )
+
+        result = execute_action(
+            kind="mcp_call",
+            target="mcp.fake/write_note",
+            payload={
+                "approval_id": pending["approval_id"],
+                "server_id": "mcp.fake",
+                "tool_name": "write_note",
+                "arguments": {"text": "hello"},
+            },
+            thread_id="run_mcp_token",
+            workspace_dir=str(ws),
+        )
+
+        assert result["result"] == "success"
+        assert captured["permission_level"] == "mcp_write"
+        assert captured["requires_approval"] is True
+        assert captured["approval_id"] == pending["approval_id"]
+        assert captured["approval_token"]
+
     def test_readonly_mcp_call_executes_without_approval(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
@@ -592,7 +792,7 @@ class TestActionExecutionService:
 class TestActionPolicyAPI:
     def test_check_endpoint(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         thread_id = f"run_ap_{uuid.uuid4().hex[:8]}"
         resp = client.post(
@@ -605,7 +805,7 @@ class TestActionPolicyAPI:
 
     def test_execute_endpoint(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         thread_id = f"run_ae_{uuid.uuid4().hex[:8]}"
         resp = client.post(
@@ -618,7 +818,7 @@ class TestActionPolicyAPI:
 
     def test_audit_endpoint(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         thread_id = f"run_aud_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/audit")
@@ -630,7 +830,7 @@ class TestActionPolicyAPI:
     def test_execute_and_check_audit(self, tmp_path):
         """Execute an action, then verify it appears in audit trail."""
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -665,7 +865,7 @@ class TestActionPolicyAPI:
 
     def test_check_endpoint_denies_path_escape(self, tmp_path):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -687,7 +887,7 @@ class TestActionPolicyAPI:
 
     def test_execute_endpoint_high_risk_returns_pending_not_500(self, tmp_path):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -709,7 +909,7 @@ class TestActionPolicyAPI:
 
     def test_execute_endpoint_runs_command_after_approval(self, tmp_path):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
         from src.api.services.approval_service import resolve_tool_approval
 

@@ -112,7 +112,7 @@ async def _call_classifier(
     conversation_summary: str = "",
 ) -> dict[str, Any] | None:
     """Make the actual LLM call for classification."""
-    from src.infra.llm_config import create_client, MODEL
+    from src.infra.llm_config import create_client, get_model_name
 
     client = create_client()
 
@@ -126,7 +126,7 @@ async def _call_classifier(
     )
 
     resp = await client.messages.create(
-        model=MODEL,
+        model=get_model_name(),
         max_tokens=300,
         temperature=0,
         messages=[{"role": "user", "content": user_message}],

@@ -163,6 +163,9 @@ class TestEditFile:
         (tmp_workspace / "target.py").write_text("x = 1\ny = 2\n")
         result = self._edit(tmp_workspace, "target.py", "x = 1", "x = 100")
         assert "Exact" in result or "精确" in result or "Match" in result
+        assert "Edit Receipt:" in result
+        assert "matched_lines: 1-1" in result
+        assert "changed_line_count:" in result
         assert (tmp_workspace / "target.py").read_text() == "x = 100\ny = 2\n"
 
     def test_stripped_match(self, tmp_workspace):
@@ -191,6 +194,26 @@ class TestEditFile:
         from src.tools.file_tools import edit_file
         result = _run_async(edit_file(str(tmp_workspace), "ghost.py", "x", "y"))
         assert "不存在" in result
+
+    def test_duplicate_match_is_rejected(self, tmp_workspace):
+        target = tmp_workspace / "duplicate.py"
+        target.write_text("x = 1\ny = 2\nx = 1\n")
+
+        result = self._edit(tmp_workspace, "duplicate.py", "x = 1", "x = 100")
+
+        assert "修改失败" in result
+        assert "出现 2 次" in result
+        assert target.read_text() == "x = 1\ny = 2\nx = 1\n"
+
+    def test_noop_edit_is_rejected(self, tmp_workspace):
+        target = tmp_workspace / "noop.py"
+        target.write_text("x = 1\ny = 2\n")
+
+        result = self._edit(tmp_workspace, "noop.py", "x = 1", "x = 1")
+
+        assert "修改失败" in result
+        assert "没有产生任何内容变化" in result
+        assert target.read_text() == "x = 1\ny = 2\n"
 
 
 # ---------------------------------------------------------------------------

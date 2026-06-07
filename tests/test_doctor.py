@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 
 def test_system_version():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/version")
     assert resp.status_code == 200
@@ -12,7 +12,7 @@ def test_system_version():
 
 
 def test_system_paths():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/paths")
     assert resp.status_code == 200
@@ -22,7 +22,7 @@ def test_system_paths():
 
 
 def test_system_doctor():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/doctor")
     assert resp.status_code == 200
@@ -33,7 +33,7 @@ def test_system_doctor():
 
 
 def test_system_doctor_checks_have_ids():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/doctor")
     for check in resp.json()["checks"]:
@@ -44,7 +44,7 @@ def test_system_doctor_checks_have_ids():
 
 
 def test_system_doctor_respects_workspace_dir(tmp_path):
-    from api_server import app
+    from src.api.server import app
     workspace = tmp_path / "doctor-workspace"
     workspace.mkdir()
 

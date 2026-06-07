@@ -20,7 +20,13 @@ def main() -> int:
     failed = 0
 
     # Backend compile
-    py_patterns = ["api_server.py", "src/api/services/*.py", "src/runtime/*.py", "src/agent/*.py"]
+    py_patterns = [
+        "src/api/*.py",
+        "src/api/routes/*.py",
+        "src/api/services/*.py",
+        "src/runtime/*.py",
+        "src/agent/*.py",
+    ]
     for pattern in py_patterns:
         matches = list(PROJECT_ROOT.glob(pattern))
         if matches:

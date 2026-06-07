@@ -1,7 +1,7 @@
 import React from "react";
 import {
   MessageSquare, FolderOpen, Settings, User,
-  Plus, File, Folder, Search, SquarePen, FolderGit2
+  Plus, File, Folder, Search, SquarePen, FolderGit2, Moon, Sun
 } from "lucide-react";
 
 function shortPath(path) {
@@ -322,9 +322,35 @@ const NAV_ITEMS = [
   { id: "files", icon: FolderOpen, label: "项目" },
 ];
 
+function ThemeToggle() {
+  const [theme, setTheme] = React.useState(() => localStorage.getItem("nc_theme") || "light");
+  const isDark = theme === "dark";
+
+  React.useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("nc_theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  };
+
+  return (
+    <button
+      className={`rail-icon theme-toggle ${isDark ? "active" : ""}`}
+      onClick={toggleTheme}
+      title={isDark ? "切换浅色模式" : "切换深色模式"}
+      type="button"
+      aria-label={isDark ? "切换浅色模式" : "切换深色模式"}
+    >
+      {isDark ? <Sun size={19} /> : <Moon size={19} />}
+    </button>
+  );
+}
+
 export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelectRun, onOpenWorkspace, onWorkspaceInputChange, onOpenSettings }) {
-  const [activePanel, setActivePanel] = React.useState(null);
   const isCollapsed = state.layout?.sidebarCollapsed;
+  const [activePanel, setActivePanel] = React.useState(() => (isCollapsed ? null : "sessions"));
   const workspaceDir = state.projectOverview?.workspace_dir || state.workspaceDir || "";
 
   React.useEffect(() => {
@@ -332,10 +358,13 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
       if (!activePanel) return;
       if (e.target.closest(".sidebar-v2")) return;
       setActivePanel(null);
+      if (!isCollapsed) {
+        onToggleSidebar?.();
+      }
     }
     document.addEventListener("pointerdown", handleOutsidePointerDown);
     return () => document.removeEventListener("pointerdown", handleOutsidePointerDown);
-  }, [activePanel]);
+  }, [activePanel, isCollapsed, onToggleSidebar]);
 
   const handleNavClick = (id) => {
     if (activePanel === id) {
@@ -382,6 +411,7 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
           ))}
         </div>
         <div className="rail-bottom">
+          <ThemeToggle />
           <button className="rail-icon" onClick={onOpenSettings} title="设置" type="button">
             <Settings size={20} />
           </button>

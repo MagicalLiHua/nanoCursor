@@ -81,7 +81,7 @@ class MetricsCollector:
             })
             if len(self.recent_llm_records) > 50:
                 self.recent_llm_records = self.recent_llm_records[-50:]
-        logger.info(f"[Metrics] LLM 调用 | node={node_name} | in={input_tokens} out={output_tokens} | latency={latency_ms:.0f}ms")
+        logger.debug(f"[Metrics] LLM 调用 | node={node_name} | in={input_tokens} out={output_tokens} | latency={latency_ms:.0f}ms")
 
     # ----- 工具调用指标 -----
 

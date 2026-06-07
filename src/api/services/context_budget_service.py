@@ -54,6 +54,8 @@ STRATEGY_BUDGET_OVERRIDES = {
 
 PROTECTED_CONTEXT_FIELDS = {
     "task_summary": "P0 user_request",
+    "active_task": "P0 active_task",
+    "tool_policy": "P0 tool_policy",
     "current_plan": "P0 active_plan",
 }
 
@@ -151,6 +153,7 @@ def trim_context_pack(pack: ContextPack, budget: dict[str, Any]) -> ContextPack:
         "used_tokens_estimate": used_tokens,
         "protected_tokens_estimate": protected_tokens,
         "protected_sections": list(PROTECTED_CONTEXT_FIELDS.values()),
+        "protected_overflow": protected_tokens > int(budget.get("max_tokens", 12000) or 12000),
         "utilization": round(used_tokens / max(int(budget.get("max_tokens", 12000) or 12000), 1), 4),
         "selected_file_budget": max_selected_items,
         "outline_budget": max_outline_items,
@@ -212,4 +215,7 @@ def _estimate_protected_tokens(pack: ContextPack) -> int:
     """Estimate non-trimmable P0 context usage."""
     protected_chars = len(pack.task_summary or "")
     protected_chars += len(str(pack.current_plan or ""))
+    protected_chars += len(str(pack.tool_policy or ""))
+    active_task = pack.turn_context.get("active_task") if isinstance(pack.turn_context, dict) else {}
+    protected_chars += len(str(active_task or ""))
     return protected_chars // 3

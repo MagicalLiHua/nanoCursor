@@ -525,7 +525,7 @@ def test_archive_and_cleanup_expired_agents(tmp_path):
 
 
 def test_ephemeral_agent_api_lifecycle(tmp_path):
-    from api_server import app
+    from src.api.server import app
     import src.infra.config as cfg
 
     workspace = tmp_path / "workspace"

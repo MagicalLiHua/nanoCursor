@@ -4,6 +4,11 @@ import { renderMarkdown } from "../../core/markdown.js";
 import { ArrowUp, Code2, FolderSearch, Pencil, Plus, Timer } from "lucide-react";
 import AgentActivityStream from "./AgentActivityStream.jsx";
 import ToolCallBubble from "./ToolCallBubble.jsx";
+import {
+  agentActivityKey,
+  currentAgentActivities,
+  latestUserMessageIndex as findLatestUserMessageIndex,
+} from "../../state/chatState.js";
 const AVATAR_LETTERS = {
   lead: "L",
   planner: "P",
@@ -33,12 +38,16 @@ function WelcomeScreen({ onSubmit }) {
     { icon: FolderSearch, label: "看项目", prompt: "帮我看看这个项目的结构和可以继续完善的点" },
   ];
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
+  const submitInput = () => {
     if (inputValue.trim()) {
       onSubmit?.(inputValue.trim());
       setInputValue("");
     }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    submitInput();
   };
 
   return (
@@ -52,6 +61,12 @@ function WelcomeScreen({ onSubmit }) {
             className="welcome-input"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitInput();
+              }
+            }}
             placeholder="描述一个代码任务，或者问问当前项目"
             autoFocus
           />
@@ -72,31 +87,7 @@ function WelcomeScreen({ onSubmit }) {
   );
 }
 
-function normalizeAgentKey(value = "") {
-  const clean = String(value || "Lead")
-    .replace(/\s*Agent$/i, "")
-    .trim()
-    .toLowerCase();
-  return clean || "lead";
-}
-
-function isRealAgentActivity(activity = {}) {
-  if (!activity.explicitAgentWork) return false;
-  if (!String(activity.text || "").trim()) return false;
-  return !["token", "metrics_updated", "assistant_message"].includes(activity.eventType);
-}
-
-function latestActivityByAgent(activities = []) {
-  const result = new Map();
-  for (const activity of activities) {
-    if (!isRealAgentActivity(activity)) continue;
-    const key = normalizeAgentKey(activity.agent);
-    if (!result.has(key)) result.set(key, activity);
-  }
-  return result;
-}
-
-function Message({ message, index, activity }) {
+function Message({ message, index }) {
   const isUser = message.role === "user";
   const tone = isUser ? "user" : agentToneFromName(message.author);
   return (
@@ -112,21 +103,16 @@ function Message({ message, index, activity }) {
         ) : (
           <div className="message-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
         )}
-        {!isUser && activity && (
-          <div className="message-activity-line">
-            <AgentActivityStream activities={[activity]} maxItems={1} />
-          </div>
-        )}
       </div>
     </article>
   );
 }
 
-function AgentWorkMessage({ activity }) {
+function AgentWorkMessage({ activity, compact = false }) {
   const agent = activity.agent || "Lead";
   const tone = agentToneFromName(agent);
   return (
-    <article className="message assistant agent-work-message" data-message-role="assistant-runtime">
+    <article className={`message assistant agent-work-message ${compact ? "compact" : ""}`} data-message-role="assistant-runtime">
       <AgentAvatar name={agent} tone={tone} extraClass="avatar" />
       <div className="bubble">
         <div className="message-head">
@@ -252,17 +238,8 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
   const isIdle = state.status === "idle";
   const hasUserMessage = messages.some((m) => m.role === "user");
   const showWelcome = isIdle && !hasUserMessage && messages.length <= 1;
-  const showInlineActivity = ["running", "waiting_approval", "cancelling"].includes(state.status);
-  const activityByAgent = showInlineActivity ? latestActivityByAgent(state.agentActivities || []) : new Map();
-  const representedAgentKeys = new Set(
-    messages
-      .filter((message) => message.role === "assistant")
-      .map((message) => normalizeAgentKey(message.author)),
-  );
-  const unattachedActivities = Array.from(activityByAgent.entries())
-    .filter(([agentKey]) => !representedAgentKeys.has(agentKey))
-    .map(([, activity]) => activity)
-    .slice(0, 3);
+  const latestUserMessageIndex = findLatestUserMessageIndex(messages);
+  const currentRunActivities = currentAgentActivities(state.agentActivities || [], { running });
 
   useEffect(() => {
     setDraft(state.prompt || "");
@@ -313,12 +290,17 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
     previousMessageCountRef.current = messages.length;
   }, [running, state.status, messages]);
 
-  const handleComposerSubmit = (e) => {
-    e.preventDefault();
+  const submitDraft = () => {
+    if (running) return;
     const prompt = draft.trim();
     if (!prompt) return;
     setDraft("");
     onSubmit?.(prompt);
+  };
+
+  const handleComposerSubmit = (e) => {
+    e.preventDefault();
+    submitDraft();
   };
 
   if (showWelcome) {
@@ -348,14 +330,17 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
       </div>
       <div className="chat-body">
         <div className="message-list" id="message-list" ref={messageListRef}>
-          {messages.map((msg, i) => {
-            const activity = msg.role === "assistant"
-              ? activityByAgent.get(normalizeAgentKey(msg.author))
-              : null;
-            return <Message key={i} message={msg} index={i} activity={activity} />;
-          })}
-          {running && unattachedActivities.map((activity, i) => (
-            <AgentWorkMessage key={`${activity.agent}-${activity.time}-${i}`} activity={activity} />
+          {messages.map((msg, i) => (
+            <React.Fragment key={i}>
+              <Message message={msg} index={i} />
+              {running && i === latestUserMessageIndex && currentRunActivities.map((activity) => (
+                <AgentWorkMessage
+                  key={agentActivityKey(activity)}
+                  activity={activity}
+                  compact
+                />
+              ))}
+            </React.Fragment>
           ))}
           {running && (state.events || [])
             .filter((e) => e.type === "tool_call_finished")
@@ -397,7 +382,7 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                e.target.closest("form")?.requestSubmit();
+                submitDraft();
               }
             }}
           />
@@ -414,7 +399,7 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
             <button
               className={`button ${isActionBusy?.("run-prompt") ? "loading" : ""}`}
               type="submit"
-              disabled={isActionBusy?.("run-prompt")}
+              disabled={running || isActionBusy?.("run-prompt")}
             >
               {isActionBusy?.("run-prompt") ? "连接中" : "发送"}
             </button>

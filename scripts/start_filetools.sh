@@ -13,6 +13,6 @@ if [ ! -f nanocursor-filetools ]; then
     go build -o nanocursor-filetools ./cmd/nanocursor-filetools
 fi
 
-ADDR="${FILETOOLS_GRPC_ADDR:-:50054}"
+ADDR="${NANOCURSOR_GO_FILETOOLS_ADDR:-${FILETOOLS_GRPC_ADDR:-127.0.0.1:50054}}"
 echo "Starting nanocursor-filetools on $ADDR..."
-./nanocursor-filetools --addr="$ADDR"
+./nanocursor-filetools -addr "$ADDR"

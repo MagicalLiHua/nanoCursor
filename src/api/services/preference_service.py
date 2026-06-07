@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from src.api.services.memory_governance_service import (
+    create_memory_record,
+    list_memory_records,
+)
 from src.infra import config as config_module
-from src.memory.manager import MemoryManager
 
 
 PREFERENCE_BUCKETS = [
@@ -51,10 +54,6 @@ def _workspace(workspace_dir: str | None = None) -> Path:
     return root
 
 
-def _manager(workspace_dir: str | None = None) -> MemoryManager:
-    return MemoryManager(_workspace(workspace_dir) / ".memory")
-
-
 def _preference_type_from_tags(tags: list[str]) -> str | None:
     for tag in tags:
         if not isinstance(tag, str):
@@ -90,19 +89,29 @@ def _confidence(memories: list[dict[str, Any]]) -> str:
 def _memory_item(memory: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": memory.get("id", ""),
-        "category": memory.get("category", ""),
+        "category": "user",
         "content": memory.get("content", ""),
         "importance": memory.get("importance", 0),
         "tags": memory.get("tags") if isinstance(memory.get("tags"), list) else [],
         "created_at": memory.get("created_at"),
-        "last_accessed_at": memory.get("last_accessed_at"),
+        "last_accessed_at": memory.get("last_used_at") or memory.get("updated_at"),
     }
 
 
 def build_memory_profile(workspace_dir: str | None = None, min_importance: int = 0) -> dict[str, Any]:
     """Build the user preference profile from existing memories."""
     workspace = _workspace(workspace_dir)
-    memories = _manager(str(workspace)).get(min_importance=min_importance, limit=1000)
+    memories = [
+        memory
+        for memory in list_memory_records(
+            str(workspace),
+            scope="global",
+            status="active",
+            limit=1000,
+        )
+        if memory.get("kind") == "user_preference"
+        and int(memory.get("importance") or 0) >= min_importance
+    ]
     grouped: dict[str, list[dict[str, Any]]] = {bucket["id"]: [] for bucket in PREFERENCE_BUCKETS}
 
     for memory in memories:
@@ -115,7 +124,10 @@ def build_memory_profile(workspace_dir: str | None = None, min_importance: int =
     for bucket in PREFERENCE_BUCKETS:
         bucket_memories = sorted(
             grouped[bucket["id"]],
-            key=lambda item: (item.get("importance", 0), item.get("last_accessed_at", 0)),
+            key=lambda item: (
+                item.get("importance", 0),
+                item.get("last_used_at") or item.get("updated_at") or 0,
+            ),
             reverse=True,
         )
         buckets.append(
@@ -157,11 +169,15 @@ def add_preference_memory(
     if normalized_type not in BUCKET_BY_ID:
         raise ValueError(f"Unknown preference type: {preference_type}")
 
-    manager = _manager(workspace_dir)
-    saved = manager.save(
-        category="user",
+    workspace = _workspace(workspace_dir)
+    saved = create_memory_record(
+        str(workspace),
+        scope="global",
+        kind="user_preference",
         content=content.strip(),
+        source="user",
         importance=importance,
         tags=["preference", f"preference:{normalized_type}"],
+        source_ref="preferences_api",
     )
-    return saved
+    return {**saved, "category": "user"}

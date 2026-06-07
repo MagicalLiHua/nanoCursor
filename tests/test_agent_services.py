@@ -610,7 +610,7 @@ def test_derive_task_updated_event():
     ]
 
 
-def test_derive_team_updated_event_uses_default_team(tmp_path):
+def test_derive_agenthub_events_ignores_retired_teammate_tools(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -621,9 +621,7 @@ def test_derive_team_updated_event_uses_default_team(tmp_path):
         str(workspace),
     )
 
-    assert events[0]["event_type"] == "team_updated"
-    assert [member["role"] for member in events[0]["payload"]["members"]] == ["lead"]
-    assert events[0]["payload"]["members"][0]["tools"] == ["plan", "delegate", "spawn_agent", "report"]
+    assert events == []
 
 
 def test_derive_file_events_for_write_file(tmp_path):
@@ -766,6 +764,146 @@ def test_quality_gate_warns_when_recommended_test_missing(tmp_path):
     assert quality["status"] == "warning"
     warning_ids = {check["id"] for check in quality["checks"] if check["status"] == "warning"}
     assert "tests_finished" in warning_ids
+
+
+def test_quality_gate_passes_for_analysis_only_without_diff(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    thread_id = "analysis-only-run"
+    store.create_session(thread_id, "只分析项目，不修改文件", str(workspace), status="completed")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        execution_plan={
+            "strategy": "analysis_only",
+            "intent_decision": {
+                "route": "read_only",
+                "strategy": "analysis_only",
+                "requires_workspace_write": False,
+            },
+            "stages": [
+                {"id": "intake", "title": "接收需求", "status": "completed"},
+                {"id": "analysis", "title": "只读分析", "status": "completed"},
+            ],
+            "tasks": [],
+        },
+    )
+    store.append_event(
+        thread_id,
+        "assistant_message",
+        content="当前项目结构很小，无需修改文件。",
+        agent="lead",
+        workspace_dir=str(workspace),
+    )
+    store.append_event(
+        thread_id,
+        "done",
+        payload={"status": "completed"},
+        workspace_dir=str(workspace),
+    )
+
+    quality = build_quality_gate(thread_id, str(workspace))
+
+    assert quality["status"] == "passed"
+    assert quality["failed_count"] == 0
+    check_ids = {check["id"] for check in quality["checks"]}
+    assert "assistant_response_ready" in check_ids
+    assert "file_changes" not in check_ids
+    assert "diff_available" not in check_ids
+
+
+def test_quality_gate_does_not_require_tests_for_read_only_policy(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    thread_id = "read-only-policy-run"
+    store.create_session(thread_id, "只读查看 utils.py，不修改文件", str(workspace), status="completed")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        intent_decision={
+            "route": "read_only",
+            "strategy": "analysis_only",
+            "requires_shell": True,
+            "requires_workspace_write": False,
+        },
+        execution_plan={
+            "strategy": "analysis_only",
+            "intent_decision": {
+                "route": "read_only",
+                "strategy": "analysis_only",
+                "requires_shell": True,
+                "requires_workspace_write": False,
+            },
+            "tool_policy": {
+                "allowed_tools": ["read_file", "search_codebase", "project_context"],
+                "denied_tools": ["run_tests", "bash"],
+                "budgets": {"max_test_runs": 0},
+            },
+            "stages": [],
+            "tasks": [],
+        },
+    )
+    store.append_event(
+        thread_id,
+        "assistant_message",
+        content="utils.py 中只有 add 函数。",
+        agent="lead",
+        workspace_dir=str(workspace),
+    )
+    store.append_event(
+        thread_id,
+        "done",
+        payload={"status": "completed"},
+        workspace_dir=str(workspace),
+    )
+
+    quality = build_quality_gate(thread_id, str(workspace))
+
+    assert quality["status"] == "passed"
+    check_ids = {check["id"] for check in quality["checks"]}
+    assert "tests_finished" not in check_ids
+
+
+def test_quality_gate_uses_mutable_task_board_when_legacy_task_events_are_absent(tmp_path):
+    from src.runtime.task_board import build_task_board, save_task_board
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    thread_id = "task-board-quality-run"
+    store.create_session(thread_id, "Prompt", str(workspace), status="completed")
+    store.append_event(thread_id, "plan_created", workspace_dir=str(workspace))
+    store.append_event(thread_id, "file_changed", workspace_dir=str(workspace))
+    store.append_event(thread_id, "diff_updated", workspace_dir=str(workspace))
+    store.append_event(thread_id, "report_ready", workspace_dir=str(workspace))
+    store.append_event(
+        thread_id,
+        "done",
+        payload={"status": "completed"},
+        workspace_dir=str(workspace),
+    )
+    run_dir = store.run_dir(thread_id, str(workspace))
+    (run_dir / "diff.patch").write_text("diff", encoding="utf-8")
+    (run_dir / "report.md").write_text("# report", encoding="utf-8")
+    board = build_task_board(
+        thread_id,
+        {
+            "strategy": "small_patch",
+            "stages": [{"id": "implement", "title": "实现", "owner_role": "coder"}],
+        },
+    )
+    for task in board.nodes:
+        task.status = "passed"
+    board.status = "completed"
+    save_task_board(board, run_dir)
+
+    quality = build_quality_gate(thread_id, str(workspace))
+
+    failed_ids = {check["id"] for check in quality["checks"] if check["status"] == "failed"}
+    assert "tasks_created" not in failed_ids
+    assert "tasks_completed" not in failed_ids
 
 
 def test_quality_gate_accepts_tool_based_verification_and_delivery_markdown(tmp_path):
@@ -1126,30 +1264,20 @@ def test_memory_profile_groups_preference_memories(tmp_path):
     assert "pytest" in profile["prompt_context"]
 
 
-def test_memory_profile_infers_bucket_from_existing_memory_content(tmp_path):
+def test_memory_profile_infers_bucket_from_governed_memory_content(tmp_path):
+    from src.api.services.memory_governance_service import create_memory_record
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    memory_dir = workspace / ".memory" / "user"
-    memory_dir.mkdir(parents=True)
-    (memory_dir / "ui-pref.md").write_text(
-        "\n".join(
-            [
-                "---",
-                "id: ui-pref",
-                "category: user",
-                "importance: 6",
-                "tags: design",
-                "created_at: 1",
-                "last_accessed_at: 1",
-                "access_count: 0",
-                "session_id:",
-                "---",
-                "",
-                "UI 偏好是专业、克制、高信息密度的界面。",
-            ]
-        ),
-        encoding="utf-8",
+    memory = create_memory_record(
+        str(workspace),
+        scope="global",
+        kind="user_preference",
+        content="UI 偏好是专业、克制、高信息密度的界面。",
+        source="user",
+        importance=6,
+        tags=["design"],
     )
 
     profile = build_memory_profile(str(workspace))
@@ -1157,7 +1285,7 @@ def test_memory_profile_infers_bucket_from_existing_memory_content(tmp_path):
     buckets = {bucket["id"]: bucket for bucket in profile["buckets"]}
     assert profile["total_memories"] == 1
     assert buckets["ui_style"]["confidence"] == "medium"
-    assert buckets["ui_style"]["memories"][0]["id"] == "ui-pref"
+    assert buckets["ui_style"]["memories"][0]["id"] == memory["id"]
 
 
 def test_add_preference_memory_rejects_unknown_type(tmp_path):

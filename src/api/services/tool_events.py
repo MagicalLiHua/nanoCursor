@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from src.api.services.agent_state import list_team_members
 from src.api.services.diff_service import get_run_diff
+from src.tools.tool_result import is_tool_error_output
 
 
 CAPABILITY_TRACE_BY_TOOL = {
@@ -119,7 +119,7 @@ def derive_agenthub_events(
     """Return additional domain events caused by a completed tool call."""
     events: list[dict[str, Any]] = []
 
-    if output.startswith("Error:"):
+    if is_tool_error_output(output):
         return events
 
     if tool_name == "task_create":
@@ -156,18 +156,6 @@ def derive_agenthub_events(
                 "content": f"任务状态变更为 {status}",
                 "agent": "lead",
                 "payload": {"task_id": task_id, "status": status},
-            }
-        )
-
-    elif tool_name == "claim_task":
-        task_id = str(tool_input.get("task_id") or "")
-        events.append(
-            {
-                "event_type": "task_updated",
-                "title": f"认领任务：{task_id}",
-                "content": "任务已进入处理中",
-                "agent": "lead",
-                "payload": {"task_id": task_id, "status": "in_progress"},
             }
         )
 
@@ -216,25 +204,5 @@ def derive_agenthub_events(
                     },
                 }
             )
-
-    elif tool_name in {
-        "spawn_teammate",
-        "list_teammates",
-        "send_message",
-        "broadcast",
-        "shutdown_request",
-        "shutdown_response",
-        "plan_approval",
-    }:
-        members = list_team_members(workspace_dir)
-        events.append(
-            {
-                "event_type": "team_updated",
-                "title": "团队状态已更新",
-                "content": output[:1000] if output else "",
-                "agent": "lead",
-                "payload": {"members": members, "tool": tool_name},
-            }
-        )
 
     return events

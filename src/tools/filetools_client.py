@@ -1,5 +1,6 @@
 """gRPC client for the Go filetools service."""
 
+import asyncio
 import os
 from typing import Optional
 
@@ -60,18 +61,46 @@ class FileToolsClient:
         ))
         return resp.content
 
-    async def write_file(self, filename: str, content: str) -> str:
+    async def write_file(
+        self,
+        filename: str,
+        content: str,
+        *,
+        overwrite: bool = False,
+        backup_existing: bool = False,
+    ) -> str:
         self._ensure_channel()
         resp = self._stub.WriteFile(filetools_pb2.WriteFileRequest(
-            workspace=self._workspace, filename=filename, content=content,
+            workspace=self._workspace,
+            filename=filename,
+            content=content,
+            overwrite=overwrite,
+            backup_existing=backup_existing,
         ))
         return resp.message
 
-    async def edit_file(self, filename: str, search_block: str, replace_block: str) -> str:
+    async def edit_file(
+        self,
+        filename: str,
+        search_block: str = "",
+        replace_block: str = "",
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        new_text: str = "",
+        match_mode: str = "fuzzy",
+        create_backup: bool = True,
+    ) -> str:
         self._ensure_channel()
         resp = self._stub.EditFile(filetools_pb2.EditFileRequest(
             workspace=self._workspace, filename=filename,
-            search_block=search_block, replace_block=replace_block,
+            search_block=search_block,
+            replace_block=replace_block,
+            start_line=start_line or 0,
+            end_line=end_line or 0,
+            new_text=new_text,
+            match_mode=match_mode,
+            create_backup=create_backup,
         ))
         return resp.result
 
@@ -95,6 +124,18 @@ class FileToolsClient:
             workspace=self._workspace, filename=filename or "",
         ))
         return resp.content
+
+    def health_sync(self, timeout_seconds: float = 1.0) -> dict[str, bool | str]:
+        self._ensure_channel()
+        resp = self._stub.Health(filetools_pb2.HealthRequest(), timeout=timeout_seconds)
+        return {
+            "ok": bool(resp.ok),
+            "service": resp.service,
+            "version": resp.version,
+        }
+
+    async def health(self, timeout_seconds: float = 1.0) -> dict[str, bool | str]:
+        return await asyncio.to_thread(self.health_sync, timeout_seconds)
 
     def close(self):
         if self._channel:

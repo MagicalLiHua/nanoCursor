@@ -177,6 +177,16 @@ def _errors_report(workspace_dir: str | None = None) -> dict[str, Any]:
     return {"error_count": len(errors), "recent_errors": errors[:10]}
 
 
+def _sse_report() -> dict[str, Any]:
+    from src.api.services.sse_broker import get_sse_broker
+
+    broker = get_sse_broker()
+    return {
+        "subscribers": broker.total_subscribers(),
+        "dropped_events": broker.dropped_event_count(),
+    }
+
+
 def build_diagnostic_bundle(workspace_dir: str | None = None) -> dict[str, Any]:
     """Build a full diagnostic bundle for the current workspace.
 
@@ -196,5 +206,6 @@ def build_diagnostic_bundle(workspace_dir: str | None = None) -> dict[str, Any]:
         "mcp": _mcp_report(workspace_dir),
         "skills": _skills_report(workspace_dir),
         "errors": _errors_report(workspace_dir),
+        "sse": _sse_report(),
         "env": _env_safe_report(),
     }

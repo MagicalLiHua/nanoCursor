@@ -39,6 +39,25 @@ def _execution_plan(session: dict[str, Any] | None) -> dict[str, Any]:
     return plan if isinstance(plan, dict) else {}
 
 
+def _requires_workspace_write(session: dict[str, Any] | None, plan: dict[str, Any] | None = None) -> bool | None:
+    if not isinstance(session, dict):
+        return None
+    decision = session.get("intent_decision")
+    plan = plan if isinstance(plan, dict) else _execution_plan(session)
+    if not isinstance(decision, dict):
+        decision = plan.get("intent_decision") or plan.get("routing_decision")
+    if isinstance(decision, dict):
+        if isinstance(decision.get("requires_workspace_write"), bool):
+            return bool(decision.get("requires_workspace_write"))
+        requires = decision.get("requires")
+        if isinstance(requires, dict) and isinstance(requires.get("workspace_write"), bool):
+            return bool(requires.get("workspace_write"))
+    strategy = str(plan.get("strategy") or "")
+    if not strategy:
+        return None
+    return strategy in {"small_patch", "feature_delivery", "bug_fix", "refactor"}
+
+
 def _events_summary(events: list[Any]) -> dict[str, Any]:
     last = events[-1] if events else None
     return {
@@ -74,6 +93,17 @@ def _change_stats(changed_files: list[dict[str, Any]]) -> dict[str, int]:
         else:
             stats["modified"] += 1
     return stats
+
+
+def _empty_diff(thread_id: str, workspace: str, source: str = "not_applicable") -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "workspace_dir": workspace,
+        "diff": "",
+        "changed_files": [],
+        "source": source,
+        "error": "",
+    }
 
 
 def _conversation_team_source(session: dict[str, Any] | None, workspace: str) -> str:
@@ -152,10 +182,13 @@ def build_run_outcome(thread_id: str, workspace_dir: str | None = None) -> dict[
     plan = _execution_plan(session)
     strategy = str(plan.get("strategy") or "")
 
-    diff = _safe_call(
-        {"thread_id": thread_id, "workspace_dir": workspace_str, "diff": "", "changed_files": [], "source": "missing"},
-        lambda: get_run_diff(thread_id, workspace_str),
-    )
+    if _requires_workspace_write(session, plan) is False:
+        diff = _empty_diff(thread_id, workspace_str)
+    else:
+        diff = _safe_call(
+            {"thread_id": thread_id, "workspace_dir": workspace_str, "diff": "", "changed_files": [], "source": "missing"},
+            lambda: get_run_diff(thread_id, workspace_str),
+        )
     changed_files = diff.get("changed_files") if isinstance(diff.get("changed_files"), list) else []
 
     report = _safe_call(

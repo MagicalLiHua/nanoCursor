@@ -79,7 +79,7 @@ def test_high_risk_guard_blocks_unsafe_downgrade(tmp_path):
 
 
 def test_intent_correction_api_route(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     workspace = tmp_path / "workspace"

@@ -7,7 +7,6 @@ collects existing durable records without creating new run artifacts.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,9 +15,11 @@ from src.api.models import (
     RunSnapshot,
     RunSnapshotActivity,
     RunSnapshotChanges,
+    RunSnapshotCapabilities,
     RunSnapshotConversation,
     RunSnapshotQuality,
     RunSnapshotRun,
+    RunSnapshotRouting,
     RunSnapshotWorkspace,
 )
 from src.api.services.artifact_service import build_artifact_center
@@ -27,6 +28,7 @@ from src.api.services.event_store import get_event_store
 from src.api.services.quality_service import build_quality_gate
 from src.api.services.run_outcome_service import build_run_outcome
 from src.infra import config as config_module
+from src.runtime.git_runner import run_git
 from src.runtime.task_board import load_task_board
 
 
@@ -42,10 +44,14 @@ ACTIVITY_EVENT_TYPES = {
     "ephemeral_agent_spawned",
     "ephemeral_agent_updated",
     "ephemeral_agent_completed",
+    "ephemeral_agent_archived",
+    "ephemeral_agent_expired",
     "agent_run_started",
     "agent_result_merged",
+    "agent_run_failed",
     "parallel_agent_progress",
     "parallel_agent_result",
+    "parallel_agent_failed",
 }
 
 
@@ -62,17 +68,8 @@ def _safe_call(default: Any, fn: Callable[[], Any]) -> Any:
 
 
 def _run_git(workspace: Path, args: list[str]) -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(workspace), *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        return result.returncode, result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return -1, ""
+    result = run_git(workspace, args, timeout_seconds=5)
+    return result.returncode, result.stdout.strip()
 
 
 def _workspace_snapshot(workspace: Path) -> RunSnapshotWorkspace:
@@ -96,6 +93,25 @@ def _session_strategy(session: dict[str, Any] | None) -> str:
     if isinstance(plan, dict):
         return str(plan.get("strategy") or "")
     return ""
+
+
+def _session_requires_workspace_write(session: dict[str, Any] | None) -> bool | None:
+    if not isinstance(session, dict):
+        return None
+    decision = session.get("intent_decision")
+    if not isinstance(decision, dict):
+        plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+        decision = plan.get("intent_decision") or plan.get("routing_decision") if isinstance(plan, dict) else {}
+    if isinstance(decision, dict):
+        if isinstance(decision.get("requires_workspace_write"), bool):
+            return bool(decision.get("requires_workspace_write"))
+        requires = decision.get("requires")
+        if isinstance(requires, dict) and isinstance(requires.get("workspace_write"), bool):
+            return bool(requires.get("workspace_write"))
+    strategy = _session_strategy(session)
+    if not strategy:
+        return None
+    return strategy in {"small_patch", "feature_delivery", "bug_fix", "refactor"}
 
 
 def _active_thread_ids() -> set[str]:
@@ -204,7 +220,20 @@ def _diff_line_stats(diff: str) -> tuple[int, int]:
     return insertions, deletions
 
 
-def _changes(thread_id: str, workspace: str) -> RunSnapshotChanges:
+def _empty_changes(source: str = "not_applicable") -> RunSnapshotChanges:
+    return RunSnapshotChanges(
+        files_changed=0,
+        insertions=0,
+        deletions=0,
+        files=[],
+        source=source,
+    )
+
+
+def _changes(thread_id: str, workspace: str, session: dict[str, Any] | None = None) -> RunSnapshotChanges:
+    if _session_requires_workspace_write(session) is False:
+        return _empty_changes()
+
     diff = _safe_call(
         {"changed_files": [], "diff": "", "source": "missing"},
         lambda: get_run_diff(thread_id, workspace),
@@ -282,6 +311,46 @@ def _quality(thread_id: str, workspace: str) -> RunSnapshotQuality:
     )
 
 
+def _capabilities(session: dict[str, Any] | None) -> RunSnapshotCapabilities:
+    if not isinstance(session, dict):
+        return RunSnapshotCapabilities()
+    execution_plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    context_pack = session.get("context_pack") if isinstance(session.get("context_pack"), dict) else {}
+
+    selected_skills = context_pack.get("selected_skill_details")
+    if not isinstance(selected_skills, list):
+        selected_skills = []
+    omitted_skills = context_pack.get("omitted_skills")
+    if not isinstance(omitted_skills, list):
+        omitted_skills = []
+    mcp_plan = execution_plan.get("mcp_plan")
+    if not isinstance(mcp_plan, list):
+        mcp_plan = []
+    skill_budget = context_pack.get("skill_budget") if isinstance(context_pack.get("skill_budget"), dict) else {}
+    return RunSnapshotCapabilities(
+        selected_skills=[item for item in selected_skills if isinstance(item, dict)],
+        omitted_skills=[item for item in omitted_skills if isinstance(item, dict)],
+        mcp_plan=[item for item in mcp_plan if isinstance(item, dict)],
+        summary={
+            "selected_skill_count": len(selected_skills),
+            "omitted_skill_count": len(omitted_skills),
+            "mcp_count": len(mcp_plan),
+            "usable_mcp_count": sum(1 for item in mcp_plan if isinstance(item, dict) and item.get("usable")),
+            "skill_context_budget": skill_budget.get("context_budget", 0),
+        },
+    )
+
+
+def _routing(session: dict[str, Any] | None) -> RunSnapshotRouting:
+    if not isinstance(session, dict):
+        return RunSnapshotRouting()
+    decision = session.get("routing_decision")
+    if not isinstance(decision, dict):
+        plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+        decision = plan.get("routing_decision") if isinstance(plan.get("routing_decision"), dict) else {}
+    return RunSnapshotRouting(decision=decision if isinstance(decision, dict) else {})
+
+
 def _approvals(thread_id: str, workspace: str) -> list[dict[str, Any]]:
     approvals_dir = Path(workspace).resolve() / ".nanocursor" / "runs" / _safe_run_id(thread_id) / "approvals"
     if not approvals_dir.exists():
@@ -322,9 +391,11 @@ def build_run_snapshot(thread_id: str, workspace_dir: str | None = None) -> RunS
         agents=_agents(thread_id, workspace_str),
         tasks=_tasks(thread_id, workspace_str),
         approvals=_approvals(thread_id, workspace_str),
-        changes=_changes(thread_id, workspace_str),
+        changes=_changes(thread_id, workspace_str, session),
         artifacts=_artifacts(thread_id, workspace_str),
         quality=_quality(thread_id, workspace_str),
+        capabilities=_capabilities(session),
+        routing=_routing(session),
         timeline=_timeline(events),
         outcome=outcome if isinstance(outcome, dict) else {},
     )

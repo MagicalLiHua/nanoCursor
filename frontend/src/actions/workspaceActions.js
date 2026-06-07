@@ -24,6 +24,35 @@ export async function loadWorkspaceState({ fetchJson }) {
   }
 }
 
+export async function loadFiletoolsStatus({ fetchJson }) {
+  try {
+    return await fetchJson("/api/runtime/filetools/status");
+  } catch (error) {
+    return {
+      enabled: false,
+      fallback_enabled: true,
+      healthy: false,
+      backend: "python",
+      error: error?.message || "filetools status unavailable",
+    };
+  }
+}
+
+export async function loadIndexerStatus({ fetchJson }) {
+  try {
+    return await fetchJson("/api/runtime/indexer/status");
+  } catch (error) {
+    return {
+      enabled: false,
+      fallback_enabled: true,
+      healthy: false,
+      backend: "python",
+      indexed_files: 0,
+      error: error?.message || "indexer status unavailable",
+    };
+  }
+}
+
 export async function loadWorkspaceOverview({ fetchJson, workspaceDir, previousOverview = {} }) {
   try {
     const query = workspaceDir ? `?workspace_dir=${encodeURIComponent(workspaceDir)}` : "";

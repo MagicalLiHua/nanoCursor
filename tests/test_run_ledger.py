@@ -281,7 +281,7 @@ class TestRunLedgerService:
 class TestRunLedgerAPI:
     def test_get_ledger_nonexistent_404(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"no_ledger_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/ledger")
@@ -289,7 +289,7 @@ class TestRunLedgerAPI:
 
     def test_get_steps_nonexistent(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         thread_id = f"no_steps_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/steps")
@@ -300,7 +300,7 @@ class TestRunLedgerAPI:
 
     def test_get_tools_nonexistent(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         thread_id = f"no_tools_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/tools")
@@ -312,7 +312,7 @@ class TestRunLedgerAPI:
     def test_full_ledger_workflow(self, tmp_path):
         """End-to-end: create session, record tools+steps, query ledger."""
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"

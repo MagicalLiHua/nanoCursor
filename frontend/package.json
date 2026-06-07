@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "dev:legacy": "node scripts/serve.mjs",
-    "check": "vite build"
+    "test:state": "node --test tests/state/*.test.mjs",
+    "check": "npm run test:state && vite build"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",

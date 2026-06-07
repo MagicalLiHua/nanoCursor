@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 
 def _client():
-    from api_server import app
+    from src.api.server import app
     return TestClient(app, raise_server_exceptions=False)
 
 

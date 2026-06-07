@@ -1,57 +1,48 @@
-"""
-统一日志模块
-提供结构化的日志记录功能，替代分散的 print 语句。
+"""Compatibility facade for nanoCursor structured logging.
+
+Older modules import ``logger`` from this module.  Keep that stable API while
+delegating all configuration to :mod:`src.infra.logging`.
 """
 
+from __future__ import annotations
+
 import logging
-import sys
+import os
+
+from src.infra.logging import StructuredFormatter, setup_structured_logging
 
 
 def setup_logger(
     name: str = "nanoCursor",
     level: str = "INFO",
-    log_file: str | None = None
+    log_file: str | None = None,
 ) -> logging.Logger:
-    """
-    配置并返回一个配置好的 Logger 实例。
-    
-    Args:
-        name: Logger 名称
-        level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_file: 可选的日志文件路径
-    
-    Returns:
-        配置好的 logging.Logger 实例
-    """
-    logger = logging.getLogger(name)
+    """Return a structured logger while preserving the legacy helper API."""
+    if name == "nanoCursor":
+        configured = setup_structured_logging(level)
+    else:
+        setup_structured_logging(level)
+        configured = logging.getLogger(name)
+        configured.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
-
-    # 创建格式化器
-    formatter = logging.Formatter(
-        fmt="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    # 控制台 Handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # 可选的文件 Handler
     if log_file:
-        import os
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        absolute_path = os.path.abspath(log_file)
+        already_configured = any(
+            isinstance(handler, logging.FileHandler)
+            and os.path.abspath(handler.baseFilename) == absolute_path
+            for handler in configured.handlers
+        )
+        if not already_configured:
+            directory = os.path.dirname(absolute_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            file_handler = logging.FileHandler(absolute_path, encoding="utf-8")
+            file_handler.setFormatter(StructuredFormatter())
+            configured.addHandler(file_handler)
+    return configured
 
-    return logger
 
-
-# 创建全局默认 Logger
 logger = setup_logger()
+
+
+__all__ = ["logger", "setup_logger"]

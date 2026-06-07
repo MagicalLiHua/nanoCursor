@@ -21,7 +21,8 @@ def main() -> int:
 
     # Backend compile
     py_files = [
-        "api_server.py",
+        "src/api/*.py",
+        "src/api/routes/*.py",
         "src/api/services/*.py",
         "src/runtime/*.py",
         "src/agent/*.py",
@@ -36,6 +37,13 @@ def main() -> int:
     rc = run(["pytest", "-q"], label="pytest")
     if rc != 0:
         failed += 1
+
+    # Optional Go runtime checks
+    go_runtime_dir = PROJECT_ROOT / "go-runtime"
+    if go_runtime_dir.exists():
+        rc = run(["go", "test", "./..."], cwd=str(go_runtime_dir), label="go-runtime")
+        if rc != 0:
+            failed += 1
 
     # Agent runtime eval gate
     with tempfile.TemporaryDirectory(prefix="nanocursor-agent-eval-gate-") as tmp:

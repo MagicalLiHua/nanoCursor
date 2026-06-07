@@ -123,6 +123,53 @@ def _resolve_config(provider: str):
     return model, api_key, base_url
 
 
+def _workspace_model_override() -> dict[str, str]:
+    """Best-effort workspace-local model override.
+
+    Workspace settings are local developer configuration. They intentionally
+    override `.env` for the active process, while missing fields still fall
+    back to environment variables.
+    """
+    try:
+        from src.api.services.workspace_runtime_service import get_active_workspace
+        from src.api.services.workspace_settings_service import get_effective_model_settings
+
+        settings = get_effective_model_settings(workspace_dir=get_active_workspace())
+        return {
+            "provider": str(settings.get("provider") or "").strip().lower(),
+            "model": str(settings.get("model") or "").strip(),
+            "api_key": str(settings.get("api_key") or "").strip(),
+            "base_url": str(settings.get("base_url") or "").strip(),
+        }
+    except Exception:
+        return {}
+
+
+def get_runtime_llm_config() -> tuple[str, str, str | None, str]:
+    """Return (model, api_key, base_url, provider) for the current workspace."""
+    override = _workspace_model_override()
+    provider = override.get("provider") or _detect_provider()
+    if provider not in PROVIDERS:
+        provider = _detect_provider()
+
+    model, api_key, base_url = _resolve_config(provider)
+    if override.get("model"):
+        model = override["model"]
+    if override.get("api_key"):
+        api_key = override["api_key"]
+    if override.get("base_url"):
+        base_url = override["base_url"]
+    if provider == "ollama" and not api_key:
+        api_key = "ollama"
+    return model, api_key, base_url, provider
+
+
+def get_model_name() -> str:
+    """Return the model name resolved for the active workspace."""
+    model, _, _, _ = get_runtime_llm_config()
+    return model
+
+
 # ==========================================
 # Resolved configuration (module level)
 # ==========================================
@@ -147,18 +194,20 @@ if _detected_provider in _WARN_PROTOCOL:
 def create_client():
     """Create an async Anthropic-compatible client for the detected provider."""
     from anthropic import AsyncAnthropic
-    kwargs = {"api_key": API_KEY}
-    if BASE_URL:
-        kwargs["base_url"] = BASE_URL
+    _, api_key, base_url, _ = get_runtime_llm_config()
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
     return AsyncAnthropic(**kwargs)
 
 
 def create_sync_client():
     """Create a sync Anthropic-compatible client for the detected provider."""
     from anthropic import Anthropic
-    kwargs = {"api_key": API_KEY}
-    if BASE_URL:
-        kwargs["base_url"] = BASE_URL
+    _, api_key, base_url, _ = get_runtime_llm_config()
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
     return Anthropic(**kwargs)
 
 
@@ -173,6 +222,6 @@ def get_provider_name() -> str:
 
 __all__ = [
     "MODEL", "API_KEY", "BASE_URL",
-    "create_client", "create_sync_client",
+    "create_client", "create_sync_client", "get_model_name", "get_runtime_llm_config",
     "get_provider_name",
 ]

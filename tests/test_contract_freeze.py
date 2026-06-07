@@ -37,7 +37,7 @@ R1_R6_ROUTES = [
 
 class TestCoreRoutesExist:
     def test_core_routes_registered(self):
-        from api_server import app
+        from src.api.server import app
         route_paths = set()
         for route in app.routes:
             if hasattr(route, 'path') and hasattr(route, 'methods'):
@@ -48,7 +48,7 @@ class TestCoreRoutesExist:
             assert (method, path) in route_paths, f"Missing core route: {method} {path}"
 
     def test_r1_r6_routes_registered(self):
-        from api_server import app
+        from src.api.server import app
         route_paths = set()
         for route in app.routes:
             if hasattr(route, 'path') and hasattr(route, 'methods'):
@@ -61,7 +61,7 @@ class TestCoreRoutesExist:
 
 class TestStaticRoutesNotShadowed:
     def test_runs_active_not_shadowed(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/runs/active")
         assert resp.status_code == 200
@@ -69,7 +69,7 @@ class TestStaticRoutesNotShadowed:
 
     def test_runs_route_not_shadowing_specific_routes(self):
         """Verify /api/runs/{thread_id} doesn't shadow /api/runs/active."""
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         # If active was shadowed by {thread_id}, this would match "active" as a thread_id
         resp = client.get("/api/runs/active")
@@ -77,7 +77,7 @@ class TestStaticRoutesNotShadowed:
         assert "active_runs" in resp.json()
 
     def test_delivery_route_not_shadowed_by_thread_detail(self):
-        from api_server import app
+        from src.api.server import app
         from src.api.services.event_store import EventStore
         import src.infra.config as cfg
         import tempfile
@@ -119,7 +119,7 @@ class TestCoreErrorCodes:
         assert codes == expected, f"Error codes changed! Expected {expected}, got {codes}"
 
     def test_error_response_format(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/runs/nonexistent_run_contract_test/delivery")
         assert resp.status_code == 404

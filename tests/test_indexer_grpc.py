@@ -128,3 +128,46 @@ class TestGetProjectIndex:
             get_project_index(Path("/tmp/test"))
             reset_index()
             mock_instance.close.assert_called_once()
+
+
+class TestHybridProjectIndex:
+    """Tests for the opt-in Go indexer facade exposed by src.indexer.indexer."""
+
+    def test_disabled_get_project_index_uses_python(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_ENABLED", "false")
+        from src.indexer.indexer import ProjectIndex, get_project_index, reset_index
+
+        reset_index()
+        idx = get_project_index(tmp_path)
+        assert isinstance(idx, ProjectIndex)
+        reset_index()
+
+    def test_go_indexer_enabled_falls_back_to_python(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_FALLBACK", "true")
+
+        (tmp_path / "app.py").write_text("def hello():\n    return 'hi'\n", encoding="utf-8")
+
+        from src.indexer.indexer import HybridProjectIndex, get_project_index, reset_index
+
+        reset_index()
+        idx = get_project_index(tmp_path)
+        assert isinstance(idx, HybridProjectIndex)
+        assert idx.build(force=True) is True
+        summary = idx.summary()
+        assert summary["total_files"] >= 1
+        assert any(result["symbol_name"] == "hello" for result in idx.search_symbol("hello"))
+        reset_index()
+
+    def test_go_indexer_without_fallback_raises_when_unavailable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_ENABLED", "true")
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_FALLBACK", "false")
+        monkeypatch.setenv("NANOCURSOR_GO_INDEXER_ADDR", "localhost:9")
+
+        from src.indexer.indexer import get_project_index, reset_index
+
+        reset_index()
+        idx = get_project_index(tmp_path)
+        with pytest.raises(Exception):
+            idx.build(force=True)
+        reset_index()

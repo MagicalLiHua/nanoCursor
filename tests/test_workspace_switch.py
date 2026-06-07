@@ -18,7 +18,7 @@ def test_default_workspace_is_isolated_from_project_source():
 def test_workspace_list_exposes_default_workspace_metadata():
     from fastapi.testclient import TestClient
 
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     client = TestClient(api_server.app)
     response = client.get("/api/workspaces")
@@ -34,7 +34,7 @@ def test_workspace_list_exposes_default_workspace_metadata():
 
 
 def test_set_active_workspace_resets_workspace_scoped_caches(tmp_path):
-    from api_server import _set_active_workspace
+    from src.api.legacy_runtime import _set_active_workspace
     from src.agent.engine import get_todo_manager, get_workdir
     from src.indexer.indexer import get_project_index
     from src.infra import config as config_module

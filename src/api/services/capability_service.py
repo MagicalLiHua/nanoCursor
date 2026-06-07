@@ -10,6 +10,7 @@ from typing import Any
 
 from src.api.services.intent_router import classify_user_intent
 from src.api.services.mcp_status_service import get_mcp_server_status
+from src.api.services.mcp_tool_catalog_service import classify_mcp_tool
 
 
 BUILTIN_CAPABILITIES = [
@@ -127,7 +128,7 @@ SKILL_TEMPLATES = [
         "kind": "skill",
         "status": "ready",
         "description": "沉淀浅色系、低拥挤、可折叠、按钮连续性的 UI 偏好。",
-        "tags": ["ui", "layout", "interaction"],
+        "tags": ["ui", "layout", "interaction", "前端", "界面", "页面", "视觉", "样式", "交互", "按钮", "输入框", "美化"],
         "agents": ["Designer", "Coder"],
         "use_cases": ["浅色系工作台美化", "拥挤界面降噪", "折叠与响应式交互"],
         "inputs": ["用户 UI 偏好", "当前页面结构", "截图反馈"],
@@ -140,7 +141,7 @@ SKILL_TEMPLATES = [
         "kind": "skill",
         "status": "ready",
         "description": "从需求覆盖、质量门禁、Diff 风险和恢复点复核一次交付。",
-        "tags": ["review", "quality", "traceability"],
+        "tags": ["review", "quality", "traceability", "复核", "验收", "质量", "风险", "交付"],
         "agents": ["Reviewer", "Tester"],
         "use_cases": ["交付前验收", "风险复盘", "展示用例质量检查"],
         "inputs": ["任务清单", "Diff 摘要", "测试结果", "交付报告"],
@@ -380,13 +381,13 @@ def build_mcp_execution_plan(
             "usable": usable,
             "tool_count": len(cached_tools),
             "tools": [
-                {
-                    "name": str(tool.get("name") or "unnamed"),
-                    "description": str(tool.get("description") or ""),
-                }
+                classify_mcp_tool(capability_id, tool)
                 for tool in cached_tools[:8]
                 if isinstance(tool, dict)
             ],
+            "approval_required_count": sum(
+                1 for tool in cached_tools if isinstance(tool, dict) and classify_mcp_tool(capability_id, tool)["requires_approval"]
+            ),
             "cache": {
                 "cached_at": tools_cache.get("cached_at"),
                 "config_hash": tools_cache.get("config_hash", ""),

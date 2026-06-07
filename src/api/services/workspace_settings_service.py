@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "planner_model": "",
         "coder_model": "",
         "reviewer_model": "",
+        "base_url": "",
+        "api_key": "",
         "temperature": 0.2,
         "max_tokens": 8192,
     },
@@ -87,12 +90,12 @@ def save_workspace_settings(
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge override into base. Returns a new dict."""
-    result = {**base}
+    result = deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         else:
-            result[key] = value
+            result[key] = deepcopy(value)
     return result
 
 
@@ -132,6 +135,8 @@ def get_effective_model_settings(role: str = "", workspace_dir: str | None = Non
     provider = model.get("provider", "")
     temperature = model.get("temperature", 0.2)
     max_tokens = model.get("max_tokens", 8192)
+    base_url = model.get("base_url", "")
+    api_key = model.get("api_key", "")
 
     model_name = model.get("default_model", "")
     if role and model.get(f"{role}_model"):
@@ -140,6 +145,8 @@ def get_effective_model_settings(role: str = "", workspace_dir: str | None = Non
     return {
         "provider": provider,
         "model": model_name,
+        "base_url": base_url,
+        "api_key": api_key,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }

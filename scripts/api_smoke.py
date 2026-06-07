@@ -131,13 +131,12 @@ def run_smoke() -> list[SmokeResult]:
 
         os.environ["NANOCURSOR_WORKSPACE_ROOT"] = str(workspace_root)
         os.environ["NANOCURSOR_WORKSPACE_DIR"] = str(workspace)
-        os.environ["NANOCURSOR_DB_PATH"] = str(tmp_root / "nanocursor.db")
         os.environ["NANOCURSOR_DEMO_EVENT_DELAY"] = "0"
         _prepare_workspace(workspace)
 
         from fastapi.testclient import TestClient
 
-        import api_server
+        from src.api import legacy_runtime as api_server
         import src.infra.config as config_module
 
         config_module.RUNTIME_ROOT = str(runtime_root)
@@ -183,10 +182,23 @@ def run_smoke() -> list[SmokeResult]:
                 ),
                 ("GET", "/api/evals/agent/summary", None, (200,)),
                 ("GET", "/api/evals/agent/runs", None, (200,)),
+                ("GET", "/api/evals/runtime/summary", None, (200,)),
+                ("GET", f"/api/evals/runtime/runs/{thread_id}/metrics", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events/history", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/events", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/outcome", None, (200,)),
                 ("GET", f"/api/runs/{thread_id}/snapshot", None, (200,)),
+                ("GET", "/api/memory", None, (200,)),
+                ("GET", "/api/workspace/memory", None, (200,)),
+                ("POST", "/api/workspace/memory/refresh", None, (200,)),
+                (
+                    "POST",
+                    "/api/context/memory/preview",
+                    {"prompt": "api smoke memory preview", "selected_files": ["README.md"], "budget": 500},
+                    (200,),
+                ),
+                ("GET", f"/api/runs/{thread_id}/memory", None, (200,)),
+                ("POST", f"/api/runs/{thread_id}/memory/extract", None, (200,)),
                 ("POST", "/api/capabilities/recommend", {"prompt": "build a todo app"}, (200,)),
                 ("POST", "/api/capabilities/skills", {"name": "Smoke Skill", "content": "Use smoke checks."}, (200,)),
                 ("POST", "/api/capabilities/mcp/validate", {"server_id": None}, (200,)),

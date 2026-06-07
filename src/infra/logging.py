@@ -28,6 +28,8 @@ class StructuredFormatter(logging.Formatter):
         for key in (
             "request_id", "thread_id", "workspace_id",
             "duration_ms", "status_code", "path", "method",
+            "backend", "fallback", "from_backend", "address", "reason", "tool",
+            "cooldown_seconds",
         ):
             value = getattr(record, key, None)
             if value is not None:
@@ -35,6 +37,7 @@ class StructuredFormatter(logging.Formatter):
 
         if record.exc_info and record.exc_info[1]:
             payload["exception"] = str(record.exc_info[1])
+            payload["traceback"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -45,10 +48,17 @@ def setup_structured_logging(level: str = "INFO") -> logging.Logger:
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
 
+    formatter = StructuredFormatter()
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(StructuredFormatter())
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
+    else:
+        # A legacy module may have initialized the same logger name first.
+        # Normalize existing handlers so import order cannot disable JSON logs.
+        for handler in logger.handlers:
+            if not isinstance(handler.formatter, StructuredFormatter):
+                handler.setFormatter(formatter)
 
     return logger
 

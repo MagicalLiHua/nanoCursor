@@ -7,6 +7,36 @@ import (
 	"strings"
 )
 
+var hiddenDirectoryNames = map[string]bool{
+	".backups":      true,
+	".git":          true,
+	".mypy_cache":   true,
+	".nanocursor":   true,
+	".pytest_cache": true,
+	".ruff_cache":   true,
+	".snapshots":    true,
+	".task_outputs": true,
+	".tasks":        true,
+	".team":         true,
+	".tox":          true,
+	".transcripts":  true,
+	"__pycache__":   true,
+	"build":         true,
+	"dist":          true,
+	"node_modules":  true,
+}
+
+var hiddenFileSuffixes = map[string]bool{
+	".class": true,
+	".dll":   true,
+	".dylib": true,
+	".o":     true,
+	".pyd":   true,
+	".pyc":   true,
+	".pyo":   true,
+	".so":    true,
+}
+
 // ReadFile reads a file. Small files return full content, large files return AST outline.
 func ReadFile(workspace, filename string) (string, error) {
 	safePath, err := GetSafeFilepath(workspace, filename)
@@ -122,13 +152,16 @@ func ListDirectory(workspace, path string) (string, error) {
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
 	})
 
 	var lines []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, ".backups") || strings.HasPrefix(name, ".snapshots") {
+		if hiddenDirectoryNames[name] || hiddenFileSuffixes[strings.ToLower(fileSuffix(name))] {
 			continue
 		}
 		if entry.IsDir() {
@@ -143,4 +176,12 @@ func ListDirectory(workspace, path string) (string, error) {
 	}
 
 	return fmt.Sprintf("目录 '%s' 的内容:\n%s", path, strings.Join(lines, "\n")), nil
+}
+
+func fileSuffix(name string) string {
+	idx := strings.LastIndex(name, ".")
+	if idx < 0 {
+		return ""
+	}
+	return name[idx:]
 }

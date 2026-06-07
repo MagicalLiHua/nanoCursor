@@ -21,14 +21,14 @@ from src.api.models import IntentDecision
 
 EXECUTION_VERBS = frozenset({
     "帮我", "写", "做", "创建", "生成", "实现", "修改", "修复", "新增", "删除", "重构",
-    "运行", "测试", "补充", "构建", "开发", "完成", "比较", "统计", "优化", "改",
+    "运行", "测试", "补充", "补", "构建", "开发", "完成", "比较", "统计", "优化", "改", "加",
     "write", "create", "generate", "implement", "modify", "fix", "add", "delete",
     "refactor", "run", "test", "build", "compare", "benchmark", "optimize",
 })
 
 WRITE_ACTION_MARKERS = frozenset({
-    "写", "创建", "生成", "实现", "修改", "修复", "新增", "删除", "重构", "补充",
-    "构建", "开发", "完成", "优化", "改",
+    "写", "创建", "生成", "实现", "修改", "修复", "新增", "删除", "重构", "补充", "补",
+    "构建", "开发", "完成", "优化", "改", "加",
     "write", "create", "generate", "implement", "modify", "fix", "add", "delete",
     "refactor", "build", "optimize",
 })
@@ -99,6 +99,13 @@ FOLLOWUP_MARKERS = frozenset({
     "继续", "接着", "按刚才", "按照刚才", "按上面", "按照上面", "继续做", "继续改",
     "继续实现", "继续修", "下一步", "接下来", "照着刚才",
     "continue", "keep going", "next step", "as above", "same way",
+})
+
+CONVERSATION_META_MARKERS = frozenset({
+    "上一条消息", "上一条", "上条消息", "上条", "刚才我问", "刚刚我问",
+    "我刚才问", "我刚刚问", "之前我问", "前面我问", "上一轮我问",
+    "我问了什么", "我说了什么", "你记得我", "总结一下刚才",
+    "previous message", "last message", "what did i ask", "what was my last",
 })
 
 
@@ -211,6 +218,18 @@ def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> I
             suggested_agents=["Lead"],
         )
 
+    if "conversation_meta_question" in signals:
+        return _decision(
+            route="direct_answer",
+            intent="conversation_meta_question",
+            level="simple",
+            strategy="analysis_only",
+            confidence=0.88,
+            rationale="请求询问当前会话历史或上一条消息，应该由 Lead 基于会话记忆直接回答，不创建任务卡或读取/修改工作区。",
+            signals=signals,
+            suggested_agents=["Lead"],
+        )
+
     if "conversation_followup" in signals and "coding_conversation_context" in signals:
         route, level, strategy, requires_write, requires_shell, agents, rationale = _followup_decision_from_context(
             conversation_summary
@@ -275,7 +294,7 @@ def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> I
     wants_artifact = "write_action" in signals and "code_artifact" in signals
     explicit_code = "code_artifact" in signals and "direct_answer_question" not in signals
     if wants_artifact or explicit_code:
-        route = "small_edit" if _looks_like_small_edit(signals) else "feature_delivery"
+        route = "small_edit" if _looks_like_small_edit(signals) or _looks_like_single_step_code_edit(signals) else "feature_delivery"
         level = "small_code" if route == "small_edit" else "medium"
         if "multi_stage_scope" not in signals and route == "feature_delivery":
             level = "small_code"
@@ -386,15 +405,21 @@ def _decision_from_llm(llm_result: dict[str, Any], guarded: IntentDecision) -> I
 
 def _collect_signals(raw: str, text: str, compact: str, conversation_summary: str) -> list[str]:
     signals: list[str] = []
+    write_negated = _has_write_negation(text, compact)
+    read_negated = _has_workspace_read_negation(text, compact)
+    if write_negated:
+        signals.append("write_negated")
+    if read_negated:
+        signals.append("workspace_read_negated")
     if _has_any(text, compact, GREETING_MARKERS):
         signals.append("greeting")
     if _has_any(text, compact, DIRECT_ANSWER_MARKERS):
         signals.append("direct_answer_question")
-    if _has_any(text, compact, WORKSPACE_READ_MARKERS):
+    if _has_any(text, compact, WORKSPACE_READ_MARKERS) and not read_negated:
         signals.append("workspace_read")
-    if _has_any(text, compact, EXECUTION_VERBS):
+    if _has_any(text, compact, EXECUTION_VERBS) and not write_negated:
         signals.append("execution_verb")
-    if _has_any(text, compact, WRITE_ACTION_MARKERS):
+    if _has_any(text, compact, WRITE_ACTION_MARKERS) and not write_negated:
         signals.append("write_action")
     if _has_any(text, compact, CODE_ARTIFACTS):
         signals.append("code_artifact")
@@ -416,6 +441,8 @@ def _collect_signals(raw: str, text: str, compact: str, conversation_summary: st
         signals.append("ambiguous_action")
     if _has_any(text, compact, FOLLOWUP_MARKERS):
         signals.append("conversation_followup")
+    if _has_any(text, compact, CONVERSATION_META_MARKERS):
+        signals.append("conversation_meta_question")
     if len(raw) > 260:
         signals.append("long_prompt")
     if conversation_summary and any(
@@ -537,8 +564,44 @@ def _has_any(text: str, compact: str, markers: frozenset[str]) -> bool:
     return False
 
 
+def _has_write_negation(text: str, compact: str) -> bool:
+    patterns = (
+        "不要读取或修改", "不要读取或修改文件", "不要读写", "不要读写文件",
+        "不读取或修改", "不读取或修改文件", "不读写", "不读写文件",
+        "无需读取或修改", "不需要读取或修改",
+        "不要修改", "不要改", "不要写", "不要创建", "不要生成", "不要新增", "不要删除",
+        "不修改", "不改", "不写", "不创建", "不生成", "不新增", "不删除",
+        "无需修改", "无需改", "无需写", "无需创建", "无需生成",
+        "不需要修改", "不需要改", "不需要写", "不需要创建", "不需要生成",
+        "只读", "仅分析", "只分析", "不要动文件", "不要改文件",
+        "do not modify", "don't modify", "dont modify", "no modification",
+        "do not write", "don't write", "dont write", "read only", "read-only",
+    )
+    return any(pattern.replace(" ", "") in compact or pattern in text for pattern in patterns)
+
+
+def _has_workspace_read_negation(text: str, compact: str) -> bool:
+    patterns = (
+        "不要读取", "不要读", "不要查看", "不要看", "不要检查", "不要分析",
+        "不读取", "不读", "不查看", "不检查", "不分析",
+        "无需读取", "无需查看", "无需检查", "无需分析",
+        "不需要读取", "不需要查看", "不需要检查", "不需要分析",
+        "不要读取或修改文件", "不要读写文件", "不要访问文件",
+        "do not read", "don't read", "dont read", "do not inspect",
+        "without reading files", "no file access",
+    )
+    return any(pattern.replace(" ", "") in compact or pattern in text for pattern in patterns)
+
+
 def _is_greeting_or_identity(raw: str, signals: list[str]) -> bool:
-    return "greeting" in signals and len(raw) <= 180 and not {"execution_verb", "code_artifact"} & set(signals)
+    signal_set = set(signals)
+    if "greeting" not in signal_set or len(raw) > 180:
+        return False
+    if {"execution_verb", "write_action", "workspace_read", "debug_signal"} & signal_set:
+        return False
+    if "code_artifact" in signal_set and "write_negated" not in signal_set:
+        return False
+    return True
 
 
 def _is_ambiguous_action(raw: str, signals: list[str]) -> bool:
@@ -553,6 +616,11 @@ def _is_ambiguous_action(raw: str, signals: list[str]) -> bool:
 def _looks_like_small_edit(signals: list[str]) -> bool:
     signal_set = set(signals)
     return "small_edit_signal" in signal_set
+
+
+def _looks_like_single_step_code_edit(signals: list[str]) -> bool:
+    signal_set = set(signals)
+    return not bool({"multi_stage_scope", "tooling_or_verification", "debug_signal"} & signal_set)
 
 
 def _agents_for_level(level: str) -> list[str]:

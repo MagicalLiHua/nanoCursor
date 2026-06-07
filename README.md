@@ -103,7 +103,7 @@ observe -> propose -> check -> repair -> commit -> verify
 
 nanoCursor 会为当前工作区建立一个简单的项目索引，比如入口文件、源码目录、测试文件、配置文件和最近改动。
 
-后续给模型上下文时，会尽量只放和当前任务有关的信息，比如：
+给模型上下文时，会尽量只放和当前任务有关的信息，比如：
 
 - 用户这次的请求
 - 最近对话摘要
@@ -112,7 +112,7 @@ nanoCursor 会为当前工作区建立一个简单的项目索引，比如入口
 - 最近变更
 - 用户偏好和 Skills
 
-这块还在继续打磨。我的目标是让它少做无意义搜索，也少因为上下文太乱而乱改。
+这块现在已经不只是“拼 prompt”，而是通过 Context Pack 管理：每轮运行会记录选了哪些文件、为什么选、哪些内容因为预算被省略，以及用户请求、当前任务和工具策略这些高优先级内容是否被保留下来。
 
 ### 工具权限和恢复
 
@@ -131,6 +131,19 @@ nanoCursor 会为当前工作区建立一个简单的项目索引，比如入口
 ### MCP / Skills
 
 前端有一个能力配置入口，可以管理 MCP Server 和自定义 Skills。这个功能现在还比较早期，但方向是让用户把自己的工具、知识库、项目规则接进来，而不是每次都靠一段很长的 prompt。
+
+### 运行结果也要能被衡量
+
+nanoCursor 不只检查“接口有没有报错”，还会从每次 run 留下的事件、Loop 账本和 Context Pack 里计算一些可解释指标：
+
+- Agent 实际走了多少轮
+- 选中的上下文文件和最终真正处理的文件是否相关
+- 工具调用有多少真正成功
+- retry 是否带着原始失败证据完成了恢复
+- 召回的记忆是否真的和当前任务有关
+- 审批请求有没有正常闭环
+
+这些指标有独立的只读 API，也进入了本地 Agent Eval 门禁。没有调用工具的普通问答会标记为“不适用”，不会因为工具调用数为零被误判成失败。
 
 ## 架构
 
@@ -158,10 +171,11 @@ flowchart TD
 
 ## 技术栈
 
-- 后端：Python, FastAPI, Pydantic, SSE, SQLite/EventStore
+- 后端：Python, FastAPI, Pydantic, SSE, workspace-scoped EventStore
 - 前端：React, Vite, Zustand, lucide-react
 - Agent：Lead-first runtime, Agent Loop Controller, dynamic sub-agents, tool policy, project index
 - 工程工具：pytest, Ruff, Playwright
+- 可选 Go Sidecar：Project Index、Filetools、Executor 等 gRPC 服务
 - 扩展能力：MCP Server presets, custom Skills
 
 ## 快速开始
@@ -231,6 +245,38 @@ python scripts/dev_backend.py
 python scripts/dev_frontend.py
 ```
 
+Go indexer 和 Go 文件工具 sidecar 默认开启 feature flag，并保留 Python fallback。最推荐的启动方式是让 dev 脚本一起拉起它们：
+
+```bash
+python scripts/dev.py --with-go-indexer --with-go-filetools
+```
+
+或者只启动“Go filetools + 后端”：
+
+```bash
+scripts/dev_with_go_filetools.sh
+```
+
+Go indexer 负责项目索引、符号搜索、项目摘要和路由摘要；Go filetools 负责文件读取、写入、编辑、目录列表、备份和回滚。它们都是可回退服务：如果没启动，后端会自动走 Python 实现，并进入短暂冷却，避免反复连接失败刷屏。相关开关在 `.env.example` 里：
+
+```bash
+NANOCURSOR_GO_INDEXER_ENABLED=true
+NANOCURSOR_GO_INDEXER_FALLBACK=true
+NANOCURSOR_GO_INDEXER_ADDR=localhost:50051
+NANOCURSOR_GO_INDEXER_FAILURE_COOLDOWN_SECONDS=10
+NANOCURSOR_GO_FILETOOLS_ENABLED=true
+NANOCURSOR_GO_FILETOOLS_FALLBACK=true
+NANOCURSOR_GO_FILETOOLS_ADDR=localhost:50054
+NANOCURSOR_GO_FILETOOLS_FAILURE_COOLDOWN_SECONDS=10
+```
+
+可以用这个接口检查当前状态：
+
+```bash
+curl http://127.0.0.1:8100/api/runtime/indexer/status
+curl http://127.0.0.1:8100/api/runtime/filetools/status
+```
+
 默认地址：
 
 - Frontend: `http://127.0.0.1:5173`
@@ -261,20 +307,22 @@ npm --prefix frontend run check
 pytest
 
 # 基础语法检查
-python -m py_compile api_server.py src/api/server.py src/agent/engine.py
+python -m py_compile src/api/server.py src/api/legacy_runtime.py src/agent/engine.py
 
 # API smoke test
 python scripts/api_smoke.py
 
 # Agent/Intent/Policy 小评测
 python scripts/run_agent_evals.py --workspace-dir /tmp/nanocursor-eval --no-persist
+
+# 一次性运行完整本地质量门禁
+python scripts/check_all.py
 ```
 
 ## 项目结构
 
 ```text
 nanoCursor/
-  api_server.py                 # Legacy 兼容入口，保留给旧测试和过渡期内部调用
   frontend/
     src/
       App.jsx                   # 前端主视图
@@ -288,7 +336,14 @@ nanoCursor/
   src/
     agent/                      # Agent Runtime、上下文压缩、技能运行
     agent/strategy/             # 意图分类、计划生成、工具策略
+    api/legacy_runtime.py       # Legacy 兼容层，保留旧测试 monkeypatch / static serving
     api/server.py               # 正式 ASGI 后端入口
+    api/run_state.py            # 会话、事件与运行状态共享 helper
+    api/services/runtime_registry_service.py   # 进程内运行状态唯一入口
+    api/services/runtime_lifecycle_service.py  # 启动恢复、清理与关闭持久化
+    api/services/runtime_executor_service.py   # Agent workflow 核心执行器
+    api/services/workflow_thread_service.py    # workflow 启动、恢复、重试线程边界
+    api/services/deterministic_run_service.py  # demo / benchmark 统一收尾
     api/routes/                 # FastAPI 路由
     api/services/               # 会话、运行、Agent Loop、审批、Diff、报告、MCP 等服务
     indexer/                    # 项目索引
@@ -297,8 +352,13 @@ nanoCursor/
     runtime/                    # 运行状态、事件、审计、交付契约
     tasks/                      # 任务管理
     tools/                      # 工具实现
+  go-services/
+    filetools/                  # 可选 Go gRPC 文件工具 sidecar
+    indexer/                    # 可选 Go 项目索引 sidecar
+    executor/                   # 可选 Go 命令执行 sidecar
   tests/                        # 后端测试
-  docs/product-roadmap.md       # 后续开发唯一主计划
+  docs/product-roadmap.md       # 当前架构状态和收尾计划
+  docs/archive/                 # 旧路线图和后端整理计划归档
   docs/                         # 审计报告、面试材料和保留文档
   images/                       # README 截图
 ```
@@ -307,23 +367,24 @@ nanoCursor/
 
 这个项目还是个人项目，不是成熟商业工具。它现在能跑真实小任务，也能展示比较完整的运行过程。后端已经有了比较清晰的几条主线：Intent Router、Agent Loop Controller、Task Board、Context Pack、Action Policy、EventStore 和恢复记录。
 
-最近主要在补 Agent Loop：
+最近主要完成的是 Agent Loop、Context Pack、Memory Governance、Tool Governance 和 Runtime Eval 的收口：
 
 - `GET /api/runs/{thread_id}/loop/observation` 可以看到当前 loop 观察到的状态。
 - `POST /api/runs/{thread_id}/loop/actions/check` 可以预检一个 Lead action。
 - `POST /api/runs/{thread_id}/loop/step` 可以 preview 或提交一轮 controller step。
 - `execute_tools=true` 时，`call_tool` 会进入统一 action pipeline，安全操作直接执行，高风险操作进入审批。
 
-还需要继续磨的地方也不少，比如更强的上下文选择、更系统的评测、失败恢复策略、前端交互和 MCP/Skills 的使用体验。
+现在更适合做的不是继续加功能，而是用真实任务继续验证稳定性，修那些确实会影响运行结果的问题。
 
 我做它的主要原因，是想把 AI 编程工具里那些平时看不见的东西拆开研究：Agent 怎么分工，工具怎么管，失败怎么恢复，上下文怎么组织，用户怎么知道系统不是在乱改。
 
 ## 接下来想做的事
 
-后续开发路线已经收敛到 [docs/product-roadmap.md](docs/product-roadmap.md)。短期我更想继续打磨两件事：
+后续开发路线已经收敛到 [docs/product-roadmap.md](docs/product-roadmap.md)。短期更适合做三件事：
 
-- Agent Loop 和 Task Board 的闭环，让工具结果、失败、恢复动作更自然地回流到下一轮决策。
-- Context Pack 2.0，让不同 Agent、不同工具调用拿到更合适的上下文，而不是靠堆 token。
+- 选几组真实代码任务做 benchmark，记录 route、上下文、工具调用、Diff、测试和最终回复是否可信。
+- 把 README、截图、面试问答和简历项目描述整理到一致口径。
+- 只修真实任务暴露的问题，不再为了“看起来更完整”继续堆边缘功能。
 
 ## License
 

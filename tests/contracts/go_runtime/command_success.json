@@ -1,0 +1,21 @@
+{
+  "tool_run_id": "tr_contract",
+  "status": "completed",
+  "backend": "go_runtime",
+  "tool": "run_command",
+  "command": "echo hello",
+  "cwd": "/workspace",
+  "exit_code": 0,
+  "stdout": "hello\n",
+  "stderr": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "duration_ms": 12,
+  "timed_out": false,
+  "evidence": {
+    "kind": "command_result",
+    "summary": "command completed",
+    "artifacts": []
+  }
+}
+

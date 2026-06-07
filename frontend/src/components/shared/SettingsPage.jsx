@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import {
-  X, User, Palette, Server, FolderOpen, Plug, Zap, Keyboard,
+  X, User, Server, FolderOpen, Plug, Zap, Keyboard,
   Plus, Trash2, RefreshCw, Check, AlertCircle, ExternalLink,
 } from "lucide-react";
 import useStore from "../../store/index.js";
@@ -8,15 +8,22 @@ import { getApiClient } from "../../core/sharedApi.js";
 import {
   loadMcpConfigBundle,
   installMcpPreset,
+  loadMcpTools,
+  probeMcpServer,
+  setMcpServerEnabled,
+  deleteMcpServer,
+  loadSkills as loadSkillRegistry,
   loadSkillDetail,
   saveSkillContent,
   importCustomSkill,
   deleteSkill,
+  setSkillEnabled,
+  previewGitHubSkillImport,
+  importGitHubSkill,
 } from "../../actions/capabilityActions.js";
 
 const SECTIONS = [
   { id: "profile", label: "个人资料", icon: User },
-  { id: "appearance", label: "外观", icon: Palette },
   { id: "workspace", label: "工作区", icon: FolderOpen },
   { id: "llm", label: "LLM 配置", icon: Server },
   { id: "mcp", label: "MCP 服务器", icon: Plug },
@@ -86,47 +93,6 @@ function ProfileSection() {
   );
 }
 
-/* ── Appearance ── */
-
-function AppearanceSection() {
-  const [theme, setTheme] = React.useState(() => localStorage.getItem("nc_theme") || "light");
-
-  const handleThemeChange = (newTheme) => {
-    setTheme(newTheme);
-    localStorage.setItem("nc_theme", newTheme);
-    document.documentElement.setAttribute("data-theme", newTheme);
-  };
-
-  return (
-    <div className="settings-section-content">
-      <h3>外观</h3>
-      <p className="settings-description">自定义界面外观</p>
-
-      <div className="settings-field">
-        <label>主题</label>
-        <div className="settings-theme-options">
-          <button
-            className={`theme-option ${theme === "light" ? "active" : ""}`}
-            onClick={() => handleThemeChange("light")}
-            type="button"
-          >
-            <div className="theme-preview light" />
-            <span>浅色</span>
-          </button>
-          <button
-            className={`theme-option ${theme === "dark" ? "active" : ""}`}
-            onClick={() => handleThemeChange("dark")}
-            type="button"
-          >
-            <div className="theme-preview dark" />
-            <span>深色</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ── Workspace ── */
 
 function WorkspaceSection() {
@@ -144,6 +110,9 @@ function WorkspaceSection() {
   const handleOpen = () => {
     openWorkspace();
   };
+  const uniqueRecentProjects = Array.from(
+    new Map((recentProjects || []).filter((item) => item?.path).map((item) => [item.path, item])).values()
+  );
 
   return (
     <div className="settings-section-content">
@@ -162,11 +131,11 @@ function WorkspaceSection() {
         </div>
       </div>
 
-      {recentProjects?.length > 0 && (
+      {uniqueRecentProjects.length > 0 && (
         <div className="settings-field">
           <label>最近项目</label>
           <div className="recent-projects-list">
-            {recentProjects.map((item) => (
+            {uniqueRecentProjects.map((item) => (
               <button
                 key={item.path}
                 className="recent-project-item"
@@ -177,7 +146,10 @@ function WorkspaceSection() {
                 type="button"
               >
                 <FolderOpen size={14} />
-                <span>{item.name || item.path}</span>
+                <span title={item.path}>
+                  <strong>{item.name || item.path}</strong>
+                  <small>{item.path}</small>
+                </span>
               </button>
             ))}
           </div>
@@ -189,46 +161,238 @@ function WorkspaceSection() {
 
 /* ── LLM Config ── */
 
+const PROVIDER_OPTIONS = [
+  { id: "deepseek", label: "DeepSeek", key: "DEEPSEEK_API_KEY" },
+  { id: "anthropic", label: "Anthropic", key: "ANTHROPIC_API_KEY" },
+  { id: "openai", label: "OpenAI", key: "OPENAI_API_KEY" },
+  { id: "minimax", label: "MiniMax", key: "MINIMAX_API_KEY" },
+  { id: "ollama", label: "Ollama 本地", key: "OLLAMA_BASE_URL" },
+];
+
+function ProviderStatus({ providers = {}, activeProvider = "" }) {
+  return (
+    <div className="llm-provider-grid">
+      {PROVIDER_OPTIONS.map((provider) => {
+        const status = providers[provider.id] || {};
+        const configured = Boolean(status.has_key);
+        return (
+          <div key={provider.id} className={`llm-provider-card ${activeProvider === provider.id ? "active" : ""}`}>
+            <div>
+              <strong>{provider.label}</strong>
+              <span>{status.model || "未设置模型"}</span>
+            </div>
+            <span className={`settings-pill ${configured ? "ok" : "muted"}`}>
+              {configured ? "已配置" : "未配置"}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function LlmSection() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [config, setConfig] = useState(null);
+  const [checks, setChecks] = useState([]);
+  const [form, setForm] = useState({
+    provider: "deepseek",
+    default_model: "",
+    base_url: "",
+    api_key: "",
+    temperature: 0.2,
+    max_tokens: 8192,
+  });
+  const showToast = useStore((s) => s.showToast);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const api = getApiClient();
+      const [configData, settingsData, validation] = await Promise.all([
+        api.fetchJson("/api/config"),
+        api.fetchJson("/api/workspace/settings/effective"),
+        api.requestJson("/api/workspace/settings/validate", { method: "POST" }),
+      ]);
+      const model = settingsData?.model || {};
+      const detectedProvider = model.provider || Object.entries(configData?.llm_providers || {}).find(([, value]) => value?.has_key)?.[0] || "deepseek";
+      const providerConfig = configData?.llm_providers?.[detectedProvider] || {};
+      setConfig(configData);
+      setChecks(validation?.checks || []);
+      setForm({
+        provider: detectedProvider,
+        default_model: model.default_model || providerConfig.model || "",
+        base_url: model.base_url || providerConfig.base_url || "",
+        api_key: "",
+        temperature: Number(model.temperature ?? 0.2),
+        max_tokens: Number(model.max_tokens ?? 8192),
+      });
+    } catch (error) {
+      showToast?.({ title: "LLM 配置加载失败", content: error.message, kind: "error" });
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const activeStatus = config?.llm_providers?.[form.provider] || {};
+  const selectedProvider = PROVIDER_OPTIONS.find((item) => item.id === form.provider);
+
+  const updateField = (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const saveConfig = async () => {
+    setSaving(true);
+    try {
+      const api = getApiClient();
+      const modelSettings = {
+        provider: form.provider,
+        default_model: form.default_model.trim(),
+        base_url: form.base_url.trim(),
+        temperature: Number(form.temperature),
+        max_tokens: Number(form.max_tokens),
+      };
+      if (form.api_key.trim()) {
+        modelSettings.api_key = form.api_key.trim();
+      }
+      await api.requestJson("/api/workspace/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: { model: modelSettings } }),
+      });
+      showToast?.({ title: "LLM 配置已保存", content: "新的配置会在下一次模型调用时生效。", kind: "success" });
+      await loadData();
+    } catch (error) {
+      showToast?.({ title: "保存失败", content: error.message, kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="settings-section-content">
-      <h3>LLM 配置</h3>
-      <p className="settings-description">配置大语言模型 API 连接</p>
+      <div className="settings-section-header">
+        <div>
+          <h3>LLM 配置</h3>
+          <p className="settings-description">配置当前工作区使用的大语言模型连接</p>
+        </div>
+        <button className="icon-button subtle" onClick={loadData} type="button" title="刷新配置">
+          <RefreshCw size={16} />
+        </button>
+      </div>
+
+      {loading ? <div className="settings-loading">正在读取配置...</div> : null}
+
+      <ProviderStatus providers={config?.llm_providers || {}} activeProvider={form.provider} />
 
       <div className="settings-field">
-        <label>API 端点</label>
-        <input
-          defaultValue="http://127.0.0.1:8100"
-          placeholder="http://127.0.0.1:8100"
-          readOnly
-        />
-        <span className="settings-hint">在 .env 文件中配置 API Key 和模型</span>
+        <label htmlFor="llm-provider">模型提供商</label>
+        <select
+          id="llm-provider"
+          value={form.provider}
+          onChange={(e) => {
+            const provider = e.target.value;
+            const providerStatus = config?.llm_providers?.[provider] || {};
+            setForm((current) => ({
+              ...current,
+              provider,
+              default_model: current.default_model || providerStatus.model || "",
+              base_url: providerStatus.base_url || current.base_url || "",
+              api_key: "",
+            }));
+          }}
+        >
+          {PROVIDER_OPTIONS.map((provider) => (
+            <option key={provider.id} value={provider.id}>{provider.label}</option>
+          ))}
+        </select>
       </div>
 
       <div className="settings-field">
-        <label>支持的提供商</label>
-        <div className="settings-info-list">
-          <div className="settings-info-item">
-            <span className="provider-name">DeepSeek</span>
-            <span className="settings-hint">DEEPSEEK_API_KEY</span>
-          </div>
-          <div className="settings-info-item">
-            <span className="provider-name">MiniMax</span>
-            <span className="settings-hint">MINIMAX_API_KEY</span>
-          </div>
-          <div className="settings-info-item">
-            <span className="provider-name">OpenAI</span>
-            <span className="settings-hint">OPENAI_API_KEY</span>
-          </div>
-          <div className="settings-info-item">
-            <span className="provider-name">Anthropic</span>
-            <span className="settings-hint">ANTHROPIC_API_KEY</span>
-          </div>
-          <div className="settings-info-item">
-            <span className="provider-name">Ollama (本地)</span>
-            <span className="settings-hint">OLLAMA_BASE_URL</span>
+        <label htmlFor="llm-model">默认模型</label>
+        <input
+          id="llm-model"
+          value={form.default_model}
+          onChange={(e) => updateField("default_model", e.target.value)}
+          placeholder="例如 deepseek-chat / claude-sonnet-4-6"
+        />
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="llm-base-url">Base URL</label>
+        <input
+          id="llm-base-url"
+          value={form.base_url}
+          onChange={(e) => updateField("base_url", e.target.value)}
+          placeholder="留空则使用提供商默认地址"
+        />
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="llm-api-key">API Key</label>
+        <input
+          id="llm-api-key"
+          type="password"
+          value={form.api_key}
+          onChange={(e) => updateField("api_key", e.target.value)}
+          placeholder={activeStatus.has_key ? "已配置，输入新 key 可覆盖" : selectedProvider?.key || "API Key"}
+          autoComplete="off"
+        />
+        <span className="settings-hint">
+          出于安全考虑，已保存的 key 不会回显；当前状态：{activeStatus.has_key ? "已配置" : "未配置"}。
+        </span>
+      </div>
+
+      <div className="settings-two-col">
+        <div className="settings-field">
+          <label htmlFor="llm-temperature">Temperature</label>
+          <input
+            id="llm-temperature"
+            type="number"
+            min="0"
+            max="2"
+            step="0.1"
+            value={form.temperature}
+            onChange={(e) => updateField("temperature", e.target.value)}
+          />
+        </div>
+        <div className="settings-field">
+          <label htmlFor="llm-max-tokens">Max Tokens</label>
+          <input
+            id="llm-max-tokens"
+            type="number"
+            min="512"
+            step="512"
+            value={form.max_tokens}
+            onChange={(e) => updateField("max_tokens", e.target.value)}
+          />
+        </div>
+      </div>
+
+      {checks.length ? (
+        <div className="settings-field">
+          <label>配置检查</label>
+          <div className="settings-check-list">
+            {checks.map((check) => (
+              <div key={check.id} className={`settings-check-item ${check.status}`}>
+                {check.status === "passed" ? <Check size={14} /> : <AlertCircle size={14} />}
+                <span>{check.message}</span>
+              </div>
+            ))}
           </div>
         </div>
+      ) : null}
+
+      <div className="settings-actions">
+        <button className="button compact-button" onClick={loadData} type="button">重新校验</button>
+        <button className="button primary compact-button" onClick={saveConfig} disabled={saving} type="button">
+          {saving ? "保存中" : "保存配置"}
+        </button>
       </div>
     </div>
   );
@@ -240,7 +404,9 @@ function McpSection() {
   const [loading, setLoading] = useState(true);
   const [servers, setServers] = useState([]);
   const [presets, setPresets] = useState([]);
+  const [toolsByServer, setToolsByServer] = useState({});
   const [installing, setInstalling] = useState(null);
+  const [busyServer, setBusyServer] = useState(null);
   const [error, setError] = useState("");
 
   const loadData = useCallback(async () => {
@@ -276,6 +442,55 @@ function McpSection() {
     }
   };
 
+  const handleProbe = async (serverId) => {
+    setBusyServer(serverId);
+    setError("");
+    try {
+      const api = getApiClient();
+      await probeMcpServer({ requestJson: api.requestJson, serverId });
+      const tools = await loadMcpTools({ fetchJson: api.fetchJson, serverId, refresh: true });
+      setToolsByServer((prev) => ({ ...prev, [serverId]: tools.tools || {} }));
+      await loadData();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyServer(null);
+    }
+  };
+
+  const handleToggle = async (serverId, enabled) => {
+    setBusyServer(serverId);
+    setError("");
+    try {
+      const api = getApiClient();
+      await setMcpServerEnabled({ requestJson: api.requestJson, serverId, enabled });
+      await loadData();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyServer(null);
+    }
+  };
+
+  const handleDelete = async (serverId) => {
+    setBusyServer(serverId);
+    setError("");
+    try {
+      const api = getApiClient();
+      await deleteMcpServer({ requestJson: api.requestJson, serverId });
+      setToolsByServer((prev) => {
+        const next = { ...prev };
+        delete next[serverId];
+        return next;
+      });
+      await loadData();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyServer(null);
+    }
+  };
+
   return (
     <div className="settings-section-content">
       <div className="settings-section-header">
@@ -303,15 +518,67 @@ function McpSection() {
             <label>已安装</label>
             {servers.length > 0 ? (
               <div className="mcp-server-list">
-                {servers.map((server) => (
-                  <div key={server.id || server.name} className="mcp-server-item">
-                    <div className="mcp-server-info">
-                      <span className="mcp-server-name">{server.id || server.name}</span>
-                      <span className="mcp-server-cmd">{server.command || ""}</span>
+                {servers.map((server) => {
+                  const serverId = server.id || server.name;
+                  const runtimeTools = toolsByServer[serverId]?.tools || toolsByServer[serverId]?.catalog || [];
+                  const toolSummary = runtimeTools.length
+                    ? `${runtimeTools.length} tools`
+                    : server.last_tools_count
+                      ? `${server.last_tools_count} tools`
+                      : "";
+                  const status = server.enabled === false ? "disabled" : (server.health || server.status || "unknown");
+                  return (
+                    <div key={serverId} className="mcp-server-item">
+                      <div className="mcp-server-info">
+                        <span className="mcp-server-name">{serverId}</span>
+                        <span className="mcp-server-cmd">{server.command || "未配置命令"}</span>
+                        <span className="mcp-preset-desc">
+                          {status}
+                          {toolSummary ? ` · ${toolSummary}` : ""}
+                          {server.last_error ? ` · ${server.last_error}` : ""}
+                        </span>
+                      </div>
+                      <div className="mcp-card-actions">
+                        <span className={`mcp-status-dot ${server.status === "ready" ? "running" : "stopped"}`} />
+                        <button
+                          className="button ghost compact-button"
+                          onClick={() => handleProbe(serverId)}
+                          disabled={busyServer === serverId || server.enabled === false}
+                          type="button"
+                        >
+                          探测
+                        </button>
+                        <button
+                          className="button ghost compact-button"
+                          onClick={() => handleToggle(serverId, server.enabled === false)}
+                          disabled={busyServer === serverId || server.config_status !== "configured"}
+                          type="button"
+                        >
+                          {server.enabled === false ? "启用" : "停用"}
+                        </button>
+                        <button
+                          className="icon-button subtle"
+                          onClick={() => handleDelete(serverId)}
+                          disabled={busyServer === serverId || server.config_status !== "configured"}
+                          title="删除"
+                          type="button"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      {runtimeTools.length > 0 && (
+                        <div className="mcp-tool-list">
+                          {runtimeTools.slice(0, 8).map((tool) => (
+                            <span key={`${serverId}-${tool.name || tool.tool}`}>
+                              {tool.name || tool.tool}
+                              {tool.permission_level ? ` · ${tool.permission_level}` : ""}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <span className={`mcp-status-dot ${server.status === "running" ? "running" : "stopped"}`} />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="settings-empty">暂无已安装的 MCP 服务器</div>
@@ -331,10 +598,10 @@ function McpSection() {
                     <button
                       className="button compact-button"
                       onClick={() => handleInstallPreset(preset.id)}
-                      disabled={installing === preset.id}
+                      disabled={installing === preset.id || preset.installed}
                       type="button"
                     >
-                      {installing === preset.id ? "安装中..." : "安装"}
+                      {preset.installed ? "已安装" : installing === preset.id ? "安装中..." : "安装"}
                     </button>
                   </div>
                 ))}
@@ -356,16 +623,22 @@ function SkillsSection() {
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
   const [importName, setImportName] = useState("");
+  const [githubUrl, setGithubUrl] = useState("");
+  const [githubPath, setGithubPath] = useState("");
+  const [githubCandidates, setGithubCandidates] = useState([]);
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [busySkill, setBusySkill] = useState(null);
   const [error, setError] = useState("");
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
       const api = getApiClient();
-      const result = await api.fetchJson("/api/capabilities/skills");
+      const result = await loadSkillRegistry({ fetchJson: api.fetchJson });
       setSkills(Array.isArray(result?.skills) ? result.skills : []);
-    } catch {
-      // ignore
+    } catch (e) {
+      setError(e.message);
     } finally {
       setLoading(false);
     }
@@ -400,17 +673,21 @@ function SkillsSection() {
   };
 
   const handleDelete = async (skillId) => {
+    setBusySkill(skillId);
     try {
       const api = getApiClient();
       await deleteSkill({ requestJson: api.requestJson, skillId });
       await loadSkills();
     } catch (e) {
       setError(e.message);
+    } finally {
+      setBusySkill(null);
     }
   };
 
   const handleImport = async () => {
     if (!importName.trim()) return;
+    setBusySkill("import");
     try {
       const api = getApiClient();
       await importCustomSkill({ requestJson: api.requestJson, name: importName.trim() });
@@ -418,6 +695,61 @@ function SkillsSection() {
       await loadSkills();
     } catch (e) {
       setError(e.message);
+    } finally {
+      setBusySkill(null);
+    }
+  };
+
+  const handleToggleSkill = async (skillId, enabled) => {
+    setBusySkill(skillId);
+    try {
+      const api = getApiClient();
+      await setSkillEnabled({ requestJson: api.requestJson, skillId, enabled });
+      await loadSkills();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusySkill(null);
+    }
+  };
+
+  const handlePreviewGitHub = async () => {
+    if (!githubUrl.trim()) return;
+    setGithubBusy(true);
+    setError("");
+    try {
+      const api = getApiClient();
+      const result = await previewGitHubSkillImport({
+        requestJson: api.requestJson,
+        repoUrl: githubUrl.trim(),
+        path: githubPath.trim(),
+      });
+      setGithubCandidates(result.candidates || []);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setGithubBusy(false);
+    }
+  };
+
+  const handleImportGitHub = async (candidate) => {
+    setGithubBusy(true);
+    setError("");
+    try {
+      const api = getApiClient();
+      await importGitHubSkill({
+        requestJson: api.requestJson,
+        repoUrl: githubUrl.trim(),
+        path: githubPath.trim(),
+        candidateId: candidate.id || candidate.path,
+        enabled: candidate.default_enabled,
+      });
+      setGithubCandidates([]);
+      await loadSkills();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setGithubBusy(false);
     }
   };
 
@@ -471,14 +803,38 @@ function SkillsSection() {
                       <div className="skill-info">
                         <span className="skill-name">{skill.name || skill.id}</span>
                         {skill.description && <span className="skill-desc">{skill.description}</span>}
+                        <span className="skill-desc">
+                          {skill.id}
+                          {skill.source?.type ? ` · ${skill.source.type}` : ""}
+                          {skill.risk ? ` · ${skill.risk}` : ""}
+                          {skill.enabled === false ? " · 已停用" : ""}
+                        </span>
                       </div>
                       <div className="skill-actions">
+                        {skill.scope !== "builtin" && (
+                          <button
+                            className="button ghost compact-button"
+                            onClick={() => handleToggleSkill(skill.id || skill.name, skill.enabled === false)}
+                            disabled={busySkill === (skill.id || skill.name)}
+                            type="button"
+                          >
+                            {skill.enabled === false ? "启用" : "停用"}
+                          </button>
+                        )}
                         <button className="icon-button subtle" onClick={() => handleEdit(skill.id || skill.name)} title="编辑" type="button">
                           <Zap size={14} />
                         </button>
-                        <button className="icon-button subtle danger" onClick={() => handleDelete(skill.id || skill.name)} title="删除" type="button">
-                          <Trash2 size={14} />
-                        </button>
+                        {skill.scope !== "builtin" && (
+                          <button
+                            className="icon-button subtle danger"
+                            onClick={() => handleDelete(skill.id || skill.name)}
+                            disabled={busySkill === (skill.id || skill.name)}
+                            title="删除"
+                            type="button"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -501,6 +857,48 @@ function SkillsSection() {
                 <Plus size={14} /> 导入
               </button>
             </div>
+          </div>
+
+          <div className="settings-field">
+            <label>从 GitHub 导入静态 Skill</label>
+            <div className="workspace-path-row">
+              <input
+                value={githubUrl}
+                onChange={(e) => setGithubUrl(e.target.value)}
+                placeholder="https://github.com/owner/repo"
+              />
+              <button className="button compact-button" onClick={handlePreviewGitHub} disabled={!githubUrl.trim() || githubBusy} type="button">
+                {githubBusy ? "检查中..." : "预览"}
+              </button>
+            </div>
+            <input
+              value={githubPath}
+              onChange={(e) => setGithubPath(e.target.value)}
+              placeholder="可选路径，例如 skills/python-dev"
+            />
+            {githubCandidates.length > 0 && (
+              <div className="skill-list">
+                {githubCandidates.map((candidate) => (
+                  <div key={`${candidate.id}-${candidate.path}`} className="skill-item">
+                    <div className="skill-info">
+                      <span className="skill-name">{candidate.name || candidate.id}</span>
+                      <span className="skill-desc">
+                        {candidate.path || "repo root"} · {candidate.risk}
+                        {candidate.findings?.length ? ` · ${candidate.findings.length} 个风险提示` : ""}
+                      </span>
+                    </div>
+                    <button
+                      className="button compact-button"
+                      onClick={() => handleImportGitHub(candidate)}
+                      disabled={githubBusy}
+                      type="button"
+                    >
+                      导入
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -542,7 +940,6 @@ export default function SettingsPage({ onClose }) {
 
   const renderContent = () => {
     if (activeSection === "profile") return <ProfileSection />;
-    if (activeSection === "appearance") return <AppearanceSection />;
     if (activeSection === "workspace") return <WorkspaceSection />;
     if (activeSection === "llm") return <LlmSection />;
     if (activeSection === "mcp") return <McpSection />;

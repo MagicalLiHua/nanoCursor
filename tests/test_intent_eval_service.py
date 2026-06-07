@@ -44,7 +44,7 @@ def test_intent_eval_suite_reports_missing_case(tmp_path):
 
 
 def test_intent_eval_api_routes():
-    from api_server import app
+    from src.api.server import app
 
     client = TestClient(app)
     catalog = client.get("/api/evals/intent/catalog")

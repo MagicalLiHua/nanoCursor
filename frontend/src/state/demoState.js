@@ -35,7 +35,7 @@ export const demoState = {
     },
     project_index: {
       status: "demo",
-      entry_points: ["api_server.py", "frontend/src/main.js"],
+      entry_points: ["src/api/server.py", "frontend/src/main.js"],
       total_files: 0,
       source_count: 0,
       test_count: 0,

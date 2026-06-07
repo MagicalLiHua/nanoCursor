@@ -45,6 +45,24 @@ BUILTIN_SKILL_PLAYBOOKS = {
     ),
 }
 
+BUILTIN_SKILL_QUALITY_RULES = {
+    "skill.frontend-polish": [
+        "Coder 修改 UI 后必须确认输入框、按钮和折叠控件仍可连续使用。",
+        "Designer 需要复核信息密度、视觉层级和响应式布局是否仍然清爽。",
+        "Reviewer 需要关注样式改动是否引入遮挡、溢出或交互断点。",
+    ],
+    "skill.delivery-review": [
+        "Tester 必须优先检查需求覆盖、测试证据和无法验证的原因。",
+        "Reviewer 必须说明 Diff 风险、未完成项和下一步修复建议。",
+        "Lead 最终回复必须区分已完成、已验证和仍有风险的内容。",
+    ],
+}
+
+BUILTIN_SKILL_AGENT_ROLES = {
+    "skill.frontend-polish": ["designer", "coder", "reviewer"],
+    "skill.delivery-review": ["lead", "tester", "reviewer"],
+}
+
 
 def _member_text(member: dict[str, Any]) -> str:
     parts = [
@@ -172,10 +190,10 @@ def load_skill_context(
     workspace_dir: str | None = None,
     max_skill_chars: int = 1200,
     max_total_chars: int = 3600,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Load compact skill instructions for capabilities used by a plan."""
     workspace = _workspace_path(workspace_dir)
-    contexts: list[dict[str, str]] = []
+    contexts: list[dict[str, Any]] = []
     total_chars = 0
 
     for capability_id in capability_ids or []:
@@ -184,6 +202,9 @@ def load_skill_context(
 
         source = "builtin"
         content = BUILTIN_SKILL_PLAYBOOKS.get(capability_id)
+        quality_rules = list(BUILTIN_SKILL_QUALITY_RULES.get(capability_id, []))
+        agent_roles = list(BUILTIN_SKILL_AGENT_ROLES.get(capability_id, []))
+        tool_permissions: list[str] = ["read_only"]
 
         if content is None and workspace is not None:
             slug = capability_id.removeprefix("skill.")
@@ -198,6 +219,31 @@ def load_skill_context(
                         break
                 except OSError:
                     continue
+        if workspace is not None:
+            try:
+                from src.api.services.skill_registry_service import get_skill
+
+                detail = get_skill(capability_id, str(workspace))
+            except (ValueError, OSError):
+                detail = {}
+            if detail:
+                if detail.get("enabled") is False:
+                    continue
+                quality_rules = [
+                    str(rule)
+                    for rule in detail.get("quality_rules", [])
+                    if str(rule).strip()
+                ] or quality_rules
+                agent_roles = [
+                    str(role).lower()
+                    for role in detail.get("agent_roles", [])
+                    if str(role).strip()
+                ] or agent_roles
+                tool_permissions = [
+                    str(permission)
+                    for permission in detail.get("tool_permissions", [])
+                    if str(permission).strip()
+                ] or tool_permissions
 
         if not content:
             continue
@@ -207,9 +253,75 @@ def load_skill_context(
             break
         snippet = _truncate_skill_content(content, min(max_skill_chars, remaining))
         total_chars += len(snippet)
-        contexts.append({"id": capability_id, "source": source, "content": snippet})
+        contexts.append({
+            "id": capability_id,
+            "source": source,
+            "content": snippet,
+            "quality_rules": quality_rules[:12],
+            "agent_roles": agent_roles[:8],
+            "tool_permissions": tool_permissions[:8],
+        })
 
     return contexts
+
+
+def build_skill_quality_rules(
+    stages: list[dict[str, Any]],
+    skill_context: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Map selected Skill quality rules to the stages and Agent roles they affect."""
+    results: list[dict[str, Any]] = []
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        owner_role = str(stage.get("owner_role") or stage.get("owner") or "agent").lower()
+        stage_capabilities = {str(item) for item in stage.get("capabilities", []) if item}
+        rules: list[dict[str, Any]] = []
+        for skill in skill_context:
+            if not isinstance(skill, dict):
+                continue
+            skill_id = str(skill.get("id") or "")
+            skill_roles = {str(role).lower() for role in skill.get("agent_roles", []) if role}
+            applies = skill_id in stage_capabilities or _role_matches_skill(owner_role, skill_roles)
+            if not applies:
+                continue
+            for rule in skill.get("quality_rules", [])[:8]:
+                text = str(rule).strip()
+                if not text:
+                    continue
+                rules.append({
+                    "skill_id": skill_id,
+                    "rule": text[:500],
+                    "source": skill.get("source", "unknown"),
+                })
+        if rules:
+            results.append({
+                "stage_id": stage.get("id", ""),
+                "stage_title": stage.get("title", ""),
+                "owner": stage.get("owner", ""),
+                "owner_role": owner_role,
+                "rules": _dedupe_rule_items(rules)[:12],
+            })
+    return results
+
+
+def _role_matches_skill(owner_role: str, skill_roles: set[str]) -> bool:
+    if not skill_roles:
+        return False
+    role_aliases = ROLE_ALIASES.get(owner_role, {owner_role})
+    return bool(skill_roles & {str(item).lower() for item in role_aliases | {owner_role}})
+
+
+def _dedupe_rule_items(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for item in rules:
+        key = (str(item.get("skill_id") or ""), str(item.get("rule") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def build_execution_plan(
@@ -323,6 +435,7 @@ def build_execution_plan(
     tool_policy_obj = get_tool_policy(strategy_id)
     tool_policy = {**tool_policy_obj.to_dict(), **build_tool_policy(capability_ids)}
     skill_context = load_skill_context(capability_ids, workspace_dir)
+    skill_quality_rules = build_skill_quality_rules(stages, skill_context)
     mcp_plan = build_mcp_execution_plan(capability_ids, workspace_dir=workspace_dir)
 
     return {
@@ -337,6 +450,7 @@ def build_execution_plan(
         "capabilities": capability_ids,
         "tool_policy": tool_policy,
         "skill_context": skill_context,
+        "skill_quality_rules": skill_quality_rules,
         "mcp_plan": mcp_plan,
         "summary": {
             "agent_count": len(members),
@@ -344,6 +458,7 @@ def build_execution_plan(
             "capability_count": len(capability_ids),
             "recommended_tool_count": len(tool_policy["recommended_tools"]),
             "skill_context_count": len(skill_context),
+            "skill_quality_rule_count": sum(len(item.get("rules", [])) for item in skill_quality_rules),
             "mcp_count": len(mcp_plan),
             "usable_mcp_count": sum(1 for item in mcp_plan if item.get("usable")),
             "risk_count": len(risks),
@@ -401,6 +516,11 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
     risks = execution_plan.get("risks") if isinstance(execution_plan.get("risks"), list) else []
     tool_policy = execution_plan.get("tool_policy") if isinstance(execution_plan.get("tool_policy"), dict) else {}
     skill_context = execution_plan.get("skill_context") if isinstance(execution_plan.get("skill_context"), list) else []
+    skill_quality_rules = (
+        execution_plan.get("skill_quality_rules")
+        if isinstance(execution_plan.get("skill_quality_rules"), list)
+        else []
+    )
     mcp_plan = execution_plan.get("mcp_plan") if isinstance(execution_plan.get("mcp_plan"), list) else []
     members = list(team or [])
 
@@ -449,6 +569,21 @@ def build_runtime_instructions(execution_plan: dict[str, Any] | None, team: list
         lines.append("- Skill 上下文摘录:")
         for item in skill_context[:4]:
             lines.append(f"  - {item.get('id', 'skill')} ({item.get('source', 'unknown')}): {item.get('content', '')}")
+
+    if skill_quality_rules:
+        lines.append("- Skill 角色质量标准:")
+        for item in skill_quality_rules[:8]:
+            rules = item.get("rules") if isinstance(item.get("rules"), list) else []
+            if not rules:
+                continue
+            lines.append(
+                f"  - {item.get('stage_title') or item.get('stage_id')} "
+                f"({item.get('owner_role', 'agent')} / {item.get('owner', 'Agent')}):"
+            )
+            for rule in rules[:5]:
+                if not isinstance(rule, dict):
+                    continue
+                lines.append(f"    * [{rule.get('skill_id', 'skill')}] {rule.get('rule', '')}")
 
     if mcp_plan:
         lines.append("- MCP 使用计划:")

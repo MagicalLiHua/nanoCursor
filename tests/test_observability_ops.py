@@ -14,13 +14,13 @@ from src.infra.logging import StructuredFormatter, setup_structured_logging
 
 class TestRequestID:
     def test_health_has_request_id(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/health")
         assert "x-request-id" in resp.headers
 
     def test_api_error_has_request_id(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/runs/nonexistent_xyz_99999")
         assert resp.status_code == 404
@@ -31,7 +31,7 @@ class TestRequestID:
         assert "x-request-id" in resp.headers
 
     def test_custom_request_id_passthrough(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/health", headers={"x-request-id": "my-custom-id"})
         assert resp.headers["x-request-id"] == "my-custom-id"
@@ -43,7 +43,7 @@ class TestRequestID:
 
 class TestDiagnostics:
     def test_diagnostics_endpoint_returns_200(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/system/diagnostics")
         assert resp.status_code == 200
@@ -53,7 +53,7 @@ class TestDiagnostics:
         assert "env" in data
 
     def test_diagnostics_no_api_keys_leaked(self):
-        from api_server import app
+        from src.api.server import app
         import os
         # Temporarily set a fake API key
         os.environ["TEST_API_KEY"] = "secret-value-123"
@@ -68,7 +68,7 @@ class TestDiagnostics:
             del os.environ["TEST_API_KEY"]
 
     def test_diagnostics_includes_mcp_status(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/system/diagnostics")
         assert resp.status_code == 200
@@ -76,7 +76,7 @@ class TestDiagnostics:
         assert "mcp" in data
 
     def test_diagnostics_includes_runs(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/system/diagnostics")
         assert resp.status_code == 200
@@ -85,15 +85,17 @@ class TestDiagnostics:
         assert "metrics" in data["runs"]
 
     def test_diagnostics_includes_errors(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/system/diagnostics")
         assert resp.status_code == 200
         data = resp.json()
         assert "errors" in data
+        assert "sse" in data
+        assert "dropped_events" in data["sse"]
 
     def test_diagnostics_respects_workspace_dir(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         workspace = tmp_path / "custom-workspace"
         workspace.mkdir()
 
@@ -112,7 +114,7 @@ class TestDiagnostics:
 
 class TestDoctor:
     def test_doctor_returns_checks(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/system/doctor")
         assert resp.status_code == 200
@@ -160,3 +162,58 @@ class TestStructuredLogging:
         logger = setup_structured_logging("WARNING")
         assert logger.level == logging.WARNING
         assert len(logger.handlers) >= 1
+
+    def test_legacy_logger_facade_uses_structured_formatter(self):
+        from src.infra.logger import setup_logger
+
+        logger = setup_logger("nanoCursor", "INFO")
+
+        assert logger.handlers
+        assert all(isinstance(handler.formatter, StructuredFormatter) for handler in logger.handlers)
+
+    def test_formatter_includes_traceback_for_logged_exception(self):
+        formatter = StructuredFormatter()
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError as exc:
+            record = logging.LogRecord(
+                name="nanoCursor",
+                level=logging.WARNING,
+                pathname="",
+                lineno=0,
+                msg="best_effort_failed",
+                args=(),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+        data = json.loads(formatter.format(record))
+        assert data["exception"] == "boom"
+        assert "RuntimeError: boom" in data["traceback"]
+
+    def test_route_audit_best_effort_failure_is_logged(self, monkeypatch):
+        from src.api import run_state
+
+        warnings = []
+
+        class FailingAuditRepo:
+            def append(self, *_args, **_kwargs):
+                raise OSError("audit unavailable")
+
+        class FakeLogger:
+            def warning(self, event, *args, **kwargs):
+                warnings.append((event, kwargs))
+
+        monkeypatch.setattr(run_state, "get_audit_repo", lambda: FailingAuditRepo())
+        monkeypatch.setattr(run_state, "logger", FakeLogger())
+
+        run_state.audit_route_action(
+            thread_id="run-1",
+            workspace_dir="/tmp/workspace",
+            kind="test",
+        )
+
+        assert warnings[0][0] == "route_audit_persist_failed"
+        assert warnings[0][1]["extra"] == {
+            "thread_id": "run-1",
+            "workspace_id": "/tmp/workspace",
+        }

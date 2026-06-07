@@ -31,6 +31,7 @@ from src.tools.file_ops import (
     run_read as _run_read_impl,
     run_write as _run_write_impl,
 )
+from src.tools.tool_result import is_tool_error_output
 
 from dotenv import load_dotenv
 
@@ -590,7 +591,7 @@ class TeammateManager:
                     if unclaimed:
                         task = unclaimed[0]
                         result = claim_task(str(task["id"]), name, role=role, source="auto")
-                        if not result.startswith("Error:"):
+                        if not is_tool_error_output(result):
                             task_prompt = (
                                 f"<auto-claimed task>\n"
                                 f"Task #{task['id']}: {task.get('subject', '')}\n"

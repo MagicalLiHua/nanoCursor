@@ -6,12 +6,12 @@ import {
   Clock3,
   GitBranch,
   GitCompare,
-  GitPullRequest,
   HardDrive,
   Loader2,
-  RefreshCcw,
+  Search,
   Settings2,
   ShieldCheck,
+  Wrench,
 } from "lucide-react";
 import { shortPath, statusLabel } from "../../core/format.js";
 
@@ -123,12 +123,25 @@ function InfoRow({ icon: Icon, label, value, muted = false, action }) {
   );
 }
 
+function backendStatusLabel(status = {}) {
+  const backend = String(status?.backend || "").toLowerCase();
+  if (backend === "go" && status.healthy) return "Go · 已连接";
+  if (backend === "go") return "Go · 未连接";
+  if (status?.fallback_enabled || backend === "python") return "Python fallback";
+  return "未启用";
+}
+
 function ProgressList({ state }) {
   const snapshot = sessionSnapshot(state);
   const tasks = hasConcreteRunContext(state) ? uniqueVisibleTasks(state.tasks || []) : [];
   const ordered = [...tasks].sort((a, b) => taskPriority(a) - taskPriority(b));
   const completedCount = tasks.filter((task) => ["completed", "skipped"].includes(task.status)).length;
-  const currentAction = snapshot?.activity?.current_action;
+  const isLeadDirect = snapshot?.run?.strategy === "lead_direct_reply" || state.currentRunStrategy === "lead_direct_reply";
+  const currentAction = isLeadDirect
+    ? state.status === "completed"
+      ? "Lead 直接回复完成。"
+      : "Lead 正在直接回复，不创建任务卡。"
+    : snapshot?.activity?.current_action;
 
   if (!tasks.length) {
     return (
@@ -163,13 +176,19 @@ function ProgressList({ state }) {
 }
 
 function Environment({ state }) {
-  const snapshot = sessionSnapshot(state) || {};
-  const workspace = snapshot.workspace || {};
-  const changes = snapshot.changes || {};
-  const filesChanged = changes.files_changed ?? state.metrics?.files ?? state.diffFiles?.length ?? 0;
-  const insertions = changes.insertions ?? state.metrics?.insertions ?? 0;
-  const deletions = changes.deletions ?? state.metrics?.deletions ?? 0;
-  const branch = workspace.is_git_repo ? workspace.git_branch || "unknown" : "非 Git";
+  const snapshot = sessionSnapshot(state);
+  const workspace = snapshot?.workspace || {};
+  const changes = snapshot?.changes || {};
+  const filesChanged = snapshot
+    ? Number(changes.files_changed ?? (Array.isArray(changes.files) ? changes.files.length : 0))
+    : Number(state.metrics?.files ?? state.diffFiles?.length ?? 0);
+  const insertions = snapshot ? Number(changes.insertions ?? 0) : Number(state.metrics?.insertions ?? 0);
+  const deletions = snapshot ? Number(changes.deletions ?? 0) : Number(state.metrics?.deletions ?? 0);
+  const branch = workspace.is_git_repo ? workspace.git_branch || "unknown" : "非 Git 工作区";
+  const indexer = state.runtimeStatus?.indexer || {};
+  const filetools = state.runtimeStatus?.filetools || {};
+  const indexerMuted = !indexer.healthy || indexer.backend !== "go";
+  const filetoolsMuted = !filetools.healthy || filetools.backend !== "go";
 
   return (
     <Section title="环境信息" action={<Settings2 size={16} />}>
@@ -185,9 +204,19 @@ function Environment({ state }) {
         )}
       />
       <InfoRow icon={HardDrive} label="本地" value={shortPath(workspace.path || state.workspaceDir) || "未选择目录"} />
-      <InfoRow icon={GitBranch} label={branch} value={workspace.dirty ? `${filesChanged} 个文件` : "干净"} />
-      <InfoRow icon={RefreshCcw} label="提交或推送" value={filesChanged ? "待用户确认" : "暂无变更"} muted={!filesChanged} />
-      <InfoRow icon={GitPullRequest} label="GitHub CLI 不可用" muted />
+      <InfoRow icon={GitBranch} label={branch} value={workspace.dirty ? `${filesChanged} 个文件变更` : "干净"} />
+      <InfoRow
+        icon={Search}
+        label="项目索引"
+        value={backendStatusLabel(indexer)}
+        muted={indexerMuted}
+      />
+      <InfoRow
+        icon={Wrench}
+        label="文件工具"
+        value={backendStatusLabel(filetools)}
+        muted={filetoolsMuted}
+      />
     </Section>
   );
 }

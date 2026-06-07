@@ -98,12 +98,9 @@ def _build_tool_guidance(strategy: str) -> str:
 - edit_file: 编辑文件（推荐用 start_line/end_line 行号定位）
 - list_directory: 列出目录内容
 - project_context / search_codebase: 理解项目结构
-- TodoWrite / TodoList: 管理待办事项
 - task_create / task_update / task_list: 管理共享任务板
 - spawn_agent: 创建临时 Agent。run_now=true 提交到后台执行池，立即返回 agent_id，不阻塞你。可以连续 spawn 多个 Agent 并行工作。
 - gather_agents: 等待子 Agent 完成并获取结果。不传 agent_ids 则等待所有。调用会阻塞直到指定 Agent 完成。
-- task (已弃用): 旧的子代理工具，请使用 spawn_agent
-- spawn_teammate / send_message / broadcast / read_inbox (已弃用): 旧团队管理工具，请使用 spawn_agent
 
 【并行 Agent 工作流】
 对于复杂任务，你可以同时启动多个 Agent 并行工作：

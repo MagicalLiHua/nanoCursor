@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 
 def test_evals_list():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/evals")
     assert resp.status_code == 200
@@ -12,7 +12,7 @@ def test_evals_list():
 
 
 def test_system_doctor():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/doctor")
     assert resp.status_code == 200
@@ -20,7 +20,7 @@ def test_system_doctor():
 
 
 def test_system_paths():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/system/paths")
     assert resp.status_code == 200
@@ -28,14 +28,14 @@ def test_system_paths():
 
 
 def test_workspace_health():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/workspace/health")
     assert resp.status_code == 200
 
 
 def test_workspace_settings_accepts_numeric_model_values(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     original_workspace = api_server._get_workspace()
     workspace = tmp_path / "workspace"
@@ -54,7 +54,7 @@ def test_workspace_settings_accepts_numeric_model_values(tmp_path):
 
 
 def test_runs_active():
-    from api_server import app
+    from src.api.server import app
     client = TestClient(app)
     resp = client.get("/api/runs/active")
     assert resp.status_code == 200
@@ -62,7 +62,7 @@ def test_runs_active():
 
 
 def test_demo_run_endpoint_uses_workspace_argument_order(tmp_path, monkeypatch):
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     original_workspace = api_server._get_workspace()
     workspace = tmp_path / "workspace"
@@ -83,21 +83,22 @@ def test_demo_run_endpoint_uses_workspace_argument_order(tmp_path, monkeypatch):
         api_server._set_active_workspace(original_workspace)
 
 
-def test_agenthub_inline_routes_match_current_request_models(tmp_path):
-    import api_server
+def test_agenthub_inline_routes_match_current_request_models(tmp_path, monkeypatch):
+    from src.api import legacy_runtime as api_server
+    from src.api import runtime_facade
     from src.api.services.event_store import EventStore
 
     original_workspace = api_server._get_workspace()
-    original_run_workflow = api_server._run_workflow
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "README.md").write_text("hello", encoding="utf-8")
     backups_dir = workspace / ".backups"
     backups_dir.mkdir(parents=True)
     (backups_dir / "README.md.bak").write_text("restored", encoding="utf-8")
+    started_run_ids = []
     try:
         api_server._set_active_workspace(str(workspace))
-        api_server._run_workflow = lambda *args, **kwargs: None
+        monkeypatch.setattr(runtime_facade, "run_workflow", lambda *args, **kwargs: None)
         store = EventStore()
         thread_id = "smoke-inline-models"
         store.create_session(thread_id, "smoke", str(workspace), status="completed")
@@ -163,6 +164,8 @@ def test_agenthub_inline_routes_match_current_request_models(tmp_path):
             request = getattr(client, method.lower())
             resp = request(path, json=body) if body is not None else request(path)
             assert resp.status_code < 500, f"{method} {path}: {resp.text}"
+            if path.endswith("/remediation") and resp.status_code == 200:
+                started_run_ids.append(resp.json()["retry_thread_id"])
 
         checkpoint_resp = client.post(
             f"/api/runs/{thread_id}/checkpoints",
@@ -250,12 +253,13 @@ def test_agenthub_inline_routes_match_current_request_models(tmp_path):
         rollback_kinds = {item["kind"] for item in rollback_audit_resp.json()["records"]}
         assert "rollback" in rollback_kinds
     finally:
-        api_server._run_workflow = original_run_workflow
+        for run_id in started_run_ids:
+            api_server.run_manager.unregister(run_id)
         api_server._set_active_workspace(original_workspace)
 
 
 def test_missing_conversation_team_recommend_returns_404():
-    from api_server import app
+    from src.api.server import app
 
     client = TestClient(app, raise_server_exceptions=False)
     resp = client.post(
@@ -266,7 +270,7 @@ def test_missing_conversation_team_recommend_returns_404():
 
 
 def test_eval_rescore_uses_result_workspace(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     original_workspace = api_server._get_workspace()
     workspace = tmp_path / "workspace"

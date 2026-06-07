@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 import src.infra.config as config_module
 from src.infra.metrics import metrics as metrics_collector
+from src.infra.path_guard import resolve_workspace_path
+from src.runtime.command_runner import run_command_async
 from src.api.models import (
     BackupContentResponse,
     BackupEntry,
@@ -190,33 +193,55 @@ async def _check_ollama_connected(base_url: str, timeout: float = 2.0) -> bool:
 
 @router.get("/api/config")
 async def get_config():
+    try:
+        from src.api.services.workspace_runtime_service import get_active_workspace
+        from src.api.services.workspace_settings_service import get_effective_model_settings
+
+        model_override = get_effective_model_settings(workspace_dir=get_active_workspace())
+    except Exception:
+        model_override = {}
+    override_provider = str(model_override.get("provider") or "").strip().lower()
+    override_model = str(model_override.get("model") or "").strip()
+    override_base_url = str(model_override.get("base_url") or "").strip()
+    override_has_key = bool(str(model_override.get("api_key") or "").strip())
+
+    def _provider_has_key(provider: str, env_key: str) -> bool:
+        return bool(os.getenv(env_key)) or (override_provider == provider and override_has_key)
+
+    def _provider_model(provider: str, env_key: str, default: str) -> str:
+        return override_model if override_provider == provider and override_model else os.getenv(env_key, default)
+
+    def _provider_base(provider: str, env_key: str, default: str | None = None) -> str | None:
+        return override_base_url if override_provider == provider and override_base_url else (os.getenv(env_key) or default)
+
     llm_providers = {
         "openai": LLMProviderStatus(
-            has_key=bool(os.getenv("OPENAI_API_KEY")),
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-            base_url=os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL"),
+            has_key=_provider_has_key("openai", "OPENAI_API_KEY"),
+            model=_provider_model("openai", "OPENAI_MODEL", "gpt-4o"),
+            base_url=_provider_base("openai", "OPENAI_API_BASE") or _provider_base("openai", "OPENAI_BASE_URL"),
         ),
         "anthropic": LLMProviderStatus(
-            has_key=bool(os.getenv("ANTHROPIC_API_KEY")),
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
+            has_key=_provider_has_key("anthropic", "ANTHROPIC_API_KEY"),
+            model=_provider_model("anthropic", "ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
+            base_url=_provider_base("anthropic", "ANTHROPIC_BASE_URL"),
         ),
         "ollama": LLMProviderStatus(
             has_key=True,
-            model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder"),
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            model=_provider_model("ollama", "OLLAMA_MODEL", "qwen2.5-coder"),
+            base_url=_provider_base("ollama", "OLLAMA_BASE_URL", "http://localhost:11434"),
             is_connected=await _check_ollama_connected(
-                os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                _provider_base("ollama", "OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434"
             ),
         ),
         "deepseek": LLMProviderStatus(
-            has_key=bool(os.getenv("DEEPSEEK_API_KEY")),
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            has_key=_provider_has_key("deepseek", "DEEPSEEK_API_KEY"),
+            model=_provider_model("deepseek", "DEEPSEEK_MODEL", "deepseek-chat"),
+            base_url=_provider_base("deepseek", "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         ),
         "minimax": LLMProviderStatus(
-            has_key=bool(os.getenv("MINIMAX_API_KEY")),
-            model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.7"),
-            base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
+            has_key=_provider_has_key("minimax", "MINIMAX_API_KEY"),
+            model=_provider_model("minimax", "MINIMAX_MODEL", "MiniMax-M2.7"),
+            base_url=_provider_base("minimax", "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
         ),
     }
 
@@ -283,10 +308,18 @@ async def list_snapshots():
 
 @router.get("/api/snapshots/{snapshot_id}")
 async def get_snapshot(snapshot_id: str):
-    snapshots_dir = os.path.join(config_module.WORKSPACE_DIR, ".snapshots")
-    snapshot_path = os.path.join(snapshots_dir, snapshot_id)
-    if not os.path.exists(snapshot_path):
+    snapshots_dir = Path(config_module.WORKSPACE_DIR).resolve() / ".snapshots"
+    if not snapshots_dir.exists() or not snapshots_dir.is_dir():
         raise HTTPException(status_code=404, detail="快照不存在")
+
+    try:
+        snapshot_path_obj = resolve_workspace_path(snapshots_dir, snapshot_id, must_exist=True)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="快照不存在")
+
+    if not snapshot_path_obj.is_dir():
+        raise HTTPException(status_code=404, detail="快照不存在")
+    snapshot_path = str(snapshot_path_obj)
 
     result = SnapshotDetailResponse(
         metadata=SnapshotMetadata(timestamp="", reason="", active_files=[]),
@@ -385,14 +418,14 @@ class BashRequestModel(BaseModel):
 
 @router.post("/api/bash")
 async def run_bash_command(request: BashRequestModel):
-    import subprocess as sp
-
     command = request.command.strip()
     if not command:
         raise HTTPException(status_code=400, detail="命令不能为空")
 
     work_dir = request.workspace_dir or config_module.WORKSPACE_DIR
     work_dir = os.path.abspath(work_dir)
+    if not os.path.isdir(work_dir):
+        raise HTTPException(status_code=400, detail=f"工作目录不存在: {work_dir}")
 
     dangerous = ["rm -rf /", "sudo ", "shutdown", "reboot", "> /dev/", "mkfs", "chroot", "dd if="]
     for pattern in dangerous:
@@ -400,23 +433,19 @@ async def run_bash_command(request: BashRequestModel):
             return {"success": False, "stdout": "", "stderr": f"Error: Dangerous command blocked (matches '{pattern}')", "exit_code": -1}
 
     timeout = min(request.timeout, 300)
-    try:
-        r = sp.run(command, shell=True, cwd=work_dir, capture_output=True, timeout=timeout)
-        try:
-            stdout = r.stdout.decode('gbk', errors='replace')
-            stderr = r.stderr.decode('gbk', errors='replace')
-        except Exception:
-            stdout = r.stdout.decode('utf-8', errors='replace') if r.stdout else ""
-            stderr = r.stderr.decode('utf-8', errors='replace') if r.stderr else ""
-        return {
-            "success": r.returncode == 0,
-            "stdout": stdout.strip()[:50000] or "(no output)",
-            "stderr": stderr.strip()[:10000],
-            "exit_code": r.returncode,
-        }
-    except sp.TimeoutExpired:
-        return {"success": False, "stdout": "", "stderr": f"Error: Command timed out after {timeout}s", "exit_code": -1}
-    except FileNotFoundError:
-        return {"success": False, "stdout": "", "stderr": "Error: Command not found. Check that the program is installed.", "exit_code": -1}
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": f"Error: {e}", "exit_code": -1}
+    result = await run_command_async(
+        command,
+        cwd=work_dir,
+        timeout_seconds=timeout,
+        max_stdout_chars=50_000,
+        max_stderr_chars=10_000,
+        permission_level="shell_safe",
+    )
+    return {
+        "success": result.get("exit_code") == 0 and not result.get("timed_out"),
+        "stdout": str(result.get("stdout") or "").strip() or "(no output)",
+        "stderr": str(result.get("stderr") or "").strip(),
+        "exit_code": result.get("exit_code", -1),
+        "backend": result.get("backend"),
+        "timed_out": result.get("timed_out", False),
+    }

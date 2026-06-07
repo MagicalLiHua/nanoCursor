@@ -51,33 +51,39 @@ const SSE_EVENT_TYPES = [
   "error",
 ];
 
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export function useSSE() {
   const eventSourceRef = useRef(null);
+  const reconciliationTimerRef = useRef(null);
+  const reconciliationBusyRef = useRef(false);
 
   useEffect(() => {
     registerSSEFunctions({ connectEvents, closeEventSource });
     return () => {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+      closeEventSource();
     };
   }, []);
 
   function connectEvents(threadId) {
-    eventSourceRef.current?.close();
+    closeEventSource();
 
     const apiClient = getApiClient();
     const url = apiClient.eventSourceUrl(`/api/runs/${encodeURIComponent(threadId)}/events`);
     const es = new EventSource(url);
     eventSourceRef.current = es;
+    startStatusReconciliation(threadId, apiClient, es);
 
     function handleParsedEvent(data) {
       useStore.getState().handleAgentEvent(data, {
         onDone: () => {
+          stopStatusReconciliation();
           es.close();
           eventSourceRef.current = null;
-          hydrateAfterDone(threadId, apiClient);
+          hydrateAfterDone(threadId, apiClient, data.payload?.status || "completed");
         },
         onError: () => {
+          stopStatusReconciliation();
           es.close();
           eventSourceRef.current = null;
         },
@@ -99,16 +105,17 @@ export function useSSE() {
     es.onerror = () => {
       es.close();
       eventSourceRef.current = null;
-      if (useStore.getState().status !== "running") return;
+      if (!["running", "waiting_approval", "cancelling"].includes(useStore.getState().status)) {
+        stopStatusReconciliation();
+        return;
+      }
 
       loadRunSession({ fetchJson: apiClient.fetchJson, threadId })
         .then(async (session) => {
           const sessionStatus = session.status || "running";
-          if (["completed", "failed", "cancelled"].includes(sessionStatus)) {
-            useStore.setState({ status: sessionStatus });
-            useStore.getState().settleTasksForRunStatus(sessionStatus);
-            useStore.getState().updateCurrentRunStatus(sessionStatus);
-            await hydrateAfterDone(threadId, apiClient);
+          if (TERMINAL_RUN_STATUSES.has(sessionStatus)) {
+            stopStatusReconciliation();
+            await hydrateAfterDone(threadId, apiClient, sessionStatus);
             return;
           }
           useStore.getState().addTimelineEvent({
@@ -118,6 +125,7 @@ export function useSSE() {
           });
         })
         .catch((error) => {
+          stopStatusReconciliation();
           useStore.getState().addTimelineEvent({
             type: "error",
             title: "事件流连接失败",
@@ -129,15 +137,58 @@ export function useSSE() {
     };
   }
 
+  function startStatusReconciliation(threadId, apiClient, es) {
+    stopStatusReconciliation();
+    reconciliationTimerRef.current = setInterval(async () => {
+      const state = useStore.getState();
+      if (state.currentThreadId !== threadId || !["running", "waiting_approval", "cancelling"].includes(state.status)) {
+        stopStatusReconciliation();
+        return;
+      }
+      if (reconciliationBusyRef.current) return;
+
+      reconciliationBusyRef.current = true;
+      try {
+        const session = await loadRunSession({ fetchJson: apiClient.fetchJson, threadId });
+        const sessionStatus = session.status || "running";
+        if (!TERMINAL_RUN_STATUSES.has(sessionStatus)) return;
+
+        stopStatusReconciliation();
+        es.close();
+        if (eventSourceRef.current === es) eventSourceRef.current = null;
+        await hydrateAfterDone(threadId, apiClient, sessionStatus);
+      } catch {
+        // SSE remains the primary transport; the next reconciliation tick can retry.
+      } finally {
+        reconciliationBusyRef.current = false;
+      }
+    }, 2000);
+  }
+
+  function stopStatusReconciliation() {
+    if (reconciliationTimerRef.current) {
+      clearInterval(reconciliationTimerRef.current);
+      reconciliationTimerRef.current = null;
+    }
+  }
+
   function closeEventSource() {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    stopStatusReconciliation();
   }
 
   return { connectEvents, closeEventSource };
 }
 
-async function hydrateAfterDone(threadId, apiClient) {
+function applyConfirmedTerminalStatus(status) {
+  if (!TERMINAL_RUN_STATUSES.has(status)) return;
+  useStore.setState({ status });
+  useStore.getState().settleTasksForRunStatus(status);
+  useStore.getState().updateCurrentRunStatus(status);
+}
+
+async function hydrateAfterDone(threadId, apiClient, confirmedStatus = "") {
   try {
     const store = useStore.getState();
     const snapshot = await loadRunSnapshot({ fetchJson: apiClient.fetchJson, threadId });
@@ -161,7 +212,7 @@ async function hydrateAfterDone(threadId, apiClient) {
     applyRunSnapshot({
       state: tempState,
       snapshot,
-      replaceMessages: true,
+      replaceMessages: false,
       setDiffState: (diff, changedFiles) => {
         tempState.diff = diff || "";
         tempState.diffFiles = parseUnifiedDiff(diff || "", changedFiles);
@@ -193,6 +244,7 @@ async function hydrateAfterDone(threadId, apiClient) {
       approval: tempState.approval,
       selectedDiffFile: tempState.diffFiles?.[0]?.path || "",
     });
+    applyConfirmedTerminalStatus(confirmedStatus);
     return;
   } catch {
     // Fall back to legacy artifact hydration below.
@@ -240,6 +292,7 @@ async function hydrateAfterDone(threadId, apiClient) {
       recoveryCenter: tempState.recoveryCenter,
       ephemeralAgents: tempState.ephemeralAgents,
     });
+    applyConfirmedTerminalStatus(confirmedStatus);
 
     try {
       const events = await loadReplayEvents({ fetchJson: apiClient.fetchJson, threadId });
@@ -249,5 +302,7 @@ async function hydrateAfterDone(threadId, apiClient) {
     }
   } catch {
     // Artifacts hydration is best-effort
+  } finally {
+    applyConfirmedTerminalStatus(confirmedStatus);
   }
 }

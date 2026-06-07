@@ -111,13 +111,13 @@ class TestEvalSuite:
 
 class TestEvalArtifacts:
     def test_artifacts_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/evals/runs/nonexistent_xyz/artifacts")
         assert resp.status_code == 404
 
     def test_compare_endpoint(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/evals/runs/run_a_xyz/compare?other_run_id=run_b_xyz")
         assert resp.status_code == 404
@@ -125,7 +125,7 @@ class TestEvalArtifacts:
 
 class TestEvalAPI:
     def test_list_evals(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/evals")
         assert resp.status_code == 200
@@ -133,13 +133,13 @@ class TestEvalAPI:
         assert len(data["evals"]) >= 10
 
     def test_get_eval_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/evals/nonexistent_eval")
         assert resp.status_code == 404
 
     def test_suite_run(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/evals/suite/run", json={
             "eval_ids": ["fix_test_failure"],
@@ -149,19 +149,19 @@ class TestEvalAPI:
         assert resp.json()["total"] == 1
 
     def test_summary_endpoint(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/evals/summary")
         assert resp.status_code == 200
 
     def test_eval_run_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/evals/runs/bad_id")
         assert resp.status_code == 404
 
     def test_eval_detail_exists(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/evals/bug_fix_import_error")
         assert resp.status_code == 200

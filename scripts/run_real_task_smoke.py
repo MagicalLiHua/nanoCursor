@@ -124,6 +124,14 @@ def wait_for_outcome(
         last = _get_json(base_url, f"/api/runs/{thread_id}/outcome", request_timeout)
         if last.get("status") in {"completed", "failed", "cancelled"}:
             return last
+        try:
+            approvals = _get_json(base_url, f"/api/runs/{thread_id}/approvals", request_timeout).get("approvals")
+        except (urllib.error.URLError, TimeoutError):
+            approvals = []
+        if isinstance(approvals, list) and approvals:
+            last["status"] = "waiting_approval"
+            last["pending_approvals"] = approvals
+            return last
         time.sleep(poll_interval)
     raise TimeoutError(f"Run {thread_id} did not finish within {timeout_seconds}s. Last outcome: {last}")
 
@@ -152,6 +160,10 @@ def validate_outcome(
     status = str(outcome.get("status") or "")
     if status != "completed":
         errors.append(f"status expected 'completed', got {status!r}")
+    approvals = outcome.get("pending_approvals") if isinstance(outcome.get("pending_approvals"), list) else []
+    if approvals:
+        names = ", ".join(str(item.get("tool_name") or item.get("kind") or item.get("id") or "approval") for item in approvals[:3])
+        errors.append(f"run is waiting for approval: {names}")
 
     summary = outcome.get("summary") if isinstance(outcome.get("summary"), dict) else {}
     if task.require_final_message and not str(summary.get("final_message") or "").strip():

@@ -221,6 +221,45 @@ class TestCollectChangesGit:
         assert cs.files[0].change_type == "added"
         assert cs.files[0].additions == 2
 
+    def test_collect_event_changes_recovers_diff_stats(self, tmp_path):
+        ws = tmp_path / "non_git_event_stats"
+        ws.mkdir(parents=True)
+        (ws / "calc.py").write_text("def add(*args):\n    return sum(args)\n", encoding="utf-8")
+
+        thread_id = "run_event_diff_stats"
+        get_event_store().append_event(
+            thread_id,
+            "file_changed",
+            title="文件变更：calc.py",
+            content="Edited calc.py",
+            agent="coder",
+            payload={
+                "path": "calc.py",
+                "change_type": "modified",
+                "output": """Edited calc.py
+```diff
+--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,2 @@
+-def add(a, b):
+-    return a + b
++def add(*args):
++    return sum(args)
+```""",
+            },
+            workspace_dir=str(ws),
+        )
+
+        cs = collect_changes(thread_id, str(ws))
+
+        assert len(cs.files) == 1
+        assert cs.files[0].path == "calc.py"
+        assert cs.files[0].additions == 2
+        assert cs.files[0].deletions == 2
+        assert cs.total_additions == 2
+        assert cs.total_deletions == 2
+        assert cs.files[0].change_type == "modified"
+
     def test_collect_deleted_and_renamed_files(self, tmp_path):
         ws = tmp_path / "repo"
         ws.mkdir()
@@ -272,6 +311,23 @@ class TestCollectChangesGit:
         subprocess.run(["git", "commit", "-m", "init"], cwd=ws, capture_output=True)
         (ws / ".nanocursor" / "runs" / "x").mkdir(parents=True)
         (ws / ".nanocursor" / "runs" / "x" / "session.json").write_text("{}", encoding="utf-8")
+
+        assert collect_changes_git(ws) == []
+
+    def test_collect_ignores_generated_python_cache_paths(self, tmp_path):
+        ws = tmp_path / "repo"
+        ws.mkdir()
+        subprocess.run(["git", "init"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=ws, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=ws, capture_output=True)
+        (ws / "README.md").write_text("# Demo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=ws, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=ws, capture_output=True)
+
+        (ws / "__pycache__").mkdir()
+        (ws / "__pycache__" / "module.cpython-312.pyc").write_bytes(b"\0pyc")
+        (ws / "tests" / "__pycache__").mkdir(parents=True)
+        (ws / "tests" / "__pycache__" / "test_module.cpython-312.pyc").write_bytes(b"\0pyc")
 
         assert collect_changes_git(ws) == []
 

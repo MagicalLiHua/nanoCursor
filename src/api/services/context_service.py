@@ -5,15 +5,23 @@ from __future__ import annotations
 import json
 import math
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from src.agent.context_pack import ContextPack
 from src.api.services.context_budget_service import allocate_context_budget, trim_context_pack
+from src.api.services.context_recovery_service import (
+    build_compact_recovery_context,
+    build_retry_failure_context,
+    load_run_retry_context,
+    merge_failure_context_items,
+)
 from src.api.services.file_outline_service import build_file_outlines_cache, select_cached_outlines
+from src.api.services.memory_selection_service import select_memories
+from src.api.services.skill_registry_service import get_skill, preview_skill_selection
 from src.infra import config as config_module
 from src.indexer.indexer import get_project_index
+from src.runtime.git_runner import run_git
 
 
 def _workspace(workspace_dir: str | None = None) -> Path:
@@ -42,13 +50,20 @@ def build_context_pack(
     execution_plan: dict[str, Any] | None = None,
     conversation_id: str | None = None,
     thread_id: str | None = None,
+    turn_context: dict[str, Any] | None = None,
 ) -> ContextPack:
     """Build a structured context pack from workspace and execution state."""
     workspace = _workspace(workspace_dir)
     pack = ContextPack()
+    compact_turn_context = _compact_turn_context(turn_context)
+    selection_prompt = _prompt_with_turn_context(prompt, compact_turn_context)
 
     # Task summary
     pack.task_summary = (prompt or "")[:200]
+    pack.turn_context = compact_turn_context
+    pack.tool_policy = _compact_tool_policy(
+        execution_plan.get("tool_policy") if isinstance(execution_plan, dict) else None
+    )
     pack.conversation_summary = _conversation_summary(workspace, conversation_id)
     pack.execution_summary = _execution_summary(workspace, thread_id)
 
@@ -61,7 +76,7 @@ def build_context_pack(
         pack.conversation_summary, pack.execution_summary
     )
     selected_file_details = _select_relevant_file_details(
-        prompt, index_data, execution_plan,
+        selection_prompt, index_data, execution_plan,
         recent_changes=set(recent_change_list),
         conversation_symbols=conversation_symbols,
     )
@@ -69,7 +84,7 @@ def build_context_pack(
     pack.relevant_files = [item["path"] for item in selected_file_details]
     pack.selection_reasons = _selection_reason_summary(
         selected_file_details,
-        prompt_terms=_prompt_terms(prompt),
+        prompt_terms=_prompt_terms(selection_prompt),
         recent_changes=recent_change_list,
         conversation_symbols=conversation_symbols,
     )
@@ -83,11 +98,15 @@ def build_context_pack(
     # Recent failures from recovery
     from src.api.services.recovery_service import build_recovery_center
     recovery = build_recovery_center(thread_id, str(workspace))
-    failure_context = _failure_context_items(
-        recovery,
-        index_data,
-        selected_file_details,
-        recent_change_list,
+    retry_context = load_run_retry_context(thread_id, str(workspace))
+    failure_context = merge_failure_context_items(
+        _failure_context_items(
+            recovery,
+            index_data,
+            selected_file_details,
+            recent_change_list,
+        ),
+        build_retry_failure_context(retry_context, index_data),
     )
     selected_file_details = _merge_failure_related_files(
         selected_file_details,
@@ -101,6 +120,22 @@ def build_context_pack(
         pack.file_outlines = _file_outlines(index_data, pack.relevant_files)
     pack.symbols = _symbol_names(pack.file_outlines)
     pack.recent_failures = failure_context[:5]
+    pack.recovery_context = build_compact_recovery_context(recovery, failure_context, retry_context=retry_context)
+
+    # Governed memory selection is scoped, explainable, and budgeted before prompt rendering.
+    memory_selection = select_memories(
+        str(workspace),
+        prompt=selection_prompt,
+        conversation_id=conversation_id,
+        run_id=thread_id,
+        selected_files=pack.relevant_files,
+        active_task=compact_turn_context.get("active_task")
+        if isinstance(compact_turn_context.get("active_task"), dict) else None,
+        budget_tokens=1200,
+    )
+    pack.selected_memories = memory_selection.get("selected", [])
+    pack.omitted_memories = memory_selection.get("omitted", [])
+    pack.memory_budget = memory_selection.get("budget", {})
 
     # User preferences
     try:
@@ -113,12 +148,19 @@ def build_context_pack(
     except Exception:
         pack.user_preferences = []
 
-    # Selected skills
+    # Selected skills are audited separately from tool permissions. A Skill may
+    # suggest a working method, but it never grants tools by itself.
     if execution_plan:
-        capabilities = execution_plan.get("capabilities", []) or []
-        pack.selected_skills = [
-            c for c in capabilities if isinstance(c, str) and c.startswith("skill.")
-        ]
+        skill_audit = _skill_selection_audit(
+            prompt=selection_prompt,
+            team=team or [],
+            workspace_dir=str(workspace),
+            execution_plan=execution_plan,
+        )
+        pack.selected_skills = skill_audit["selected_ids"]
+        pack.selected_skill_details = skill_audit["selected"]
+        pack.omitted_skills = skill_audit["omitted"]
+        pack.skill_budget = skill_audit["budget"]
         pack.current_plan = [
             {
                 "id": str(stage.get("id", "")),
@@ -135,10 +177,17 @@ def build_context_pack(
     budget = allocate_context_budget(strategy, _strategy_token_budget(strategy))
     pack.context_debug = {
         "strategy": strategy,
-        "prompt_terms": sorted(_prompt_terms(prompt))[:30],
+        "prompt_terms": sorted(_prompt_terms(selection_prompt))[:30],
         "conversation_symbols": sorted(conversation_symbols)[:30],
         "recent_change_count": len(recent_change_list),
         "selected_file_count": len(pack.selected_files),
+        "turn_context": {
+            "step": compact_turn_context.get("step"),
+            "active_task_id": (compact_turn_context.get("active_task") or {}).get("id")
+            if isinstance(compact_turn_context.get("active_task"), dict) else None,
+            "recent_tool_result_count": len(compact_turn_context.get("recent_tool_results", []))
+            if isinstance(compact_turn_context.get("recent_tool_results"), list) else 0,
+        },
         "outline_cache": {
             "schema_version": outline_cache.get("schema_version", 1),
             "outline_count": outline_cache.get("outline_count", 0),
@@ -149,6 +198,16 @@ def build_context_pack(
             "execution_summary_chars": len(pack.execution_summary),
             "current_plan_items": len(pack.current_plan),
             "user_preference_count": len(pack.user_preferences),
+            "selected_memory_count": len(pack.selected_memories),
+            "omitted_memory_count": len(pack.omitted_memories),
+            "memory_tokens_estimate": pack.memory_budget.get("used_tokens_estimate", 0),
+            "memory_selection_id": memory_selection.get("selection_id"),
+        },
+        "skill_inputs": {
+            "selected_count": len(pack.selected_skill_details),
+            "omitted_count": len(pack.omitted_skills),
+            "context_budget": pack.skill_budget.get("context_budget", 0),
+            "selected_ids": pack.selected_skills,
         },
         "failure_context": {
             "risk_count": recovery.get("summary", {}).get("risk_count", 0),
@@ -159,12 +218,344 @@ def build_context_pack(
                 for path in failure.get("related_files", [])
             }),
             "recovery_action_count": recovery.get("summary", {}).get("action_count", 0),
+            "high_priority_action_count": sum(
+                1
+                for action in pack.recovery_context.get("actions", [])
+                if isinstance(action, dict) and action.get("priority") == "high"
+            ),
+            "retry_source": {
+                "original_thread_id": pack.recovery_context.get("original_thread_id"),
+                "retry_mode": pack.recovery_context.get("retry_mode"),
+                "failed_stage_id": pack.recovery_context.get("failed_stage_id"),
+            },
         },
         "selection_version": "context-pack-2",
     }
     pack = trim_context_pack(pack, budget)
 
     return pack
+
+
+def _skill_selection_audit(
+    *,
+    prompt: str,
+    team: list[dict[str, Any]],
+    workspace_dir: str,
+    execution_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Return selected and omitted Skill records for this context pack.
+
+    Direct replies intentionally skip Skill injection. This prevents greetings
+    and lightweight Q&A from inheriting stale code-oriented capabilities.
+    """
+    strategy = str(execution_plan.get("strategy") or "")
+    if strategy == "lead_direct_reply":
+        return {
+            "selected_ids": [],
+            "selected": [],
+            "omitted": [],
+            "budget": {
+                "strategy": strategy,
+                "context_budget": 0,
+                "selected_count": 0,
+                "omitted_count": 0,
+                "skipped": "lead_direct_reply",
+            },
+        }
+
+    preview = preview_skill_selection(prompt, workspace_dir, team=team, max_skills=5)
+    selected: list[dict[str, Any]] = [
+        _compact_skill_selection(item, source="selector")
+        for item in preview.get("selected", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    selected_ids = [str(item["id"]) for item in selected]
+
+    for capability in execution_plan.get("capabilities", []) or []:
+        if not (isinstance(capability, str) and capability.startswith("skill.")):
+            continue
+        if capability in selected_ids:
+            continue
+        try:
+            detail = get_skill(capability, workspace_dir)
+        except ValueError:
+            selected.append({
+                "id": capability,
+                "name": capability,
+                "score": 0,
+                "selection_reasons": ["execution plan capability, skill not installed"],
+                "tool_permissions": [],
+                "context_budget": 0,
+                "risk": "unknown",
+                "source": "execution_plan",
+                "available": False,
+            })
+        else:
+            if not detail.get("enabled", True):
+                continue
+            selected.append({
+                "id": capability,
+                "name": detail.get("name", capability),
+                "score": 0,
+                "selection_reasons": ["execution plan capability"],
+                "tool_permissions": detail.get("tool_permissions", []),
+                "context_budget": detail.get("context_budget", 0),
+                "risk": detail.get("risk", "low"),
+                "source": "execution_plan",
+                "available": True,
+            })
+        selected_ids.append(capability)
+
+    omitted = [
+        _compact_skill_omission(item)
+        for item in preview.get("omitted", [])
+        if isinstance(item, dict) and item.get("id") not in selected_ids
+    ]
+    context_budget = sum(int(item.get("context_budget") or 0) for item in selected)
+    return {
+        "selected_ids": selected_ids,
+        "selected": selected,
+        "omitted": omitted[:20],
+        "budget": {
+            "strategy": strategy,
+            "context_budget": context_budget,
+            "selected_count": len(selected),
+            "omitted_count": len(omitted),
+        },
+    }
+
+
+def _compact_skill_selection(item: dict[str, Any], *, source: str) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id") or ""),
+        "name": str(item.get("name") or item.get("id") or ""),
+        "score": item.get("score", 0),
+        "selection_reasons": [
+            str(reason)[:240]
+            for reason in item.get("selection_reasons", [])
+            if str(reason).strip()
+        ][:6],
+        "tool_permissions": [
+            str(permission)[:80]
+            for permission in item.get("tool_permissions", [])
+            if str(permission).strip()
+        ][:10],
+        "context_budget": int(item.get("context_budget") or 0),
+        "risk": str(item.get("risk") or "low")[:80],
+        "source": source,
+        "available": bool(item.get("enabled", True)),
+    }
+
+
+def _compact_skill_omission(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id") or ""),
+        "name": str(item.get("name") or item.get("id") or ""),
+        "score": item.get("score", 0),
+        "reason": str(item.get("reason") or "not selected")[:240],
+        "risk": str(item.get("risk") or "low")[:80],
+        "scope": str(item.get("scope") or "")[:80],
+        "enabled": bool(item.get("enabled", True)),
+    }
+
+
+def _compact_turn_context(turn_context: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only prompt-safe, compact per-turn context signals."""
+    if not isinstance(turn_context, dict):
+        return {}
+
+    active_task = turn_context.get("active_task")
+    compact_task: dict[str, Any] = {}
+    if isinstance(active_task, dict):
+        compact_task = {
+            "id": str(active_task.get("id") or "")[:120],
+            "title": str(active_task.get("title") or "")[:240],
+            "goal": str(active_task.get("goal") or "")[:500],
+            "status": str(active_task.get("status") or "")[:80],
+            "type": str(active_task.get("type") or "")[:80],
+            "agent_role": str(active_task.get("agent_role") or active_task.get("agent") or "")[:80],
+            "acceptance": _compact_context_items(active_task.get("acceptance"), limit=6),
+            "recent_evidence": _compact_context_items(active_task.get("recent_evidence"), limit=6),
+            "recent_outputs": _compact_context_items(active_task.get("recent_outputs"), limit=4),
+        }
+        compact_task = {key: value for key, value in compact_task.items() if value not in ("", [])}
+
+    failed_tasks = []
+    raw_failed_tasks = turn_context.get("failed_tasks")
+    if isinstance(raw_failed_tasks, list):
+        for task in raw_failed_tasks[:6]:
+            if not isinstance(task, dict):
+                continue
+            compact = {
+                "id": str(task.get("id") or "")[:120],
+                "title": str(task.get("title") or "")[:240],
+                "goal": str(task.get("goal") or "")[:500],
+                "status": str(task.get("status") or "")[:80],
+                "type": str(task.get("type") or "")[:80],
+                "agent_role": str(task.get("agent_role") or task.get("agent") or "")[:80],
+                "recent_evidence": _compact_context_items(task.get("recent_evidence"), limit=4),
+                "recent_outputs": _compact_context_items(task.get("recent_outputs"), limit=3),
+            }
+            compact = {key: value for key, value in compact.items() if value not in ("", [])}
+            if compact:
+                failed_tasks.append(compact)
+
+    tool_results = []
+    raw_results = turn_context.get("recent_tool_results")
+    if isinstance(raw_results, list):
+        for item in raw_results[:8]:
+            if not isinstance(item, dict):
+                continue
+            compact = {
+                "type": str(item.get("type") or "")[:100],
+                "title": str(item.get("title") or "")[:200],
+                "agent": str(item.get("agent") or "")[:80],
+                "task_id": str(item.get("task_id") or "")[:120],
+                "tool": str(item.get("tool") or item.get("kind") or "")[:100],
+                "target": str(item.get("target") or item.get("path") or "")[:240],
+                "status": str(item.get("status") or item.get("result") or "")[:100],
+                "summary": str(item.get("summary") or item.get("content") or "")[:500],
+            }
+            changed_files = item.get("changed_files")
+            if isinstance(changed_files, list):
+                compact["changed_files"] = [str(path)[:240] for path in changed_files[:8]]
+            compact = {key: value for key, value in compact.items() if value}
+            if compact:
+                tool_results.append(compact)
+
+    counts = turn_context.get("task_status_counts")
+    if not isinstance(counts, dict):
+        counts = {}
+
+    recent_event_types = turn_context.get("recent_event_types")
+    if not isinstance(recent_event_types, list):
+        recent_event_types = []
+    changed_files = turn_context.get("changed_files")
+    if not isinstance(changed_files, list):
+        changed_files = []
+
+    result = {
+        "turn_id": str(turn_context.get("turn_id") or "")[:120],
+        "step": int(turn_context.get("step") or 0) if str(turn_context.get("step") or "").isdigit() else turn_context.get("step"),
+        "active_task": compact_task,
+        "failed_tasks": failed_tasks,
+        "task_status_counts": {
+            str(key)[:80]: int(value) if isinstance(value, int) else value
+            for key, value in list(counts.items())[:12]
+        },
+        "recent_tool_results": tool_results,
+        "changed_files": [str(path)[:240] for path in changed_files[:20] if path],
+        "recent_event_types": [str(item)[:100] for item in recent_event_types[:12]],
+    }
+    return {key: value for key, value in result.items() if value not in ({}, [], "", None, 0)}
+
+
+def _compact_tool_policy(tool_policy: Any) -> dict[str, Any]:
+    """Keep the runtime's current action boundary compact and prompt-safe."""
+    if not isinstance(tool_policy, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("mode", "risk_level", "strategy"):
+        value = tool_policy.get(key)
+        if value not in (None, ""):
+            result[key] = str(value)[:100]
+    for key in (
+        "allowed_tools",
+        "denied_tools",
+        "approval_required",
+        "approval_required_levels",
+        "recommended_tools",
+    ):
+        value = tool_policy.get(key)
+        if key == "denied_tools" and not isinstance(value, list):
+            value = tool_policy.get("blocked_tools")
+        if key == "approval_required" and not isinstance(value, list):
+            value = tool_policy.get("requires_approval")
+        if isinstance(value, list):
+            result[key] = list(dict.fromkeys(str(item)[:100] for item in value if item))[:32]
+    budgets = tool_policy.get("budgets")
+    if isinstance(budgets, dict):
+        result["budgets"] = {
+            str(key)[:100]: value
+            for key, value in list(budgets.items())[:16]
+            if isinstance(value, (int, float, bool, str))
+        }
+    return {key: value for key, value in result.items() if value not in ({}, [], "", None)}
+
+
+def _prompt_with_turn_context(prompt: str, turn_context: dict[str, Any]) -> str:
+    """Blend the active turn into the selection prompt without changing user text."""
+    parts = [prompt or ""]
+    active_task = turn_context.get("active_task")
+    if isinstance(active_task, dict):
+        parts.extend([
+            str(active_task.get("title") or ""),
+            str(active_task.get("goal") or ""),
+            str(active_task.get("agent_role") or ""),
+        ])
+        for field in ("acceptance", "recent_evidence", "recent_outputs"):
+            for item in active_task.get(field, []) if isinstance(active_task.get(field), list) else []:
+                if isinstance(item, dict):
+                    parts.extend([
+                        str(item.get("title") or ""),
+                        str(item.get("description") or ""),
+                        str(item.get("content") or ""),
+                        str(item.get("path") or ""),
+                    ])
+    for task in turn_context.get("failed_tasks", []) if isinstance(turn_context.get("failed_tasks"), list) else []:
+        if not isinstance(task, dict):
+            continue
+        parts.extend([
+            str(task.get("title") or ""),
+            str(task.get("goal") or ""),
+            str(task.get("status") or ""),
+        ])
+        for field in ("recent_evidence", "recent_outputs"):
+            for item in task.get(field, []) if isinstance(task.get(field), list) else []:
+                if isinstance(item, dict):
+                    parts.extend([
+                        str(item.get("content") or ""),
+                        str(item.get("path") or ""),
+                        " ".join(str(path) for path in item.get("changed_files", []) if path)
+                        if isinstance(item.get("changed_files"), list) else "",
+                    ])
+    for item in turn_context.get("recent_tool_results", []) if isinstance(turn_context.get("recent_tool_results"), list) else []:
+        if isinstance(item, dict):
+            parts.extend([
+                str(item.get("tool") or ""),
+                str(item.get("target") or ""),
+                str(item.get("summary") or ""),
+                " ".join(str(path) for path in item.get("changed_files", []) if path)
+                if isinstance(item.get("changed_files"), list) else "",
+            ])
+    parts.extend(str(path) for path in turn_context.get("changed_files", []) if path)
+    return " ".join(part for part in parts if str(part or "").strip())
+
+
+def _compact_context_items(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        compact = {
+            "id": str(item.get("id") or item.get("event_id") or "")[:120],
+            "kind": str(item.get("kind") or item.get("type") or "")[:100],
+            "status": str(item.get("status") or "")[:100],
+            "title": str(item.get("title") or "")[:240],
+            "description": str(item.get("description") or "")[:500],
+            "content": str(item.get("content") or item.get("summary") or "")[:500],
+            "path": str(item.get("path") or "")[:240],
+            "tool": str(item.get("tool") or "")[:100],
+        }
+        changed_files = item.get("changed_files")
+        if isinstance(changed_files, list):
+            compact["changed_files"] = [str(path)[:240] for path in changed_files[:8] if path]
+        compact = {key: value for key, value in compact.items() if value not in ("", [])}
+        if compact:
+            result.append(compact)
+    return result
 
 
 def _selection_reason_summary(
@@ -385,7 +776,7 @@ def _conversation_summary(workspace: Path, conversation_id: str | None) -> str:
     data = _read_json(path) or {}
     summary = data.get("conversation_summary")
     if isinstance(summary, str):
-        return summary[:1200]
+        return _bounded_summary(summary, 1200)
     records = data.get("run_records") if isinstance(data.get("run_records"), list) else []
     parts = []
     for record in records[-5:]:
@@ -395,7 +786,19 @@ def _conversation_summary(workspace: Path, conversation_id: str | None) -> str:
             f"Run#{record.get('run_index', '?')} {record.get('status', 'unknown')}: "
             f"{record.get('prompt', '')[:80]} -> {record.get('summary', '')[:160]}"
         )
-    return "；".join(parts)[:1200]
+    return _bounded_summary("；".join(parts), 1200)
+
+
+def _bounded_summary(text: str, limit: int) -> str:
+    """Preserve stable context and the newest risks when a summary is long."""
+    compact = str(text or "").strip()
+    if len(compact) <= limit:
+        return compact
+    marker = "\n...[中间摘要已压缩]...\n"
+    available = max(limit - len(marker), 2)
+    head_size = max(1, int(available * 0.6))
+    tail_size = max(1, available - head_size)
+    return f"{compact[:head_size]}{marker}{compact[-tail_size:]}"[:limit]
 
 
 def _execution_summary(workspace: Path, thread_id: str | None) -> str:
@@ -774,20 +1177,11 @@ def _augment_from_plan(
 
 
 def _recent_changes(workspace: Path, index_data: dict[str, Any]) -> list[str]:
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
+    result = run_git(workspace, ["diff", "--name-only"], timeout_seconds=3)
+    if result.returncode == 0:
         changed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         if changed:
             return changed[:12]
-    except Exception:
-        pass
     return [str(path) for path, _ in index_data.get("recently_modified", [])[:8]]
 
 

@@ -5,6 +5,7 @@ import {
 import { agentToneFromName, formatTime } from "../core/format.js";
 import { mapBackendTeam, normalizeTask } from "../state/mappers.js";
 import { inferTaskCapabilities } from "../state/selectors.js";
+import { buildAgentActivityQueue } from "../state/chatState.js";
 
 export function mapTraceability(traceability = {}) {
   return {
@@ -89,7 +90,9 @@ export function applyRunArtifactsBundle({
         typeof item === "string" ? item : item.path,
       );
     }
-    state.report.risks = report.risks?.length ? report.risks : state.report.risks;
+    if (Array.isArray(report.risks)) {
+      state.report.risks = report.risks;
+    }
   }
 
   if (traceabilityResult.status === "fulfilled" && !hasOutcomeTraceability) {
@@ -112,7 +115,9 @@ export function applyRunArtifactsBundle({
       if (!hasOutcomeChanges && Array.isArray(delivery.changed_files) && delivery.changed_files.length) {
         state.report.changedFiles = delivery.changed_files.map((file) => file.path || file);
       }
-      state.report.risks = delivery.risks || state.report.risks;
+      if (Array.isArray(delivery.risks)) {
+        state.report.risks = delivery.risks;
+      }
       state.currentRunStatus = delivery.status;
     }
   }
@@ -167,9 +172,9 @@ export function applyRunOutcome({ state, outcome, setDiffState, setTraceability 
     state.report.summary = outcome.report.summary || outcome.summary?.final_message || state.report.summary;
     state.report.markdown = outcome.report.markdown || "";
     state.report.source = outcome.report.source || "";
-    state.report.risks = Array.isArray(outcome.report.risks) && outcome.report.risks.length
-      ? outcome.report.risks
-      : state.report.risks;
+    if (Array.isArray(outcome.report.risks)) {
+      state.report.risks = outcome.report.risks;
+    }
   }
 
   if (outcome.traceability) {
@@ -220,7 +225,23 @@ export function applyRunSnapshot({
   const quality = snapshot.quality || {};
   const timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
 
+  // A snapshot is authoritative for the selected run. Clear run-scoped
+  // evidence first so an empty field cannot leave stale data from another run.
+  state.runOutcome = null;
+  state.diff = "";
+  state.diffFiles = [];
+  state.selectedDiffFile = "";
+  setDiffState?.("", []);
+  state.report.quality = null;
+  state.report.risks = [];
+  state.report.changedFiles = [];
+  state.recoveryCenter = {
+    ...(state.recoveryCenter || {}),
+    risks: [],
+  };
+
   if (run.thread_id) state.currentThreadId = run.thread_id;
+  state.currentRunStrategy = run.strategy || state.currentRunStrategy || "";
   if (run.status) {
     state.status = run.status;
     state.currentRunStatus = run.status;
@@ -234,8 +255,12 @@ export function applyRunSnapshot({
   }
 
   const mappedMessages = mapSnapshotMessages(conversation.messages || []);
-  if (mappedMessages.length && (replaceMessages || !Array.isArray(state.messages) || state.messages.length === 0)) {
-    state.messages = mappedMessages;
+  if (mappedMessages.length) {
+    if (replaceMessages || !Array.isArray(state.messages) || state.messages.length === 0) {
+      state.messages = mappedMessages;
+    } else {
+      state.messages = mergeConversationMessages(state.messages, mappedMessages);
+    }
   }
 
   state.events = timeline.map(mapSnapshotTimelineEvent);
@@ -252,10 +277,13 @@ export function applyRunSnapshot({
   state.tasks = run.strategy === "lead_direct_reply"
     ? []
     : tasks.map((task) => normalizeTask(task, { inferTaskCapabilities })).filter(Boolean);
+  const filesChanged = Number(changes.files_changed ?? (Array.isArray(changes.files) ? changes.files.length : 0));
   state.metrics = {
     ...(state.metrics || {}),
     tasks: state.tasks.length,
-    files: Number(changes.files_changed ?? changes.files?.length ?? state.metrics?.files ?? 0),
+    files: filesChanged,
+    insertions: Number(changes.insertions ?? 0),
+    deletions: Number(changes.deletions ?? 0),
   };
 
   const outcome = snapshot.outcome && typeof snapshot.outcome === "object" ? snapshot.outcome : null;
@@ -276,7 +304,7 @@ export function applyRunSnapshot({
 
   if (quality && Object.keys(quality).length) {
     state.report.quality = quality;
-    if (Array.isArray(quality.risks) && quality.risks.length) {
+    if (Array.isArray(quality.risks)) {
       state.report.risks = quality.risks;
       state.recoveryCenter = {
         ...(state.recoveryCenter || {}),
@@ -285,9 +313,9 @@ export function applyRunSnapshot({
     }
   }
 
-  state.agentActivities = run.strategy === "lead_direct_reply" && !run.is_active
-    ? []
-    : mapSnapshotActivities(snapshot.activity?.items || []);
+  state.agentActivities = run.is_active
+    ? mapSnapshotActivities(snapshot.activity?.items || [], state.agentActivities || [])
+    : [];
   state.ephemeralAgents = normalizeEphemeralAgentsResult(
     {
       agents: Array.isArray(snapshot.agents) ? snapshot.agents : [],
@@ -327,8 +355,30 @@ function mapSnapshotMessages(messages = []) {
         ? `${message.agent || "Lead"} Agent`
         : "用户",
       time: formatTime(message.timestamp) || "",
+      sourceTimestamp: message.timestamp || null,
       content: message.content,
     }));
+}
+
+function sameMessage(a = {}, b = {}) {
+  return a.role === b.role &&
+    String(a.content || "").trim() === String(b.content || "").trim() &&
+    String(a.author || "") === String(b.author || "");
+}
+
+export function mergeConversationMessages(existing = [], incoming = []) {
+  const result = [...existing];
+  for (const message of incoming) {
+    const duplicate = result.some((item) => {
+      if (!sameMessage(item, message)) return false;
+      if (message.sourceTimestamp && item.sourceTimestamp) {
+        return message.sourceTimestamp === item.sourceTimestamp;
+      }
+      return true;
+    });
+    if (!duplicate) result.push(message);
+  }
+  return result;
 }
 
 function mapSnapshotTimelineEvent(event = {}) {
@@ -343,11 +393,9 @@ function mapSnapshotTimelineEvent(event = {}) {
   };
 }
 
-function mapSnapshotActivities(items = []) {
-  return items
+function mapSnapshotActivities(items = [], currentQueue = []) {
+  const activities = items
     .filter((item) => String(item?.action || item?.title || "").trim())
-    .slice()
-    .reverse()
     .map((item) => ({
       agent: normalizeAgentLabel(item.agent),
       title: item.title || item.type || "Agent 活动",
@@ -355,9 +403,12 @@ function mapSnapshotActivities(items = []) {
       eventType: item.type || "agent_activity",
       time: formatTime(item.timestamp) || "",
       explicitAgentWork: true,
+      payload: item.payload || {},
+      status: item.status || "",
       inputTokens: 0,
       outputTokens: 0,
     }));
+  return buildAgentActivityQueue(activities, { initialQueue: currentQueue });
 }
 
 function mapSnapshotTeamMembers(snapshot = {}) {
@@ -417,12 +468,14 @@ function normalizeAgentLabel(agent) {
 
 function mapSnapshotApproval(approval = {}) {
   const decisionId = approval.id || approval.decision_id || "";
+  const threadId = approval.thread_id || approval.run_id || "";
   const action = approval.action || approval.tool_call || {};
   const tool = approval.tool || action.kind || action.tool || "tool";
   return {
     kind: "tool",
     status: "pending",
     decisionId,
+    threadId,
     tool,
     title: approval.title || `${tool} 需要审批`,
     content: approval.reason || approval.content || action.target || "",

@@ -1,115 +1,129 @@
-"""Data routes: todos, memories, subagents."""
+"""Legacy memory routes backed by governed memory."""
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException
 
-from src.infra import db as nano_db
-from src.memory.manager import get_memory_manager
+from src.api.services.memory_governance_service import (
+    create_memory_record,
+    delete_memory_record,
+    list_memory_records,
+    update_memory_record,
+)
+from src.api.services.workspace_runtime_service import get_active_workspace
 
 router = APIRouter(prefix="/api", tags=["data"])
 
-
-# --- Todos ---
-
-@router.get("/todos")
-async def list_todos():
-    try:
-        todos = nano_db.todo_get_all()
-        return {"todos": todos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+_CATEGORY_TO_GOVERNED = {
+    "user": ("global", "user_preference"),
+    "feedback": ("workspace", "failure_pattern"),
+    "project": ("workspace", "project_fact"),
+    "reference": ("workspace", "workflow_note"),
+}
 
 
-@router.post("/todos")
-async def create_todo(title: str, priority: int = 0, category: str | None = None):
-    try:
-        item = nano_db.todo_create(title=title, priority=priority, category=category)
-        return {"todo": item}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def _workspace(workspace_dir: str | None) -> str:
+    return workspace_dir or get_active_workspace()
 
 
-@router.patch("/todos/{todo_id}/complete")
-async def complete_todo(todo_id: str):
-    result = nano_db.todo_complete(todo_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    return {"todo": result}
+def _category_for(record: dict) -> str:
+    if record.get("scope") == "global" or record.get("kind") == "user_preference":
+        return "user"
+    if record.get("kind") == "failure_pattern":
+        return "feedback"
+    if record.get("kind") == "project_fact":
+        return "project"
+    return "reference"
 
 
-@router.delete("/todos/{todo_id}")
-async def delete_todo(todo_id: str):
-    deleted = nano_db.todo_delete(todo_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    return {"deleted": True}
+def _compat_record(record: dict) -> dict:
+    """Expose governed memory through the legacy response shape."""
+    return {**record, "category": _category_for(record)}
 
-
-# --- Memories ---
 
 @router.get("/memories")
-async def list_memories(category: str | None = None, min_importance: int = 0, limit: int = 50):
-    try:
-        mm = get_memory_manager()
-        memories = mm.get(category=category, min_importance=min_importance, limit=limit)
-        return {"memories": memories}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def list_memories(
+    category: str | None = None,
+    min_importance: int = 0,
+    limit: int = 50,
+    workspace_dir: str | None = None,
+):
+    memories = [
+        _compat_record(item)
+        for item in list_memory_records(_workspace(workspace_dir), limit=1000)
+        if int(item.get("importance") or 0) >= min_importance
+        and (not category or _category_for(item) == category)
+    ]
+    return {"memories": memories[: max(0, min(limit, 1000))]}
 
 
 @router.post("/memories")
-async def create_memory(content: str, category: str, importance: int = 1, tags: str = ""):
+async def create_memory(
+    content: str,
+    category: str,
+    importance: int = 1,
+    tags: str = "",
+    workspace_dir: str | None = None,
+):
     try:
-        import json
         tag_list = json.loads(tags) if tags else []
-        mm = get_memory_manager()
-        entry = mm.save(category=category, content=content, importance=importance, tags=tag_list)
-        return {"memory": entry}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        if not isinstance(tag_list, list):
+            raise ValueError("tags must be a JSON array")
+        scope, kind = _CATEGORY_TO_GOVERNED.get(category, ("workspace", "workflow_note"))
+        record = create_memory_record(
+            _workspace(workspace_dir),
+            scope=scope,
+            kind=kind,
+            content=content,
+            source="user",
+            importance=importance,
+            tags=[str(tag) for tag in tag_list],
+            source_ref="legacy_api:/api/memories",
+            automatic=False,
+        )
+        return {"memory": _compat_record(record)}
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/memories/search")
-async def search_memories(q: str, limit: int = 20):
-    try:
-        mm = get_memory_manager()
-        results = mm.search(query=q, limit=limit)
-        return {"memories": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def search_memories(q: str, limit: int = 20, workspace_dir: str | None = None):
+    query = q.casefold().strip()
+    results = []
+    for item in list_memory_records(_workspace(workspace_dir), limit=1000):
+        haystack = " ".join([
+            str(item.get("content") or ""),
+            str(item.get("summary") or ""),
+            " ".join(str(tag) for tag in item.get("tags", [])),
+        ]).casefold()
+        if query in haystack:
+            results.append(_compat_record(item))
+    return {"memories": results[: max(0, min(limit, 1000))]}
 
 
 @router.patch("/memories/{memory_id}")
-async def update_memory(memory_id: str, content: str | None = None, importance: int | None = None):
-    result = nano_db.memory_update(memory_id, content, importance)
+async def update_memory(
+    memory_id: str,
+    content: str | None = None,
+    importance: int | None = None,
+    workspace_dir: str | None = None,
+):
+    result = update_memory_record(
+        _workspace(workspace_dir),
+        memory_id,
+        content=content,
+        importance=importance,
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return {"memory": result}
+    return {"memory": _compat_record(result)}
 
 
 @router.delete("/memories/{memory_id}")
-async def delete_memory(memory_id: str):
-    deleted = nano_db.memory_delete(memory_id)
+async def delete_memory(memory_id: str, workspace_dir: str | None = None):
+    deleted = delete_memory_record(_workspace(workspace_dir), memory_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found")
     return {"deleted": True}
-
-
-# --- Sub-Agents ---
-
-@router.get("/subagents")
-async def list_subagents():
-    try:
-        active = nano_db.subagent_get_active()
-        return {"active": active}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/subagents/{subagent_id}")
-async def get_subagent(subagent_id: str):
-    result = nano_db.subagent_get(subagent_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="SubAgent not found")
-    return {"subagent": result}

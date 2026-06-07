@@ -8,12 +8,11 @@ Git worktree 隔离管理：
 """
 
 import json
-import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from src.infra.config import WORKSPACE_DIR
+from src.runtime.git_runner import run_git
 WORKDIR = Path(WORKSPACE_DIR)
 
 
@@ -78,16 +77,7 @@ class WorktreeManager:
 
     def _git_available(self) -> bool:
         """检查 git 是否可用"""
-        try:
-            subprocess.run(
-                ["git", "status"],
-                cwd=WORKDIR,
-                capture_output=True,
-                timeout=5,
-            )
-            return True
-        except Exception:
-            return False
+        return run_git(WORKDIR, ["status"], timeout_seconds=5).returncode == 0
 
     def create(self, name: str, task_id: str = "", base_ref: str = "HEAD") -> dict | None:
         """
@@ -99,12 +89,7 @@ class WorktreeManager:
         wt_path = WORKTREES_DIR / name
 
         try:
-            result = subprocess.run(
-                ["git", "worktree", "add", str(wt_path), base_ref],
-                cwd=WORKDIR,
-                capture_output=True,
-                timeout=30,
-            )
+            result = run_git(WORKDIR, ["worktree", "add", str(wt_path), base_ref], timeout_seconds=30)
             if result.returncode == 0:
                 entry = {
                     "name": name,
@@ -146,7 +131,7 @@ class WorktreeManager:
             cmd = ["git", "worktree", "remove", str(wt_path)]
             if force:
                 cmd.append("--force")
-            subprocess.run(cmd, cwd=WORKDIR, capture_output=True, timeout=30)
+            run_git(WORKDIR, cmd[1:], timeout_seconds=30)
         except Exception:
             pass
 

@@ -1,10 +1,13 @@
 """Tests for SSE broker."""
 
 import asyncio
+import json
+import threading
 import pytest
 from unittest.mock import MagicMock
 
-from src.api.services.sse_broker import SSEBroker
+from src.api.services.event_store import EventStore
+from src.api.services.sse_broker import SSEBroker, stream_events_push
 from src.api.models import AgentEvent
 
 
@@ -101,6 +104,26 @@ def test_publish_to_full_queue_drops_event():
 
     assert q.get_nowait() == "filler"
     assert q.empty()
+    assert broker.dropped_event_count("thread-1") == 1
+    assert broker.dropped_event_count() == 1
+
+
+def test_dropped_event_count_is_isolated_per_thread():
+    broker = SSEBroker()
+    q1 = asyncio.Queue(maxsize=1)
+    q2 = asyncio.Queue(maxsize=1)
+    broker.subscribe("thread-1", q1)
+    broker.subscribe("thread-2", q2)
+    q1.put_nowait("filler")
+    q2.put_nowait("filler")
+
+    broker.publish("thread-1", _make_event("thread-1"))
+    broker.publish("thread-1", _make_event("thread-1"))
+    broker.publish("thread-2", _make_event("thread-2"))
+
+    assert broker.dropped_event_count("thread-1") == 2
+    assert broker.dropped_event_count("thread-2") == 1
+    assert broker.dropped_event_count() == 3
 
 
 def test_multiple_events_in_order():
@@ -120,3 +143,102 @@ def test_multiple_events_in_order():
     for i, raw in enumerate(received):
         data = AgentEvent.model_validate_json(raw)
         assert data.content == f"part-{i}"
+
+
+def test_publish_from_worker_thread_uses_subscriber_loop():
+    async def scenario():
+        broker = SSEBroker()
+        queue = asyncio.Queue(maxsize=4)
+        broker.subscribe("thread-1", queue)
+        event = _make_event("thread-1", "message", "from worker")
+        worker = threading.Thread(target=broker.publish, args=("thread-1", event))
+        worker.start()
+        worker.join()
+        return await asyncio.wait_for(queue.get(), timeout=1)
+
+    raw = asyncio.run(scenario())
+
+    assert AgentEvent.model_validate_json(raw).content == "from worker"
+
+
+def test_event_store_listener_adapter_publishes_persisted_event(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    broker = SSEBroker()
+    queue = asyncio.Queue(maxsize=4)
+    broker.subscribe("thread-1", queue)
+    store.add_listener(broker.publish_event)
+
+    event = store.append_event("thread-1", "message", content="persisted", workspace_dir=str(workspace))
+
+    assert AgentEvent.model_validate_json(queue.get_nowait()) == event
+
+
+def test_stream_subscribes_before_history_and_deduplicates_race(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    broker = SSEBroker()
+    event = _make_event("thread-1", "message", "during history")
+    calls = 0
+
+    def list_events(thread_id, workspace_dir=None, after=0):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            broker.publish(thread_id, event)
+            return [event]
+        return []
+
+    monkeypatch.setattr(store, "list_events", list_events)
+    monkeypatch.setattr(store, "get_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.api.services.sse_broker.get_event_store", lambda: store)
+    monkeypatch.setattr("src.api.services.sse_broker.get_sse_broker", lambda: broker)
+
+    async def collect():
+        stream = stream_events_push("thread-1", str(workspace), heartbeat_interval=0.01)
+        first = await anext(stream)
+        second = await anext(stream)
+        await stream.aclose()
+        return first, second
+
+    first, second = asyncio.run(collect())
+
+    assert json.loads(first.split("data: ", 1)[1])["id"] == event.id
+    assert second == ": heartbeat\n\n"
+
+
+def test_stream_resumes_after_last_event_id(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    broker = SSEBroker()
+    first = _make_event("thread-1", "message", "first")
+    second = AgentEvent(
+        id="second-event",
+        thread_id="thread-1",
+        type="done",
+        timestamp=1001.0,
+        agent="lead",
+        content="second",
+        payload={},
+    )
+
+    monkeypatch.setattr(store, "list_events", lambda *_args, **_kwargs: [first, second])
+    monkeypatch.setattr(store, "get_session", lambda *_args, **_kwargs: {"status": "completed"})
+    monkeypatch.setattr("src.api.services.sse_broker.get_event_store", lambda: store)
+    monkeypatch.setattr("src.api.services.sse_broker.get_sse_broker", lambda: broker)
+
+    async def collect():
+        stream = stream_events_push(
+            "thread-1",
+            str(workspace),
+            last_event_id=first.id,
+        )
+        return await anext(stream)
+
+    event_text = asyncio.run(collect())
+
+    assert "id: second-event" in event_text
+    assert json.loads(event_text.split("data: ", 1)[1])["content"] == "second"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import queue
-import threading
 import uuid
 
 from fastapi import APIRouter, HTTPException
@@ -32,6 +31,7 @@ from src.api.services.observability_service import build_run_observability
 from src.api.services.recovery_action_service import execute_recovery_action
 from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
 from src.api.services.run_context import RunContext
+from src.api.services.workflow_thread_service import start_workflow_thread
 
 router = APIRouter(tags=["recovery"])
 
@@ -134,15 +134,12 @@ async def start_remediation_run(thread_id: str, request: RemediationRunRequest):
     )
 
     initial_messages = [HumanMessage(content=prompt)]
-    from api_server import _run_workflow
-
-    t = threading.Thread(
-        target=_run_workflow,
-        args=(new_tid, initial_messages, run_workspace),
-        daemon=True,
+    start_workflow_thread(
+        thread_id=new_tid,
+        initial_messages=initial_messages,
+        workspace_dir=run_workspace,
+        run_context=run_context,
     )
-    active_runs[new_tid].thread = t
-    t.start()
 
     return {"original_thread_id": thread_id, "retry_thread_id": new_tid, "status": "created"}
 

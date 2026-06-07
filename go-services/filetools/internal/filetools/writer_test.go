@@ -34,6 +34,24 @@ func TestWriteFileExists(t *testing.T) {
 	}
 }
 
+func TestWriteFileWithOptionsOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.txt")
+	os.WriteFile(path, []byte("old"), 0644)
+
+	result, err := WriteFileWithOptions(dir, "existing.txt", "new", WriteOptions{Overwrite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "updated") {
+		t.Errorf("expected updated message, got %q", result)
+	}
+	content, _ := os.ReadFile(path)
+	if string(content) != "new" {
+		t.Errorf("content = %q, want %q", string(content), "new")
+	}
+}
+
 func TestEditFileExact(t *testing.T) {
 	dir := t.TempDir()
 	content := "line1\nold_code\nline3"
@@ -50,6 +68,52 @@ func TestEditFileExact(t *testing.T) {
 	newContent, _ := os.ReadFile(filepath.Join(dir, "edit.txt"))
 	if !strings.Contains(string(newContent), "new_code") {
 		t.Error("expected new_code in file")
+	}
+}
+
+func TestEditFileWithOptionsLineRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "edit.txt")
+	os.WriteFile(path, []byte("line1\nline2\nline3\n"), 0644)
+
+	result, err := EditFileWithOptions(dir, "edit.txt", EditOptions{
+		StartLine:    2,
+		EndLine:      2,
+		NewText:      "replaced",
+		MatchMode:    "exact",
+		CreateBackup: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed || !strings.Contains(result.Strategy, "Line Range") {
+		t.Errorf("expected line range edit result, got %+v", result)
+	}
+
+	newContent, _ := os.ReadFile(path)
+	if string(newContent) != "line1\nreplaced\nline3\n" {
+		t.Errorf("content = %q", string(newContent))
+	}
+	if result.BackupPath == "" {
+		t.Error("expected backup path")
+	}
+}
+
+func TestEditFileWithOptionsExactModeSkipsFuzzy(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "edit.txt"), []byte("line1\nold_code\nline3"), 0644)
+
+	result, err := EditFileWithOptions(dir, "edit.txt", EditOptions{
+		SearchBlock:  "old_c0de",
+		ReplaceBlock: "new_code",
+		MatchMode:    "exact",
+		CreateBackup: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Result, "未能") {
+		t.Errorf("expected exact mode not found, got: %s", result.Result)
 	}
 }
 

@@ -6,7 +6,6 @@
 src/core/.env
 **/.env
 /demo-workspaces/
-/docs
 /src/nanocursor.db
 
 # ==========================================
@@ -17,9 +16,11 @@ src/core/.env
 **/.idea/
 **/.vscode/
 *.iml
+.DS_Store
 .claude/
 .ruff_cache/
 .mypy_cache/
+/docs
 
 # ==========================================
 # Python
@@ -89,3 +90,4 @@ docs/backend-audit-report.md
 # 操作系统
 .DS_Store
 Thumbs.db
+audit-results/

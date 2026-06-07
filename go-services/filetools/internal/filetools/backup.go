@@ -24,7 +24,7 @@ func BackupFile(workspace, filename string) string {
 	os.MkdirAll(backupDir, 0755)
 
 	safeName := strings.ReplaceAll(filename, string(filepath.Separator), "_")
-	timestamp := time.Now().Format("20060102_150405")
+	timestamp := time.Now().Format("20060102_150405.000000000")
 	backupPath := filepath.Join(backupDir, fmt.Sprintf("%s.bak.%s", safeName, timestamp))
 
 	if err := copyFile(safePath, backupPath); err != nil {

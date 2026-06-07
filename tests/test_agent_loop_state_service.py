@@ -56,7 +56,7 @@ def test_agent_loop_state_persists_steps(tmp_path):
 
 
 def test_run_loop_route_derives_state_from_session(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
     from src.api.services.intent_router import classify_user_intent
 
@@ -142,6 +142,48 @@ def test_loop_guard_blocks_read_only_action_execute(tmp_path):
     assert result["allowed"] is False
     assert "非写入任务" in result["reason"]
     assert not (workspace / "README.md").exists()
+
+
+def test_loop_guard_blocks_small_edit_risky_shell(tmp_path):
+    from src.api.services.agent_loop_state_service import (
+        check_loop_action,
+        check_loop_tool_guard,
+        init_agent_loop_state,
+    )
+    from src.api.services.intent_router import classify_user_intent
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "small-edit-risky-shell"
+    init_agent_loop_state(
+        thread_id,
+        str(workspace),
+        user_request="帮我改 README 的错别字",
+        intent=classify_user_intent("帮我改 README 的错别字"),
+    )
+
+    tool_decision = check_loop_tool_guard(
+        thread_id,
+        str(workspace),
+        "bash",
+        {"command": "rm -rf build"},
+    )
+    action_decision = check_loop_action(
+        thread_id,
+        str(workspace),
+        {
+            "type": "call_tool",
+            "goal": "remove build",
+            "agent": "Lead",
+            "tool_call": {"tool": "bash", "input": {"command": "rm -rf build"}},
+        },
+    )
+
+    assert tool_decision is not None
+    assert tool_decision.allowed is False
+    assert action_decision["allowed"] is False
+    assert action_decision["code"] == "small_edit_tool_action_mismatch"
+    assert action_decision["repaired_action"]["type"] == "inspect_project"
 
 
 def test_loop_guard_allows_read_only_mcp_action(tmp_path):

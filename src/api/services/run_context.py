@@ -13,7 +13,7 @@ from typing import Any
 class RunContext:
     """In-memory state for one active run.
 
-    The class keeps the old dict-style accessors used by api_server.py while
+    The class keeps the old dict-style accessors used by legacy runtime while
     giving the runtime a named boundary for workspace, conversation, team, and
     approval state.
     """
@@ -179,6 +179,24 @@ class RunContext:
             "failure": stage.get("failure"),
         }
 
+    @staticmethod
+    def _stage_has_recovery_evidence(stage: dict[str, Any]) -> bool:
+        failed_at = stage.get("failed_at")
+        try:
+            failed_ts = float(failed_at)
+        except (TypeError, ValueError):
+            return False
+        for evidence in stage.get("tool_evidence", []):
+            if not isinstance(evidence, dict) or not bool(evidence.get("ok")):
+                continue
+            try:
+                evidence_ts = float(evidence.get("timestamp"))
+            except (TypeError, ValueError):
+                continue
+            if evidence_ts >= failed_ts:
+                return True
+        return False
+
     def start_first_stage(self) -> list[dict[str, Any]]:
         """Mark the first planned stage as running."""
         self._ensure_lifecycle()
@@ -249,11 +267,18 @@ class RunContext:
 
         if final_status == "completed":
             for stage in stages:
+                if stage.get("status") == "failed" and self._stage_has_recovery_evidence(stage):
+                    update = self._set_stage_status(stage, "completed", "recovered_after_tool_failure")
+                    if update:
+                        updates.append(update)
                 if stage.get("status") in {"pending", "running"}:
                     target_status = "completed" if stage.get("required", True) else "skipped"
                     update = self._set_stage_status(stage, target_status, "run_completed")
                     if update:
                         updates.append(update)
+            if not any(stage.get("status") == "failed" for stage in stages):
+                self.metadata["lifecycle"]["failed_stage_id"] = None
+                self.metadata["lifecycle"]["failure"] = None
             self.metadata["lifecycle"]["completed_at"] = time.time()
             self.metadata["lifecycle"]["status"] = "completed"
         elif final_status in {"failed", "cancelled"}:

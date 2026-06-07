@@ -15,6 +15,7 @@ import asyncio
 import contextvars
 import inspect
 import json
+import shlex
 import time
 import uuid
 from contextlib import contextmanager
@@ -24,9 +25,11 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-from src.infra.llm_config import MODEL, API_KEY, BASE_URL, create_client
+from src.infra.llm_config import MODEL, API_KEY, BASE_URL, create_client, get_model_name
+from src.infra.logger import logger
 from src.infra.metrics import metrics as _metrics
 from src.agent.state import WorkflowCancelledError
+from src.tools.tool_result import is_tool_error_output
 
 # ========== 配置 ==========
 import src.infra.config as _config
@@ -41,7 +44,8 @@ def get_workdir() -> Path:
 
 def reset_runtime_caches() -> None:
     """Clear workspace-scoped runtime singletons after the active workspace changes."""
-    global _todo_mgr
+    global _task_mgr, _todo_mgr
+    _task_mgr = None
     _todo_mgr = None
 
 
@@ -100,13 +104,6 @@ BASE_TOOLS = [
      }, "required": []}},
 ]
 
-TODO_TOOLS = [
-    {"name": "TodoWrite", "description": "Add/update todos",
-     "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string"}, "status": {"type": "string"}}}}}}},
-    {"name": "TodoList", "description": "List all todos",
-     "input_schema": {"type": "object", "properties": {}}},
-]
-
 TASK_TOOLS = [
     {"name": "task_create", "description": "Create a task",
      "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}, "blocked_by": {"type": "array", "items": {"type": "string"}}}, "required": ["subject"]}},
@@ -114,11 +111,6 @@ TASK_TOOLS = [
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}, "status": {"type": "string"}}, "required": ["task_id", "status"]}},
     {"name": "task_list", "description": "List tasks",
      "input_schema": {"type": "object", "properties": {"status": {"type": "string"}}}},
-]
-
-SUBAGENT_TOOLS = [
-    {"name": "task", "description": "(Deprecated: use spawn_agent instead) Spawn a subagent with fresh context",
-     "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string"}, "agent_type": {"type": "string"}}, "required": ["prompt"]}},
 ]
 
 MEMORY_TOOLS = [
@@ -196,16 +188,6 @@ AGENT_RUNTIME_TOOLS = [
     },
 ]
 
-# Team tools from team.py
-from src.team.team import (
-    get_team_manager, BUS, REQUEST_STORE,
-    scan_unclaimed_tasks, claim_task,
-    handle_shutdown_request as _handle_shutdown_req, handle_plan_review as _handle_plan_review, check_request_status as _check_request_status,
-    make_identity_block, ensure_identity_context,
-    TEAM_TOOLS as _TEAM_TOOLS,
-)
-
-# Add team tools to ALL_TOOLS
 # Project tools
 from src.tools.project_tools import PROJECT_TOOLS as _PROJECT_TOOLS
 # Git tools
@@ -213,21 +195,18 @@ from src.tools.git_tools import GIT_TOOLS as _GIT_TOOLS
 
 ALL_TOOLS = (
     BASE_TOOLS
-    + TODO_TOOLS
     + TASK_TOOLS
-    + SUBAGENT_TOOLS
     + MEMORY_TOOLS
     + AGENT_RUNTIME_TOOLS
     + _PROJECT_TOOLS
     + _GIT_TOOLS
-    + _TEAM_TOOLS
 )
 # Alias for backwards compatibility
 TOOLS = ALL_TOOLS
 
 
 # ========== 工具处理函数 ==========
-import subprocess
+import importlib.util
 
 from src.tools.path_safety import safe_path as _safe_path
 from src.tools.bash import run_bash as _run_bash_impl
@@ -237,6 +216,7 @@ from src.tools.file_ops import (
     run_read as _run_read_impl,
     run_write as _run_write_impl,
 )
+from src.runtime.command_runner import run_command
 
 
 def safe_path(p: str) -> Path:
@@ -251,6 +231,24 @@ def run_list_directory(path: str = ".") -> str:
     return _run_list_dir_impl(path, get_workdir())
 
 
+def _parse_test_summary(output: str) -> tuple[int, int, int, str]:
+    import re as _re
+
+    passed = failed = errors = 0
+    summary_line = ""
+    for line in output.splitlines():
+        passed_match = _re.search(r"(\d+)\s+passed", line)
+        failed_match = _re.search(r"(\d+)\s+failed", line)
+        error_match = _re.search(r"(\d+)\s+errors?", line)
+        if not any((passed_match, failed_match, error_match)):
+            continue
+        passed = int(passed_match.group(1)) if passed_match else passed
+        failed = int(failed_match.group(1)) if failed_match else failed
+        errors = int(error_match.group(1)) if error_match else errors
+        summary_line = line.strip()
+    return passed, failed, errors, summary_line
+
+
 def run_tests(test_path: str = "", framework: str = "auto") -> str:
     """Run the project's test suite and return results.
 
@@ -263,6 +261,12 @@ def run_tests(test_path: str = "", framework: str = "auto") -> str:
     wd = get_workdir()
     test_dir = wd / "tests"
     test_path_arg = test_path.strip() if test_path else ""
+    env = None
+    if (wd / "src").is_dir():
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        src_path = str((wd / "src").resolve())
+        env["PYTHONPATH"] = src_path if not existing else f"{src_path}{os.pathsep}{existing}"
 
     if framework == "auto":
         # Auto-detect framework
@@ -288,52 +292,76 @@ def run_tests(test_path: str = "", framework: str = "auto") -> str:
                 cmd.append(test_path_arg)
             else:
                 cmd.append("tests/")
-            cmd.extend(["-v", "--tb=short", "--timeout=60"])
-            r = subprocess.run(cmd, cwd=str(wd), capture_output=True, timeout=120)
+            cmd.extend(["-v", "--tb=short"])
+            if importlib.util.find_spec("pytest_timeout") is not None:
+                cmd.append("--timeout=60")
+            command_text = shlex.join(cmd)
+            result = run_command(
+                command_text,
+                cwd=wd,
+                timeout_seconds=120,
+                max_stdout_chars=8000,
+                max_stderr_chars=8000,
+                permission_level="shell_safe",
+                env=env,
+            )
         elif framework == "npm":
             cmd = ["npm", "test"]
             if test_path_arg:
                 cmd.extend(["--", test_path_arg])
-            r = subprocess.run(cmd, cwd=str(wd), capture_output=True, timeout=120)
+            command_text = shlex.join(cmd)
+            result = run_command(
+                command_text,
+                cwd=wd,
+                timeout_seconds=120,
+                max_stdout_chars=8000,
+                max_stderr_chars=8000,
+                permission_level="shell_safe",
+            )
         elif framework == "go":
             cmd = ["go", "test", "./..."]
             if test_path_arg:
                 cmd = ["go", "test", test_path_arg]
-            r = subprocess.run(cmd, cwd=str(wd), capture_output=True, timeout=120)
+            command_text = shlex.join(cmd)
+            result = run_command(
+                command_text,
+                cwd=wd,
+                timeout_seconds=120,
+                max_stdout_chars=8000,
+                max_stderr_chars=8000,
+                permission_level="shell_safe",
+            )
         else:
             # Generic: just try pytest
             cmd = ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
-            r = subprocess.run(cmd, cwd=str(wd), capture_output=True, timeout=120)
+            command_text = shlex.join(cmd)
+            result = run_command(
+                command_text,
+                cwd=wd,
+                timeout_seconds=120,
+                max_stdout_chars=8000,
+                max_stderr_chars=8000,
+                permission_level="shell_safe",
+                env=env,
+            )
             framework = "pytest"
 
-        try:
-            stdout = r.stdout.decode('utf-8', errors='replace')
-            stderr = r.stderr.decode('utf-8', errors='replace')
-        except Exception:
-            stdout = str(r.stdout) if r.stdout else ""
-            stderr = str(r.stderr) if r.stderr else ""
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        returncode = int(result.get("exit_code") if result.get("exit_code") is not None else -1)
+        if result.get("timed_out"):
+            return "Tests timed out after 120s."
 
         output = stdout + stderr
         output = output[:8000]  # Limit output size
 
         # Parse pytest-style summary
-        passed = 0
-        failed = 0
-        errors = 0
-        summary_line = ""
-        for line in output.splitlines():
-            if "passed" in line and ("failed" in line or "error" in line):
-                summary_line = line.strip()
-                import re as _re
-                m = _re.search(r'(\d+)\s+passed', line)
-                passed = int(m.group(1)) if m else 0
-                m = _re.search(r'(\d+)\s+failed', line)
-                failed = int(m.group(1)) if m else 0
-                m = _re.search(r'(\d+)\s+errors?', line)
-                errors = int(m.group(1)) if m else 0
+        passed, failed, errors, summary_line = _parse_test_summary(output)
 
-        if r.returncode == 0:
-            return f"All {passed} tests passed. ✓\n{summary_line}"
+        if returncode == 0:
+            if summary_line:
+                return f"Command: {command_text}\nAll {passed} tests passed. ✓\n{summary_line}"
+            return f"Command: {command_text}\nTest command completed successfully. ✓\n{output[-1200:]}"
         else:
             # Extract failure details
             failure_lines = []
@@ -348,14 +376,12 @@ def run_tests(test_path: str = "", framework: str = "auto") -> str:
             failure_detail = "\n".join(failure_lines[-50:]) if failure_lines else output[-2000:]
             return (
                 f"Tests: {passed} passed, {failed} failed, {errors} errors. ✗\n"
-                f"Exit code: {r.returncode}\n"
+                f"Exit code: {returncode}\n"
                 f"{summary_line}\n\n"
                 f"Failure details:\n{failure_detail}"
             )
     except FileNotFoundError:
         return f"Test framework '{framework}' not found. Install it or specify a different framework."
-    except subprocess.TimeoutExpired:
-        return "Tests timed out after 120s."
     except Exception as e:
         return f"Error running tests: {e}"
 
@@ -394,7 +420,7 @@ async def run_subagent(
     try:
         for turn in range(30):
             resp = await _retryable_llm_call(
-                client, model=MODEL, system=system, messages=messages,
+                client, model=get_model_name(), system=system, messages=messages,
                 tools=tools, max_tokens=LLM_MAX_TOKENS,
             )
             messages.append({"role": "assistant", "content": resp.content})
@@ -442,12 +468,6 @@ async def _execute_single_tool(
     if not allowed:
         output = f"Error: Tool policy blocked: {reason}"
         _metrics.record_tool_failure(tool_name, output)
-    elif tool_name == "task":
-        output = await run_subagent(
-            tool_input.get("prompt", ""),
-            agent_type=tool_input.get("agent_type", "Explore"),
-        )
-        _metrics.record_tool_success(tool_name)
     else:
         try:
             handler = TOOL_HANDLERS.get(tool_name, lambda **kw: f"Unknown: {tool_name}")
@@ -470,7 +490,7 @@ async def _execute_single_tool(
                 if inspect.isawaitable(handled):
                     handled = await handled
                 output = str(handled)[:50000]
-                if output.startswith("Error:"):
+                if is_tool_error_output(output):
                     _metrics.record_tool_failure(tool_name, output)
                     from src.agent.learner import get_learner
                     get_learner().on_tool_failure(tool_name, tool_input, output, session_id)
@@ -515,7 +535,8 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "run_tests": lambda test_path="", framework="auto", **kw: run_tests(test_path, framework),
 }
 
-# Todo handlers
+# Compatibility-only Todo state for legacy modules. Todo tools are deliberately
+# not exposed in ALL_TOOLS; the active model runtime uses the shared task board.
 _todo_mgr = None
 def get_todo_manager() -> TodoManager:
     global _todo_mgr
@@ -523,35 +544,6 @@ def get_todo_manager() -> TodoManager:
         _todo_mgr = TodoManager(workdir=get_workdir())
     return _todo_mgr
 
-def handle_TodoWrite(items: list) -> str:
-    tm = get_todo_manager()
-    results = []
-    for item in items:
-        content = item.get("content", "")
-        status = item.get("status", "pending")
-        if status == "completed":
-            for t in tm.items:
-                if t.content == content:
-                    tm.update(t.id, "completed")
-                    results.append(f"Completed: {content}")
-                    break
-        else:
-            todo_id = tm.add(content)
-            results.append(f"Added: {content} (id={todo_id})")
-    return "\n".join(results)
-
-def handle_TodoList() -> str:
-    tm = get_todo_manager()
-    if not tm.items:
-        return "No todos"
-    lines = []
-    for t in tm.items:
-        status_icon = "✓" if t.status == "completed" else "○"
-        lines.append(f"[{status_icon}] {t.content} ({t.status})")
-    return "\n".join(lines)
-
-TOOL_HANDLERS["TodoWrite"] = lambda **kw: handle_TodoWrite(kw.get("items", []))
-TOOL_HANDLERS["TodoList"] = lambda **kw: handle_TodoList()
 
 # Task handlers
 _task_mgr = None
@@ -588,19 +580,35 @@ TOOL_HANDLERS["task_update"] = lambda **kw: handle_task_update(kw.get("task_id",
 TOOL_HANDLERS["task_list"] = lambda **kw: handle_task_list(kw.get("status"))
 
 # Memory tool handlers
-from src.memory.manager import get_memory_manager as _get_memory_mgr
-
 def handle_add_memory(content: str, category: str, importance: int = 1, tags: list = None) -> str:
     from src.tools.memory_tools import add_memory
-    return add_memory(content, category, importance, tags)
+    context = get_runtime_context()
+    return add_memory(
+        content,
+        category,
+        importance,
+        tags,
+        workspace_dir=context.get("workspace_dir"),
+        conversation_id=context.get("conversation_id"),
+        run_id=context.get("thread_id"),
+    )
 
 def handle_recall_memories(query: str, category: str = None, limit: int = 10) -> str:
     from src.tools.memory_tools import recall_memories
-    return recall_memories(query, category, limit)
+    context = get_runtime_context()
+    return recall_memories(
+        query,
+        category,
+        limit,
+        workspace_dir=context.get("workspace_dir"),
+        conversation_id=context.get("conversation_id"),
+        run_id=context.get("thread_id"),
+    )
 
 def handle_update_memory(memory_id: str, content: str = None, importance: int = None) -> str:
     from src.tools.memory_tools import update_memory
-    return update_memory(memory_id, content, importance)
+    context = get_runtime_context()
+    return update_memory(memory_id, content, importance, workspace_dir=context.get("workspace_dir"))
 
 TOOL_HANDLERS["add_memory"] = _safe_handler(["content", "category"], lambda content, category, importance=1, tags=None: handle_add_memory(content, category, importance, tags))
 TOOL_HANDLERS["recall_memories"] = _safe_handler(["query"], lambda query, category=None, limit=10: handle_recall_memories(query, category, limit))
@@ -627,65 +635,6 @@ TOOL_HANDLERS["git_reset"] = lambda mode="soft", ref="HEAD~1", confirmed=False, 
     confirmed=confirmed,
 )
 TOOL_HANDLERS["git_file_history"] = _safe_handler(["filepath"], lambda filepath, count=5, **kw: handle_git_file_history(filepath=filepath, count=count))
-
-# Team tool handlers
-def handle_spawn_teammate(name: str, role: str, prompt: str, autonomous: bool = True) -> str:
-    tm = get_team_manager()
-    tid = tm.spawn(name, role, prompt, autonomous)
-    return f"Spawned teammate '{name}' (thread={tid})"
-
-def handle_list_teammates() -> str:
-    tm = get_team_manager()
-    result = tm.list_all()
-    return result if result else "No teammates"
-
-def handle_send_message(to: str, content: str, msg_type: str = "message") -> str:
-    msg_id = BUS.send("lead", to, content, msg_type)
-    return f"Message sent to '{to}', id={msg_id}"
-
-def handle_read_inbox() -> str:
-    inbox = BUS.read_inbox("lead")
-    if not inbox:
-        return "(inbox empty)"
-    lines = []
-    for msg in inbox:
-        lines.append(f"[{msg.get('id', '?')} from {msg.get('from', '?')}]: {msg.get('content', '')}")
-    return "\n".join(lines)
-
-def handle_broadcast(content: str) -> str:
-    tm = get_team_manager()
-    teammates = tm.list_all()
-    names = [t["name"] for t in teammates]
-    BUS.broadcast("lead", content, names)
-    return f"Broadcast to {names}"
-
-def handle_shutdown_request(teammate: str) -> str:
-    return _handle_shutdown_req(teammate)
-
-def handle_shutdown_response(request_id: str) -> str:
-    status = _check_request_status(request_id)
-    if "error" in status:
-        return f"Unknown request_id: {request_id}"
-    return f"Request {request_id}: {status.get('status', 'unknown')}"
-
-def handle_plan_approval(request_id: str, approve: bool, feedback: str = "") -> str:
-    return _handle_plan_review(request_id, approve, feedback)
-
-def handle_claim_task(task_id: str) -> str:
-    tm = get_team_manager()
-    my_name = tm._index.get("lead", {}).get("name", "lead") if hasattr(tm, '_index') else "lead"
-    return claim_task(task_id, my_name, source="teammate")
-
-TOOL_HANDLERS["spawn_teammate"] = _safe_handler(["name", "role", "prompt"], lambda name, role, prompt, autonomous=True: handle_spawn_teammate(name, role, prompt, autonomous))
-TOOL_HANDLERS["list_teammates"] = lambda **kw: handle_list_teammates()
-TOOL_HANDLERS["send_message"] = _safe_handler(["to", "content"], lambda to, content, msg_type="message": handle_send_message(to, content, msg_type))
-TOOL_HANDLERS["read_inbox"] = lambda **kw: handle_read_inbox()
-TOOL_HANDLERS["broadcast"] = _safe_handler(["content"], lambda content: handle_broadcast(content))
-TOOL_HANDLERS["shutdown_request"] = _safe_handler(["teammate"], lambda teammate: handle_shutdown_request(teammate))
-TOOL_HANDLERS["shutdown_response"] = _safe_handler(["request_id"], lambda request_id: handle_shutdown_response(request_id))
-TOOL_HANDLERS["plan_approval"] = _safe_handler(["request_id", "approve"], lambda request_id, approve, feedback="": handle_plan_approval(request_id, approve, feedback))
-TOOL_HANDLERS["claim_task"] = _safe_handler(["task_id"], lambda task_id: handle_claim_task(task_id))
-
 
 def _as_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
@@ -1026,7 +975,13 @@ async def _retryable_llm_call(client, **kwargs):
             if not _is_retryable_error(exc) or attempt == MAX_RECOVERY_ATTEMPTS - 1:
                 raise
             delay = backoff_delay(attempt)
-            print(f"[retry] LLM call failed (attempt {attempt + 1}/{MAX_RECOVERY_ATTEMPTS}): {exc}. Retrying in {delay:.1f}s...")
+            logger.warning(
+                "LLM 调用失败，准备重试 attempt=%s/%s delay=%.1fs error=%s",
+                attempt + 1,
+                MAX_RECOVERY_ATTEMPTS,
+                delay,
+                exc,
+            )
             await _asyncio.sleep(delay)
     raise last_exc
 
@@ -1090,14 +1045,6 @@ async def agent_loop(
     if tools is None:
         tools = ALL_TOOLS
 
-    # 新会话：加载相关记忆并注入到会话上下文
-    if session_id:
-        primed = _get_memory_mgr().prime(session_id)
-        if primed:
-            formatted = _get_memory_mgr().format_memories(primed, max_items=10)
-            memory_context = f"【跨会话记忆】以下是从之前会话中保留的重要信息，请在本次对话中参考：\n{formatted}"
-            messages = [{"role": "user", "content": memory_context}] + messages
-
     # 自动上下文压缩
     messages = auto_compact(messages)
 
@@ -1112,7 +1059,7 @@ async def agent_loop(
                     messages = _ensure_tool_result_sequence(messages)
                     resp = await _retryable_llm_call(
                         client,
-                        model=MODEL,
+                        model=get_model_name(),
                         system=system,
                         messages=messages,
                         tools=tools,
@@ -1246,13 +1193,6 @@ async def agent_loop_stream(
     if tools is None:
         tools = ALL_TOOLS
 
-    if session_id:
-        primed = _get_memory_mgr().prime(session_id)
-        if primed:
-            formatted = _get_memory_mgr().format_memories(primed, max_items=10)
-            memory_context = f"【跨会话记忆】以下是从之前会话中保留的重要信息，请在本次对话中参考：\n{formatted}"
-            messages = [{"role": "user", "content": memory_context}] + messages
-
     messages = auto_compact(messages)
     client = create_client()
     context_token = _RUNTIME_CONTEXT.set(dict(runtime_context or {}))
@@ -1267,7 +1207,7 @@ async def agent_loop_stream(
                 # Use streaming API
                 stream = await _retryable_llm_call(
                     client,
-                    model=MODEL,
+                    model=get_model_name(),
                     system=system,
                     messages=messages,
                     tools=tools,
@@ -1417,8 +1357,8 @@ async def agent_loop_stream(
 __all__ = [
     "agent_loop", "agent_loop_stream", "run_subagent",
     "RunSession", "get_run_session", "cleanup_run_session",
-    "BASE_TOOLS", "TODO_TOOLS", "TASK_TOOLS", "SUBAGENT_TOOLS", "AGENT_RUNTIME_TOOLS", "ALL_TOOLS", "TOOLS",
-    "TOOL_HANDLERS", "handle_spawn_agent", "bind_runtime_context", "get_runtime_context",
+    "BASE_TOOLS", "TASK_TOOLS", "AGENT_RUNTIME_TOOLS", "ALL_TOOLS", "TOOLS",
+    "TOOL_HANDLERS", "handle_spawn_agent", "bind_runtime_context", "get_runtime_context", "get_todo_manager",
     "TodoManager", "TaskManager", "BackgroundManager",
     "SystemPromptBuilder", "DYNAMIC_BOUNDARY",
     "auto_compact", "micro_compact", "backoff_delay",

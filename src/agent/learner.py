@@ -16,8 +16,8 @@ import re
 import time
 from typing import Optional
 
-from src.memory.manager import get_memory_manager, MEMORY_CATEGORIES
 from src.infra.logger import logger
+from src.tools.tool_result import is_tool_error_output
 
 
 def extract_error_signature(output: str) -> str:
@@ -56,14 +56,38 @@ def _build_error_tags(tool_name: str, error_signature: str) -> list[str]:
 
 def _search_similar_failure(tool_name: str, error_signature: str) -> Optional[dict]:
     """搜索是否已有相同类型的失败记录"""
-    mm = get_memory_manager()
-    results = mm.search(error_signature.split(":")[0] if ":" in error_signature else error_signature, limit=10)
+    from src.api.services.memory_governance_service import list_memory_records
+
+    results = list_memory_records(_runtime_workspace(), scope="workspace", status="active", limit=200)
     for r in results:
-        if r.get("category") != "feedback":
+        if r.get("kind") != "failure_pattern":
             continue
-        if tool_name in r.get("tags", []) and "error" in r.get("tags", []):
+        if tool_name in r.get("tags", []) and error_signature.split(":")[0].lower() in str(r.get("content", "")).lower():
             return r
     return None
+
+
+def _runtime_workspace() -> str:
+    try:
+        from src.agent.engine import get_runtime_context
+
+        workspace = get_runtime_context().get("workspace_dir")
+        if workspace:
+            return str(workspace)
+    except Exception:
+        pass
+    from src.infra import config as config_module
+
+    return str(config_module.WORKSPACE_DIR)
+
+
+def _runtime_run_id() -> str:
+    try:
+        from src.agent.engine import get_runtime_context
+
+        return str(get_runtime_context().get("thread_id") or "")
+    except Exception:
+        return ""
 
 
 # ========== Episode / Pattern extraction ==========
@@ -77,7 +101,7 @@ def extract_episode_signature(tool_history: list[dict]) -> str:
     names = []
     for call in tool_history[-10:]:  # Last 10 calls
         name = call.get("tool", "")
-        if name and name not in ("TodoWrite", "TodoList", "task_list", "read_inbox"):
+        if name and name != "task_list":
             names.append(name)
     return ">".join(names) if names else "unknown"
 
@@ -123,28 +147,42 @@ class FailureLearner:
         if not error_sig or len(error_sig) < 3:
             return
 
-        mm = get_memory_manager()
-        existing = _search_similar_failure(tool_name, error_sig)
+        try:
+            from src.api.services.memory_governance_service import create_memory_record, update_memory_record
 
-        if existing:
-            new_imp = min(existing.get("importance", 1) + 2, 10)
-            mm.update(existing["id"], importance=new_imp)
-            mm.inc_access(existing["id"])
-            logger.info(f"[Learner] Updated existing failure: {tool_name} -> {error_sig[:60]} (imp={new_imp})")
-        else:
-            context = self._summarize_input(tool_input)
-            content = (
-                f"工具 {tool_name} 失败\n\n"
-                f"**输入**: {context}\n\n"
-                f"**错误**: {error_sig}\n\n"
-                f"**完整输出（前500字）**:\n```\n{error_output[:500]}\n```"
-            )
-            tags = _build_error_tags(tool_name, error_sig)
-            mm.save(
-                category="feedback", content=content, importance=7,
-                tags=tags, session_id=session_id,
-            )
-            logger.info(f"[Learner] Recorded new failure: {tool_name} -> {error_sig[:60]}")
+            workspace = _runtime_workspace()
+            existing = _search_similar_failure(tool_name, error_sig)
+
+            if existing:
+                new_imp = min(existing.get("importance", 1) + 2, 10)
+                update_memory_record(workspace, existing["id"], importance=new_imp)
+                logger.info(f"[Learner] Updated existing failure: {tool_name} -> {error_sig[:60]} (imp={new_imp})")
+            else:
+                context = self._summarize_input(tool_input)
+                content = (
+                    f"工具 {tool_name} 失败\n\n"
+                    f"**输入**: {context}\n\n"
+                    f"**错误**: {error_sig}\n\n"
+                    f"**完整输出（前500字）**:\n```\n{error_output[:500]}\n```"
+                )
+                tags = _build_error_tags(tool_name, error_sig)
+                run_id = session_id or _runtime_run_id()
+                create_memory_record(
+                    workspace,
+                    scope="workspace",
+                    kind="failure_pattern",
+                    content=content,
+                    source="failure_recovery",
+                    confidence=0.55,
+                    importance=7,
+                    tags=tags,
+                    source_ref=f"run:{run_id}" if run_id else "tool_failure",
+                    evidence_refs=[f"run:{run_id}"] if run_id else [],
+                    automatic=True,
+                )
+                logger.info(f"[Learner] Recorded new failure: {tool_name} -> {error_sig[:60]}")
+        except Exception as exc:
+            logger.warning(f"[Learner] Skipped unsafe or invalid failure memory: {exc}")
 
         self._recent_failures.append({
             "tool": tool_name, "error": error_sig, "time": time.time(),
@@ -164,21 +202,8 @@ class FailureLearner:
             self._recent_failures = self._recent_failures[-20:]
 
     def build_learning_context(self, limit: int = 3) -> str:
-        """为系统提示构建'最近学到的教训'段落"""
-        mm = get_memory_manager()
-        memories = mm.get(category="feedback", min_importance=7, limit=limit)
-        if not memories:
-            memories = mm.get(category="feedback", min_importance=5, limit=limit)
-        if not memories:
-            return ""
-
-        lines = ["【从过去学到的教训】"]
-        for m in memories:
-            imp = m.get("importance", 0)
-            tags = ", ".join(m.get("tags", [])[:3])
-            content_preview = m.get("content", "")[:120].replace("\n", " ")
-            lines.append(f"- ⚠️ [{tags}] {content_preview} (重要性: {imp})")
-        return "\n".join(lines)
+        """Legacy direct-prompt injection is disabled; ContextPack owns recall."""
+        return ""
 
     def _summarize_input(self, tool_input: dict) -> str:
         parts = []
@@ -217,7 +242,7 @@ class ExperienceLearner:
             "tool": tool_name,
             "input": {k: str(v)[:100] for k, v in tool_input.items()},
             "output_preview": output[:200],
-            "success": not output.startswith("Error:"),
+            "success": not is_tool_error_output(output),
             "time": time.time(),
         })
 
@@ -267,22 +292,42 @@ class ExperienceLearner:
         if summary:
             content += f"\n**摘要**: {summary[:300]}"
 
-        mm = get_memory_manager()
-        entry = mm.save(
-            category="project",
-            content=content,
-            importance=6,  # High enough to auto-load in related sessions
-            tags=["episode", "success", *keywords],
-        )
+        from src.api.services.memory_governance_service import create_memory_record
 
-        self._current_episode = []
+        run_id = _runtime_run_id()
+        try:
+            entry = create_memory_record(
+                _runtime_workspace(),
+                scope="workspace",
+                kind="workflow_note",
+                content=content,
+                source="run_evidence",
+                confidence=0.75,
+                importance=6,
+                tags=["episode", "success", *keywords],
+                source_ref=f"run:{run_id}" if run_id else "experience_episode",
+                evidence_refs=[f"run:{run_id}"] if run_id else [],
+                automatic=True,
+            )
+        except Exception as exc:
+            logger.warning(f"[ExperienceLearner] Skipped unsafe or invalid episode memory: {exc}")
+            return None
+        finally:
+            self._current_episode = []
+
         logger.info(f"[ExperienceLearner] Saved episode: {signature} (id={entry.get('id', '?')[:8]})")
         return entry.get("id")
 
     def retrieve_relevant(self, current_context: str, limit: int = 3) -> list[dict]:
         """Find past episodes relevant to the current task."""
-        mm = get_memory_manager()
-        results = mm.search(current_context, limit=limit * 2)
+        from src.api.services.memory_selection_service import select_memories
+
+        results = select_memories(
+            _runtime_workspace(),
+            prompt=current_context,
+            budget_tokens=max(300, limit * 220),
+            persist_audit=False,
+        ).get("selected", [])
         episodes = []
         for r in results:
             tags = r.get("tags", [])
@@ -291,17 +336,8 @@ class ExperienceLearner:
         return episodes[:limit]
 
     def build_experience_context(self, task_description: str, limit: int = 2) -> str:
-        """Build a context string of relevant past experiences."""
-        episodes = self.retrieve_relevant(task_description, limit)
-        if not episodes:
-            return ""
-
-        lines = ["【相关历史经验】以下是从之前项目中检索到的成功方案，可供参考："]
-        for ep in episodes:
-            content = ep.get("content", "")[:400].replace("\n", " ")
-            tags = ", ".join(ep.get("tags", [])[:5])
-            lines.append(f"- [{tags}] {content}")
-        return "\n".join(lines)
+        """Legacy direct-prompt injection is disabled; ContextPack owns recall."""
+        return ""
 
 
 # ========== Global singletons ==========

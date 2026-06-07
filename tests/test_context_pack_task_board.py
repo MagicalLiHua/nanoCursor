@@ -28,6 +28,13 @@ def test_context_pack_explains_selected_files(tmp_path):
         workspace_dir=str(workspace),
         execution_plan={
             "strategy": "bug_fix",
+            "tool_policy": {
+                "mode": "enforced",
+                "allowed_tools": ["read_file", "edit_file", "run_tests"],
+                "denied_tools": ["delete_file"],
+                "approval_required_levels": ["risky_write", "shell_risky"],
+                "risk_level": "medium",
+            },
             "stages": [
                 {"id": "implement", "title": "实现", "capabilities": ["tool.file_ops"]},
                 {"id": "verify", "title": "验证", "capabilities": ["skill.delivery-review"]},
@@ -50,6 +57,9 @@ def test_context_pack_explains_selected_files(tmp_path):
     assert data["context_debug"]["memory_inputs"]["current_plan_items"] == 2
     assert data["context_debug"]["outline_cache"]["outline_count"] >= 1
     assert data["context_debug"]["selection_version"] == "context-pack-2"
+    assert data["tool_policy"]["mode"] == "enforced"
+    assert data["tool_policy"]["denied_tools"] == ["delete_file"]
+    assert "工具策略: mode=enforced" in pack.to_text()
     outline_cache = workspace / ".nanocursor" / "file_outlines.json"
     assert outline_cache.exists()
     assert any(item["path"] == "app.py" and item["summary"] for item in data["file_outlines"])
@@ -88,7 +98,124 @@ def test_context_pack_links_failures_to_related_files(tmp_path):
     assert any("recent failure related" in reason for reason in selected_test["reasons"])
     assert data["context_debug"]["failure_context"]["included_failure_count"] >= 1
     assert data["context_debug"]["failure_context"]["related_file_count"] >= 1
+    assert data["recovery_context"]["status"] == "attention"
+    assert data["recovery_context"]["risk_count"] >= 1
+    assert "test_app.py" in data["recovery_context"]["related_files"]
+    assert any(action["id"] == "inspect-failure-event" for action in data["recovery_context"]["actions"])
+    assert data["context_debug"]["failure_context"]["high_priority_action_count"] >= 1
     assert "关联文件: test_app.py" in pack.to_text()
+    assert "建议恢复动作" in pack.to_text()
+    assert "定位失败事件" in pack.to_text()
+
+
+def test_context_pack_long_conversation_summary_preserves_head_and_latest_risk(tmp_path):
+    import json
+
+    from src.api.services.context_service import build_context_pack
+
+    workspace = _make_workspace(tmp_path)
+    conversation_id = "long-summary"
+    conversation_dir = workspace / ".nanocursor" / "conversations" / conversation_id
+    conversation_dir.mkdir(parents=True)
+    conversation_dir.joinpath("conversation.json").write_text(
+        json.dumps(
+            {
+                "conversation_summary": (
+                    "STABLE-CONTEXT: 当前目标是修复登录流程。\n"
+                    + ("历史运行细节。" * 400)
+                    + "\nLATEST-RISK: 最新回归测试仍然失败，需要检查 test_app.py。"
+                )
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pack = build_context_pack(
+        prompt="继续处理刚才的问题",
+        workspace_dir=str(workspace),
+        conversation_id=conversation_id,
+        execution_plan={"strategy": "bug_fix"},
+    )
+
+    assert len(pack.conversation_summary) <= 1200
+    assert "STABLE-CONTEXT" in pack.conversation_summary
+    assert "LATEST-RISK" in pack.conversation_summary
+    assert "中间摘要已压缩" in pack.conversation_summary
+
+
+def test_retry_run_context_pack_preserves_original_failure_evidence(tmp_path):
+    from src.api.services.context_service import build_context_pack
+    from src.api.services.event_store import get_event_store
+
+    workspace = _make_workspace(tmp_path)
+    thread_id = "retry-context-pack"
+    store = get_event_store()
+    store.create_session(thread_id, "这是一次重试运行", str(workspace), status="running", mode="retry")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        original_thread_id="original-failed-run",
+        retry_mode="failed_stage",
+        retry_context={
+            "failed_stage_id": "verify",
+            "failed_stage": {
+                "id": "verify",
+                "title": "测试验证",
+                "failure": "test_app.py failed",
+            },
+            "failure": {
+                "failure_id": "failure-test-app",
+                "failure_class": "test_failure",
+                "title": "测试未通过",
+                "related_files": ["app.py", "test_app.py"],
+                "can_auto_retry": False,
+                "evidence": {
+                    "event_id": "event-failed-test",
+                    "error_detail": "FAILED test_app.py::test_add",
+                },
+                "suggested_actions": [
+                    {
+                        "action_id": "inspect_test_failure",
+                        "label": "检查失败断言",
+                        "mode": "manual",
+                        "description": "先读取 test_app.py 和 app.py，再修复失败原因。",
+                    }
+                ],
+            },
+            "recent_errors": [
+                {
+                    "type": "test_finished",
+                    "title": "pytest failed",
+                    "content": "FAILED test_app.py::test_add",
+                    "payload": {},
+                }
+            ],
+        },
+    )
+
+    pack = build_context_pack(
+        prompt="继续修复原 run 的失败阶段",
+        workspace_dir=str(workspace),
+        thread_id=thread_id,
+        execution_plan={"strategy": "bug_fix"},
+    )
+    data = pack.to_dict()
+
+    retry_failure = next(item for item in data["recent_failures"] if item["source"] == "retry_context")
+    assert retry_failure["category"] == "test_failure"
+    assert retry_failure["original_thread_id"] == "original-failed-run"
+    assert set(retry_failure["related_files"]) >= {"app.py", "test_app.py"}
+    assert set(data["relevant_files"]) >= {"app.py", "test_app.py"}
+    assert data["recovery_context"]["status"] == "attention"
+    assert data["recovery_context"]["original_thread_id"] == "original-failed-run"
+    assert data["recovery_context"]["retry_mode"] == "failed_stage"
+    assert data["recovery_context"]["failed_stage_id"] == "verify"
+    assert data["recovery_context"]["actions"][0]["id"] == "inspect_test_failure"
+    assert data["context_debug"]["failure_context"]["retry_source"]["original_thread_id"] == "original-failed-run"
+    rendered = pack.to_text()
+    assert "检查失败断言" in rendered
+    assert "关联文件: app.py, test_app.py" in rendered
 
 
 def test_context_budget_preserves_p0_context_when_trimming():
@@ -101,6 +228,22 @@ def test_context_budget_preserves_p0_context_when_trimming():
             {"id": "intake", "title": "确认问题", "description": "复现登录按钮问题。"},
             {"id": "fix", "title": "局部修复", "description": "只修改登录相关代码。"},
         ],
+        turn_context={
+            "active_task": {
+                "id": "fix",
+                "title": "局部修复",
+                "goal": "修复登录按钮点击后没有响应的问题。",
+                "acceptance": [{"description": "点击登录按钮会发送一次请求。"}],
+            },
+            "recent_tool_results": [{"tool": "read_file", "target": "src/login.py"}],
+        },
+        tool_policy={
+            "mode": "enforced",
+            "risk_level": "medium",
+            "allowed_tools": ["read_file", "edit_file", "run_tests"],
+            "denied_tools": ["delete_file"],
+            "approval_required_levels": ["risky_write", "shell_risky"],
+        },
         selected_files=[
             {
                 "path": f"src/file_{index}.py",
@@ -122,16 +265,22 @@ def test_context_budget_preserves_p0_context_when_trimming():
 
     assert data["task_summary"] == "用户要求：修复登录按钮点击后没有响应的问题。"
     assert len(data["current_plan"]) == 2
+    assert data["turn_context"]["active_task"]["id"] == "fix"
+    assert data["tool_policy"]["denied_tools"] == ["delete_file"]
     assert data["budget_report"]["trimmed_file_count"] > 0
     assert data["budget_report"]["trimmed_outline_count"] > 0
     assert data["budget_report"]["omitted_context_count"] == len(data["omitted"])
     assert any(item["kind"] == "selected_file" for item in data["omitted"])
     assert any(item["kind"] == "file_outline" for item in data["omitted"])
     assert "P0 user_request" in data["budget_report"]["protected_sections"]
+    assert "P0 active_task" in data["budget_report"]["protected_sections"]
+    assert "P0 tool_policy" in data["budget_report"]["protected_sections"]
     assert data["context_debug"]["protected_context"]["preserved"] is True
     assert data["context_debug"]["trimmed"]["omitted_context_count"] == len(data["omitted"])
     assert data["token_budget"]["protected_tokens_estimate"] > 0
     assert "已裁剪上下文" in trimmed.to_text()
+    assert "active_task: fix" in trimmed.to_text()
+    assert "工具策略: mode=enforced" in trimmed.to_text()
 
 
 def test_task_board_builds_parallel_analysis_and_write_lock():
@@ -163,8 +312,27 @@ def test_task_board_builds_parallel_analysis_and_write_lock():
     assert board.ready_nodes()[0].id == "node-001-intake"
 
 
+def test_task_board_reuses_canonical_intake_stage():
+    from src.runtime.task_board import build_task_board
+
+    board = build_task_board(
+        "run-intake-dedup",
+        {
+            "strategy": "small_patch",
+            "stages": [
+                {"id": "intake", "title": "接收需求与上下文定界", "owner_role": "lead"},
+                {"id": "implement", "title": "代码实现", "owner_role": "coder"},
+            ],
+        },
+    )
+
+    intake_tasks = [task for task in board.nodes if task.id.endswith("-intake")]
+    assert len(intake_tasks) == 1
+    assert intake_tasks[0].title == "接收需求与上下文定界"
+
+
 def test_task_board_and_context_routes(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     original_workspace = api_server._get_workspace()
@@ -252,7 +420,7 @@ def test_task_board_and_context_routes(tmp_path):
 
 
 def test_run_scoped_tasks_route_is_readonly_until_state_exists(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     original_workspace = api_server._get_workspace()
@@ -299,7 +467,7 @@ def test_run_scoped_tasks_route_is_readonly_until_state_exists(tmp_path):
 
 
 def test_run_scoped_tasks_route_hides_lead_direct_reply_tasks(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     original_workspace = api_server._get_workspace()
@@ -447,7 +615,7 @@ def test_scheduler_adds_recovery_task_on_retryable_failure():
 
 
 def test_task_schedule_and_result_routes(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     original_workspace = api_server._get_workspace()
@@ -490,7 +658,7 @@ def test_task_schedule_and_result_routes(tmp_path):
 
 
 def test_agent_loop_run_state_patch_routes(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from src.api.services.event_store import get_event_store
 
     original_workspace = api_server._get_workspace()
@@ -603,6 +771,45 @@ def test_task_domain_events_mirror_into_task_board(tmp_path):
     assert task is not None
     assert task.status == "passed"
     assert any(change["type"] == "task_status" for change in board.change_log)
+
+
+def test_done_event_settles_remaining_task_board_items(tmp_path):
+    from src.api.services.event_store import get_event_store
+    from src.api.services.run_state_service import get_or_create_run_state, mirror_domain_event_to_task_board
+
+    workspace = _make_workspace(tmp_path)
+    thread_id = "done-settles-task-board"
+    store = get_event_store()
+    store.create_session(thread_id, "修改 README", str(workspace), status="running")
+    store.update_session(
+        thread_id,
+        str(workspace),
+        execution_plan={
+            "strategy": "small_patch",
+            "stages": [
+                {"id": "intake", "title": "接收需求", "owner_role": "lead"},
+                {"id": "implement", "title": "代码实现", "owner_role": "coder"},
+            ],
+        },
+    )
+    get_or_create_run_state(thread_id, str(workspace))
+
+    mirrored = mirror_domain_event_to_task_board(
+        thread_id,
+        str(workspace),
+        "done",
+        {"status": "completed"},
+        title="任务完成",
+        content="Agent 运行已完成",
+        agent="lead",
+    )
+
+    assert mirrored is True
+    board = get_or_create_run_state(thread_id, str(workspace))
+    assert board.status == "completed"
+    assert all(task.status in {"passed", "skipped"} for task in board.nodes)
+    assert next(task for task in board.nodes if task.type == "context_build").status == "passed"
+    assert next(task for task in board.nodes if task.type == "report").status == "passed"
 
 
 def test_runtime_events_attach_evidence_to_task_board(tmp_path):

@@ -13,34 +13,19 @@ Every file change is automatically tracked. Agents can commit after
 successful changes and rollback on failure.
 """
 
-import os
-import subprocess
 from pathlib import Path
 from typing import Optional
+
+from src.runtime.git_runner import run_git
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
     """Run a git command and return (exit_code, stdout, stderr)."""
-    try:
-        r = subprocess.run(
-            ["git"] + args,
-            cwd=str(cwd),
-            capture_output=True,
-            timeout=timeout,
-        )
-        try:
-            stdout = r.stdout.decode('utf-8', errors='replace')
-            stderr = r.stderr.decode('utf-8', errors='replace')
-        except Exception:
-            stdout = str(r.stdout) if r.stdout else ""
-            stderr = str(r.stderr) if r.stderr else ""
-        return r.returncode, stdout.strip(), stderr.strip()
-    except FileNotFoundError:
-        return -1, "", "Git is not installed or not in PATH"
-    except subprocess.TimeoutExpired:
-        return -1, "", f"Git command timed out after {timeout}s"
-    except Exception as e:
-        return -1, "", f"Git error: {e}"
+    result = run_git(cwd, args, timeout_seconds=timeout)
+    stderr = result.stderr.strip()
+    if result.returncode == -1 and "No such file" in stderr:
+        stderr = "Git is not installed or not in PATH"
+    return result.returncode, result.stdout.strip(), stderr
 
 
 def ensure_git_repo(workspace: Path) -> str:

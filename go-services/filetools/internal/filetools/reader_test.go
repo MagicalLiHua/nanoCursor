@@ -87,7 +87,9 @@ func TestReadFileRange(t *testing.T) {
 func TestListDirectory(t *testing.T) {
 	dir := t.TempDir()
 	os.Mkdir(filepath.Join(dir, "subdir"), 0755)
+	os.Mkdir(filepath.Join(dir, "__pycache__"), 0755)
 	os.WriteFile(filepath.Join(dir, "file.txt"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(dir, "module.pyc"), []byte(""), 0644)
 
 	result, err := ListDirectory(dir, ".")
 	if err != nil {
@@ -98,6 +100,9 @@ func TestListDirectory(t *testing.T) {
 	}
 	if !strings.Contains(result, "[FILE] file.txt") {
 		t.Error("expected file.txt in listing")
+	}
+	if strings.Contains(result, "__pycache__") || strings.Contains(result, "module.pyc") {
+		t.Errorf("expected hidden entries to be filtered, got: %s", result)
 	}
 }
 

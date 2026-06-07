@@ -112,7 +112,7 @@ def test_controller_feature_task_board_prefers_observe_not_finish(tmp_path):
 
 
 def test_loop_controller_routes_preview(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
     from fastapi.testclient import TestClient
 
     from src.api.services.event_store import get_event_store

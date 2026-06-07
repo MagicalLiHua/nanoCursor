@@ -2,8 +2,9 @@ import subprocess
 
 from fastapi.testclient import TestClient
 
-import api_server
+from src.api import legacy_runtime as api_server
 from src.api.services.event_store import get_event_store
+from src.api.services.report_service import build_delivery_report
 from src.api.services.run_outcome_service import build_run_outcome
 
 
@@ -57,6 +58,81 @@ def test_run_outcome_marks_lightweight_reply_without_fake_report(tmp_path):
     assert outcome["summary"]["risk_level"] == "low"
     assert outcome["changes"]["stats"]["total"] == 0
     assert outcome["report"]["applicable"] is False
+
+
+def test_lightweight_reply_ignores_existing_workspace_git_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    _commit_initial(repo)
+    (repo / "unrelated.py").write_text("print('old dirty state')\n", encoding="utf-8")
+
+    store = get_event_store()
+    thread_id = "outcome-lightweight-dirty"
+    store.create_session(thread_id, "哈喽", str(repo), status="completed")
+    store.update_session(
+        thread_id,
+        str(repo),
+        execution_plan={
+            "strategy": "lead_direct_reply",
+            "stages": [{"id": "lead_reply", "title": "Lead 直接回复", "status": "completed"}],
+            "tasks": [],
+        },
+    )
+    store.append_event(
+        thread_id,
+        "assistant_message",
+        content="哈喽，我在。",
+        agent="lead",
+        workspace_dir=str(repo),
+    )
+
+    outcome = build_run_outcome(thread_id, str(repo))
+    report = build_delivery_report(thread_id, str(repo))
+
+    assert outcome["summary"]["has_code_changes"] is False
+    assert outcome["changes"]["files"] == []
+    assert outcome["changes"]["source"] == "not_applicable"
+    assert report["source"] == "not_applicable"
+    assert report["changed_files"] == []
+
+
+def test_read_only_outcome_ignores_existing_workspace_git_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    _commit_initial(repo)
+    (repo / "unrelated.py").write_text("print('old dirty state')\n", encoding="utf-8")
+
+    store = get_event_store()
+    thread_id = "outcome-read-only-dirty"
+    store.create_session(thread_id, "看看项目结构", str(repo), status="completed")
+    store.update_session(
+        thread_id,
+        str(repo),
+        execution_plan={
+            "strategy": "analysis_only",
+            "routing_decision": {"requires": {"workspace_write": False}},
+            "stages": [],
+            "tasks": [],
+        },
+    )
+    store.append_event(
+        thread_id,
+        "assistant_message",
+        content="项目里有 README。",
+        agent="lead",
+        workspace_dir=str(repo),
+    )
+
+    outcome = build_run_outcome(thread_id, str(repo))
+    report = build_delivery_report(thread_id, str(repo))
+
+    assert outcome["summary"]["has_code_changes"] is False
+    assert outcome["changes"]["files"] == []
+    assert outcome["changes"]["source"] == "not_applicable"
+    assert report["source"] == "not_applicable"
+    assert report["changed_files"] == []
 
 
 def test_run_outcome_reports_untracked_new_file_diff(tmp_path):

@@ -18,6 +18,28 @@ def test_greeting_routes_to_lead_direct_reply():
     assert is_lead_direct_intent("哈喽") is True
 
 
+def test_greeting_with_negated_file_change_stays_lead_direct():
+    decision = classify_user_intent("哈喽，简单介绍一下你能做什么，不要修改文件")
+
+    assert decision["route"] == "direct_answer"
+    assert decision["execution_route"] == "lead_direct_reply"
+    assert decision["requires_workspace_write"] is False
+    assert "write_negated" in decision["signals"]
+    assert "write_action" not in decision["signals"]
+
+
+def test_greeting_with_negated_file_access_stays_lead_direct():
+    decision = classify_user_intent("哈喽，请用一句话介绍你自己，不要读取或修改文件。")
+
+    assert decision["route"] == "direct_answer"
+    assert decision["execution_route"] == "lead_direct_reply"
+    assert decision["requires_workspace_read"] is False
+    assert decision["requires_workspace_write"] is False
+    assert "workspace_read_negated" in decision["signals"]
+    assert "workspace_read" not in decision["signals"]
+    assert "write_action" not in decision["signals"]
+
+
 def test_short_python_artifact_request_routes_to_code_execution():
     decision = classify_user_intent("帮我用python写常见的排序算法并比较性能")
 
@@ -113,6 +135,20 @@ def test_followup_uses_conversation_memory_for_test_context():
     assert decision["route"] == "test_only"
     assert decision["requires_shell"] is True
     assert decision["requires_workspace_write"] is False
+
+
+def test_conversation_meta_question_stays_direct_even_with_code_history():
+    decision = classify_user_intent(
+        "上一条消息里我问了什么？请用一句话回答，不要修改文件。",
+        conversation_summary="上一轮用户要求实现 Python 排序算法性能比较脚本，已经进入代码任务并准备写文件。",
+    )
+
+    assert decision["intent"] == "conversation_meta_question"
+    assert decision["route"] == "direct_answer"
+    assert decision["execution_route"] == "lead_direct_reply"
+    assert decision["requires_workspace_read"] is False
+    assert decision["requires_workspace_write"] is False
+    assert "conversation_meta_question" in decision["signals"]
 
 
 def test_async_intent_router_normalizes_llm_result(monkeypatch):

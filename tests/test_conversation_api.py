@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-import api_server
+from src.api import legacy_runtime as api_server
 
 
 def test_conversation_run_persists_execution_plan_and_events(tmp_path, monkeypatch):
@@ -232,6 +232,24 @@ def test_short_python_generation_prompt_is_not_lead_direct_reply():
     assert api_server._is_simple_lead_message("帮我用python写常见的排序算法并比较性能") is False
 
 
+def test_lead_only_execution_plan_uses_canonical_restrictive_tool_policy(tmp_path):
+    from src.api.services.conversation_run_service import lead_only_execution_plan
+    from src.runtime.tool_policy_runtime import ToolPolicyRuntime
+
+    plan = lead_only_execution_plan("哈喽", str(tmp_path), [{"name": "Lead", "role": "lead"}])
+    policy = plan["tool_policy"]
+    runtime = ToolPolicyRuntime(policy=policy)
+
+    assert policy["mode"] == "enforced"
+    assert policy["allowed_tools"] == ["recall_memories"]
+    assert "edit_file" in policy["denied_tools"]
+    assert "requires_approval" not in policy
+    assert "blocked_tools" not in policy
+    assert runtime.check("recall_memories").allowed is True
+    assert runtime.check("edit_file", {"path": "README.md"}).allowed is False
+    assert runtime.check("bash", {"command": "ls"}).allowed is False
+
+
 def test_direct_answer_loop_state_stays_minimal(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -272,6 +290,135 @@ def test_direct_answer_loop_state_stays_minimal(tmp_path, monkeypatch):
     actions = [step["action"]["type"] for step in loop.json()["steps"]]
     assert actions == ["answer", "finish"]
     assert loop.json()["terminal_status"] == "completed"
+
+
+def test_read_only_run_uses_controller_loop_and_read_only_tools(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("# demo\n", encoding="utf-8")
+    client = TestClient(api_server.app)
+    observed_tool_names = []
+
+    async def fake_agent_loop_stream(**kwargs):
+        observed_tool_names.extend(tool.get("name") for tool in kwargs.get("tools", []))
+        yield ("token", "README 标题是 demo。")
+        yield ("metrics", 12, 8)
+        yield ("done", "README 标题是 demo。")
+
+    async def fake_parallel_briefing(**kwargs):
+        raise AssertionError("read_only runtime turns should not create parallel briefing agents")
+
+    monkeypatch.setattr(api_server, "agent_loop_stream", fake_agent_loop_stream)
+    monkeypatch.setattr(api_server, "run_parallel_agent_briefing", fake_parallel_briefing)
+
+    prompt = "查看当前项目结构"
+    created = client.post(
+        "/api/conversations",
+        json={"prompt": prompt, "workspace_dir": str(workspace)},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    started = client.post(
+        f"/api/conversations/{conversation_id}/runs",
+        json={"prompt": prompt, "workspace_dir": str(workspace)},
+    )
+    assert started.status_code == 200
+    thread_id = started.json()["run"]["thread_id"]
+
+    api_server.active_runs[thread_id].thread.join(timeout=3)
+
+    loop = client.get(f"/api/runs/{thread_id}/loop")
+    assert loop.status_code == 200
+    actions = [step["action"]["type"] for step in loop.json()["steps"]]
+    assert actions == ["inspect_project", "answer", "finish"]
+    assert "write_file" not in observed_tool_names
+    assert "edit_file" not in observed_tool_names
+    assert "spawn_agent" not in observed_tool_names
+
+
+def test_small_edit_run_requires_real_change_and_uses_bounded_tools(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    readme = workspace / "README.md"
+    readme.write_text("helo\n", encoding="utf-8")
+    client = TestClient(api_server.app)
+    observed_tool_names = []
+
+    async def fake_agent_loop_stream(**kwargs):
+        observed_tool_names.extend(tool.get("name") for tool in kwargs.get("tools", []))
+        tool_input = {"path": "README.md", "content": "hello\n"}
+        decision = await kwargs["on_tool_check"]("write_file", tool_input)
+        assert decision.allowed is True
+        readme.write_text("hello\n", encoding="utf-8")
+        kwargs["on_tool_call"]("write_file", tool_input, "Updated README.md")
+        yield ("token", "已修正 README 中的拼写。")
+        yield ("metrics", 15, 10)
+        yield ("done", "已修正 README 中的拼写。")
+
+    async def fake_parallel_briefing(**kwargs):
+        raise AssertionError("small_edit runtime turns should not create parallel briefing agents")
+
+    monkeypatch.setattr(api_server, "agent_loop_stream", fake_agent_loop_stream)
+    monkeypatch.setattr(api_server, "run_parallel_agent_briefing", fake_parallel_briefing)
+
+    created = client.post(
+        "/api/conversations",
+        json={"prompt": "帮我改 README 的错别字", "workspace_dir": str(workspace)},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    started = client.post(
+        f"/api/conversations/{conversation_id}/runs",
+        json={"prompt": "帮我改 README 的错别字", "workspace_dir": str(workspace)},
+    )
+    assert started.status_code == 200
+    thread_id = started.json()["run"]["thread_id"]
+
+    api_server.active_runs[thread_id].thread.join(timeout=3)
+
+    loop = client.get(f"/api/runs/{thread_id}/loop")
+    assert loop.status_code == 200
+    actions = [step["action"]["type"] for step in loop.json()["steps"]]
+    assert actions == ["inspect_project", "call_tool", "run_checks", "summarize", "finish"]
+    assert loop.json()["terminal_status"] == "completed"
+    assert readme.read_text(encoding="utf-8") == "hello\n"
+    assert "write_file" in observed_tool_names
+    assert "bash" not in observed_tool_names
+    assert "delete_file" not in observed_tool_names
+    assert "spawn_agent" not in observed_tool_names
+
+
+def test_small_edit_run_fails_when_model_only_claims_completion(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("helo\n", encoding="utf-8")
+    client = TestClient(api_server.app)
+
+    async def fake_agent_loop_stream(**kwargs):
+        yield ("token", "已修正 README 中的拼写。")
+        yield ("metrics", 8, 8)
+        yield ("done", "已修正 README 中的拼写。")
+
+    monkeypatch.setattr(api_server, "agent_loop_stream", fake_agent_loop_stream)
+
+    created = client.post(
+        "/api/conversations",
+        json={"prompt": "帮我改 README 的错别字", "workspace_dir": str(workspace)},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    started = client.post(
+        f"/api/conversations/{conversation_id}/runs",
+        json={"prompt": "帮我改 README 的错别字", "workspace_dir": str(workspace)},
+    )
+    thread_id = started.json()["run"]["thread_id"]
+
+    api_server.active_runs[thread_id].thread.join(timeout=3)
+
+    loop = client.get(f"/api/runs/{thread_id}/loop")
+    actions = [step["action"]["type"] for step in loop.json()["steps"]]
+    session = api_server.event_store.get_session(thread_id, str(workspace))
+    assert actions == ["inspect_project", "fail"]
+    assert loop.json()["terminal_status"] == "failed"
+    assert session["status"] == "failed"
+    assert "未检测到本轮成功写入工具调用" in session["error"]
 
 
 def test_lead_agent_route_creates_permanent_and_temporary_agents(tmp_path):

@@ -208,14 +208,14 @@ class TestRunLifecycleService:
 
 class TestLifecycleAPI:
     def test_get_lifecycle_for_nonexistent_run(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.get("/api/runs/nonexistent_xyz/lifecycle")
         assert resp.status_code == 404
 
     def test_get_lifecycle_marks_persisted_completed_run_terminal(self, tmp_path):
-        import api_server
-        from api_server import app
+        from src.api import legacy_runtime as api_server
+        from src.api.server import app
 
         thread_id = f"completed_{time.time_ns()}"
         api_server.event_store.create_session(
@@ -234,13 +234,13 @@ class TestLifecycleAPI:
         assert body["is_terminal"] is True
 
     def test_retry_non_existent_run_returns_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
         resp = client.post("/api/runs/nonexistent_xyz/retry")
         assert resp.status_code == 404
 
     def test_retry_on_active_run_returns_400(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app)
 
         ws = tmp_path / "ws"
@@ -262,10 +262,13 @@ class TestLifecycleAPI:
             config_module.WORKSPACE_DIR = original
 
     def test_cancel_active_run_enters_cancelling_without_terminal_done(self, tmp_path):
-        from api_server import app, event_store, run_manager
+        from src.api.server import app
+        from src.api.services.runtime_registry_service import get_run_manager, get_runtime_event_store
         import queue
 
         client = TestClient(app)
+        event_store = get_runtime_event_store()
+        run_manager = get_run_manager()
         ws = tmp_path / "ws"
         ws.mkdir()
         thread_id = "cancel_active_run"
@@ -292,7 +295,8 @@ class TestLifecycleAPI:
             run_manager.unregister(thread_id)
 
     def test_retry_run_builds_contextual_prompt(self, tmp_path, monkeypatch):
-        import api_server
+        from src.api import legacy_runtime as api_server
+        from src.api.services import workflow_thread_service
 
         class DummyThread:
             def __init__(self, *args, **kwargs):
@@ -302,7 +306,7 @@ class TestLifecycleAPI:
             def start(self):
                 return None
 
-        monkeypatch.setattr(api_server.threading, "Thread", DummyThread)
+        monkeypatch.setattr(workflow_thread_service.threading, "Thread", DummyThread)
         client = TestClient(api_server.app)
         ws = tmp_path / "ws"
         ws.mkdir()

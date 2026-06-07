@@ -534,12 +534,14 @@ func (x *ListDirectoryResponse) GetContent() string {
 }
 
 type WriteFileRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Workspace     string                 `protobuf:"bytes,1,opt,name=workspace,proto3" json:"workspace,omitempty"`
-	Filename      string                 `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
-	Content       string                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Workspace      string                 `protobuf:"bytes,1,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Filename       string                 `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
+	Content        string                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
+	Overwrite      bool                   `protobuf:"varint,4,opt,name=overwrite,proto3" json:"overwrite,omitempty"`
+	BackupExisting bool                   `protobuf:"varint,5,opt,name=backup_existing,json=backupExisting,proto3" json:"backup_existing,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *WriteFileRequest) Reset() {
@@ -593,6 +595,20 @@ func (x *WriteFileRequest) GetContent() string {
 	return ""
 }
 
+func (x *WriteFileRequest) GetOverwrite() bool {
+	if x != nil {
+		return x.Overwrite
+	}
+	return false
+}
+
+func (x *WriteFileRequest) GetBackupExisting() bool {
+	if x != nil {
+		return x.BackupExisting
+	}
+	return false
+}
+
 type WriteFileResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
@@ -643,6 +659,11 @@ type EditFileRequest struct {
 	Filename      string                 `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
 	SearchBlock   string                 `protobuf:"bytes,3,opt,name=search_block,json=searchBlock,proto3" json:"search_block,omitempty"`
 	ReplaceBlock  string                 `protobuf:"bytes,4,opt,name=replace_block,json=replaceBlock,proto3" json:"replace_block,omitempty"`
+	StartLine     int32                  `protobuf:"varint,5,opt,name=start_line,json=startLine,proto3" json:"start_line,omitempty"`
+	EndLine       int32                  `protobuf:"varint,6,opt,name=end_line,json=endLine,proto3" json:"end_line,omitempty"`
+	NewText       string                 `protobuf:"bytes,7,opt,name=new_text,json=newText,proto3" json:"new_text,omitempty"`
+	CreateBackup  bool                   `protobuf:"varint,9,opt,name=create_backup,json=createBackup,proto3" json:"create_backup,omitempty"`
+	MatchMode     string                 `protobuf:"bytes,10,opt,name=match_mode,json=matchMode,proto3" json:"match_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -705,11 +726,53 @@ func (x *EditFileRequest) GetReplaceBlock() string {
 	return ""
 }
 
+func (x *EditFileRequest) GetStartLine() int32 {
+	if x != nil {
+		return x.StartLine
+	}
+	return 0
+}
+
+func (x *EditFileRequest) GetEndLine() int32 {
+	if x != nil {
+		return x.EndLine
+	}
+	return 0
+}
+
+func (x *EditFileRequest) GetNewText() string {
+	if x != nil {
+		return x.NewText
+	}
+	return ""
+}
+
+func (x *EditFileRequest) GetCreateBackup() bool {
+	if x != nil {
+		return x.CreateBackup
+	}
+	return false
+}
+
+func (x *EditFileRequest) GetMatchMode() string {
+	if x != nil {
+		return x.MatchMode
+	}
+	return ""
+}
+
 type EditFileResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Result        string                 `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Result           string                 `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	Diff             string                 `protobuf:"bytes,2,opt,name=diff,proto3" json:"diff,omitempty"`
+	Strategy         string                 `protobuf:"bytes,3,opt,name=strategy,proto3" json:"strategy,omitempty"`
+	MatchedStartLine int32                  `protobuf:"varint,4,opt,name=matched_start_line,json=matchedStartLine,proto3" json:"matched_start_line,omitempty"`
+	MatchedEndLine   int32                  `protobuf:"varint,5,opt,name=matched_end_line,json=matchedEndLine,proto3" json:"matched_end_line,omitempty"`
+	ChangedLineCount int32                  `protobuf:"varint,6,opt,name=changed_line_count,json=changedLineCount,proto3" json:"changed_line_count,omitempty"`
+	BackupPath       string                 `protobuf:"bytes,7,opt,name=backup_path,json=backupPath,proto3" json:"backup_path,omitempty"`
+	Changed          bool                   `protobuf:"varint,8,opt,name=changed,proto3" json:"changed,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EditFileResponse) Reset() {
@@ -747,6 +810,55 @@ func (x *EditFileResponse) GetResult() string {
 		return x.Result
 	}
 	return ""
+}
+
+func (x *EditFileResponse) GetDiff() string {
+	if x != nil {
+		return x.Diff
+	}
+	return ""
+}
+
+func (x *EditFileResponse) GetStrategy() string {
+	if x != nil {
+		return x.Strategy
+	}
+	return ""
+}
+
+func (x *EditFileResponse) GetMatchedStartLine() int32 {
+	if x != nil {
+		return x.MatchedStartLine
+	}
+	return 0
+}
+
+func (x *EditFileResponse) GetMatchedEndLine() int32 {
+	if x != nil {
+		return x.MatchedEndLine
+	}
+	return 0
+}
+
+func (x *EditFileResponse) GetChangedLineCount() int32 {
+	if x != nil {
+		return x.ChangedLineCount
+	}
+	return 0
+}
+
+func (x *EditFileResponse) GetBackupPath() string {
+	if x != nil {
+		return x.BackupPath
+	}
+	return ""
+}
+
+func (x *EditFileResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
 }
 
 type BackupFileRequest struct {
@@ -1176,20 +1288,38 @@ const file_proto_filetools_proto_rawDesc = "" +
 	"\tworkspace\x18\x01 \x01(\tR\tworkspace\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"1\n" +
 	"\x15ListDirectoryResponse\x12\x18\n" +
-	"\acontent\x18\x01 \x01(\tR\acontent\"f\n" +
+	"\acontent\x18\x01 \x01(\tR\acontent\"\xad\x01\n" +
 	"\x10WriteFileRequest\x12\x1c\n" +
 	"\tworkspace\x18\x01 \x01(\tR\tworkspace\x12\x1a\n" +
 	"\bfilename\x18\x02 \x01(\tR\bfilename\x12\x18\n" +
-	"\acontent\x18\x03 \x01(\tR\acontent\"-\n" +
+	"\acontent\x18\x03 \x01(\tR\acontent\x12\x1c\n" +
+	"\toverwrite\x18\x04 \x01(\bR\toverwrite\x12'\n" +
+	"\x0fbackup_existing\x18\x05 \x01(\bR\x0ebackupExisting\"-\n" +
 	"\x11WriteFileResponse\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\x93\x01\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\"\xb2\x02\n" +
 	"\x0fEditFileRequest\x12\x1c\n" +
 	"\tworkspace\x18\x01 \x01(\tR\tworkspace\x12\x1a\n" +
 	"\bfilename\x18\x02 \x01(\tR\bfilename\x12!\n" +
 	"\fsearch_block\x18\x03 \x01(\tR\vsearchBlock\x12#\n" +
-	"\rreplace_block\x18\x04 \x01(\tR\freplaceBlock\"*\n" +
+	"\rreplace_block\x18\x04 \x01(\tR\freplaceBlock\x12\x1d\n" +
+	"\n" +
+	"start_line\x18\x05 \x01(\x05R\tstartLine\x12\x19\n" +
+	"\bend_line\x18\x06 \x01(\x05R\aendLine\x12\x19\n" +
+	"\bnew_text\x18\a \x01(\tR\anewText\x12#\n" +
+	"\rcreate_backup\x18\t \x01(\bR\fcreateBackup\x12\x1d\n" +
+	"\n" +
+	"match_mode\x18\n" +
+	" \x01(\tR\tmatchModeJ\x04\b\b\x10\t\"\x9b\x02\n" +
 	"\x10EditFileResponse\x12\x16\n" +
-	"\x06result\x18\x01 \x01(\tR\x06result\"M\n" +
+	"\x06result\x18\x01 \x01(\tR\x06result\x12\x12\n" +
+	"\x04diff\x18\x02 \x01(\tR\x04diff\x12\x1a\n" +
+	"\bstrategy\x18\x03 \x01(\tR\bstrategy\x12,\n" +
+	"\x12matched_start_line\x18\x04 \x01(\x05R\x10matchedStartLine\x12(\n" +
+	"\x10matched_end_line\x18\x05 \x01(\x05R\x0ematchedEndLine\x12,\n" +
+	"\x12changed_line_count\x18\x06 \x01(\x05R\x10changedLineCount\x12\x1f\n" +
+	"\vbackup_path\x18\a \x01(\tR\n" +
+	"backupPath\x12\x18\n" +
+	"\achanged\x18\b \x01(\bR\achanged\"M\n" +
 	"\x11BackupFileRequest\x12\x1c\n" +
 	"\tworkspace\x18\x01 \x01(\tR\tworkspace\x12\x1a\n" +
 	"\bfilename\x18\x02 \x01(\tR\bfilename\"5\n" +

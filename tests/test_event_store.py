@@ -50,6 +50,67 @@ def test_event_store_lists_events_after_cursor(tmp_path):
     assert store.count_events("run-1", str(workspace)) == 3
 
 
+def test_event_store_notifies_registered_listener_once(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+    received = []
+
+    assert store.add_listener(received.append) is True
+    assert store.add_listener(received.append) is False
+
+    event = store.append_event("run-1", "run_started", workspace_dir=str(workspace))
+
+    assert received == [event]
+    assert store.listener_count() == 1
+    assert store.remove_listener(received.append) is True
+    assert store.remove_listener(received.append) is False
+    assert store.listener_count() == 0
+
+
+def test_event_store_listener_failure_does_not_break_persistence(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    def fail_listener(_event):
+        raise RuntimeError("listener unavailable")
+
+    store.add_listener(fail_listener)
+
+    event = store.append_event("run-1", "run_started", workspace_dir=str(workspace))
+
+    assert event.type == "run_started"
+    assert store.count_events("run-1", str(workspace)) == 1
+
+
+def test_event_store_run_index_failure_is_logged_without_losing_session(tmp_path, monkeypatch):
+    from src.api.services import event_store as event_store_module
+    from src.api.services import run_history
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    warnings = []
+    monkeypatch.setattr(
+        run_history,
+        "upsert_run_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("index unavailable")),
+    )
+    monkeypatch.setattr(
+        event_store_module.logger,
+        "warning",
+        lambda event, *args, **kwargs: warnings.append((event, kwargs)),
+    )
+    store = EventStore()
+
+    session = store.create_session("run-1", "prompt", str(workspace))
+
+    assert session["thread_id"] == "run-1"
+    assert store.session_path("run-1", str(workspace)).exists()
+    assert warnings[0][0] == "run_index_update_failed"
+    assert warnings[0][1]["extra"]["thread_id"] == "run-1"
+
+
 def test_event_store_updates_session_status(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

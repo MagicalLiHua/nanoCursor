@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
 import json
 from pathlib import Path
 from typing import Any
 
 from src.infra import config as config_module
+from src.runtime.git_runner import run_git
 
 
 def _workspace(workspace_dir: str | None = None) -> Path:
@@ -16,17 +16,8 @@ def _workspace(workspace_dir: str | None = None) -> Path:
 
 def _run_git(workspace: Path, *args: str) -> tuple[int, str, str]:
     """Run a git command in the workspace. Returns (returncode, stdout, stderr)."""
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(workspace),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return -1, "", str(exc)
+    result = run_git(workspace, list(args), timeout_seconds=30)
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
 def is_git_repo(workspace_dir: str | None = None) -> bool:

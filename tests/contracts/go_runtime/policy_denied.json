@@ -1,0 +1,22 @@
+{
+  "tool_run_id": "tr_denied",
+  "status": "denied",
+  "backend": "go_runtime",
+  "tool": "run_command",
+  "command": "rm -rf dist",
+  "cwd": "/workspace",
+  "exit_code": -1,
+  "stdout": "",
+  "stderr": "shell_risky command requires approval token",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "duration_ms": 0,
+  "timed_out": false,
+  "error_code": "approval_required",
+  "message": "shell_risky command requires approval token",
+  "evidence": {
+    "kind": "command_result",
+    "summary": "shell_risky command requires approval token",
+    "artifacts": []
+  }
+}

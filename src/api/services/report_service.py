@@ -60,6 +60,25 @@ def _execution_strategy(session: dict[str, Any] | None) -> str:
     return str(plan.get("strategy") or "")
 
 
+def _requires_workspace_write(session: dict[str, Any] | None) -> bool | None:
+    if not isinstance(session, dict):
+        return None
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    decision = session.get("intent_decision")
+    if not isinstance(decision, dict):
+        decision = plan.get("intent_decision") or plan.get("routing_decision")
+    if isinstance(decision, dict):
+        if isinstance(decision.get("requires_workspace_write"), bool):
+            return bool(decision.get("requires_workspace_write"))
+        requires = decision.get("requires")
+        if isinstance(requires, dict) and isinstance(requires.get("workspace_write"), bool):
+            return bool(requires.get("workspace_write"))
+    strategy = str(plan.get("strategy") or "")
+    if not strategy:
+        return None
+    return strategy in {"small_patch", "feature_delivery", "bug_fix", "refactor"}
+
+
 def _plain_assistant_summary(content: str) -> str:
     """Convert a final assistant message into a compact plain summary."""
     lines: list[str] = []
@@ -102,9 +121,9 @@ def _report_not_applicable(
     tool_events: list[Any],
     agent_contributions: dict[str, Any],
 ) -> bool:
-    if _execution_strategy(session) != "lead_direct_reply":
+    if _requires_workspace_write(session) is not False:
         return False
-    return not changed_files and not tool_events and not agent_contributions.get("contributions")
+    return not changed_files and not agent_contributions.get("contributions")
 
 
 def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
@@ -145,14 +164,19 @@ def build_delivery_report(thread_id: str, workspace_dir: str | None = None) -> d
     store = get_event_store()
     session = store.get_session(thread_id, str(workspace))
     events = store.list_events(thread_id, str(workspace))
-    diff_info = get_run_diff(thread_id, str(workspace))
-    changed_files = diff_info.get("changed_files", [])
 
     prompt = session.get("prompt", "") if session else ""
     assistant_messages = [event.content for event in events if event.type == "assistant_message"]
     tool_events = [event for event in events if event.type == "tool_call_finished"]
     error_events = [event for event in events if event.type == "error"]
     agent_contributions = summarize_ephemeral_agent_contributions(thread_id, str(workspace))
+    is_lightweight_reply = _requires_workspace_write(session) is False
+    diff_info = (
+        {"changed_files": [], "diff": "", "source": "not_applicable"}
+        if is_lightweight_reply
+        else get_run_diff(thread_id, str(workspace))
+    )
+    changed_files = diff_info.get("changed_files", [])
 
     status = _status_text(session)
     if _report_not_applicable(

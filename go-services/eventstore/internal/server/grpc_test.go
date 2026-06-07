@@ -14,11 +14,12 @@ import (
 
 const bufSize = 1024 * 1024
 
-func startTestServer(t *testing.T) (pb.EventStoreServiceClient, func()) {
+func startTestServer(t *testing.T) (pb.EventStoreServiceClient, string, func()) {
 	t.Helper()
+	workspace := t.TempDir()
 	lis := bufconn.Listen(bufSize)
 	s := grpc.NewServer()
-	pb.RegisterEventStoreServiceServer(s, NewEventStoreServer(t.TempDir()))
+	pb.RegisterEventStoreServiceServer(s, NewEventStoreServer(workspace))
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			t.Logf("server exited: %v", err)
@@ -34,14 +35,14 @@ func startTestServer(t *testing.T) (pb.EventStoreServiceClient, func()) {
 		t.Fatal(err)
 	}
 	client := pb.NewEventStoreServiceClient(conn)
-	return client, func() {
+	return client, workspace, func() {
 		conn.Close()
 		s.Stop()
 	}
 }
 
 func TestHealth(t *testing.T) {
-	client, cleanup := startTestServer(t)
+	client, _, cleanup := startTestServer(t)
 	defer cleanup()
 	resp, err := client.Health(context.Background(), &pb.HealthRequest{})
 	if err != nil {
@@ -53,11 +54,11 @@ func TestHealth(t *testing.T) {
 }
 
 func TestSessionCRUD(t *testing.T) {
-	client, cleanup := startTestServer(t)
+	client, workspace, cleanup := startTestServer(t)
 	defer cleanup()
 
 	session, err := client.CreateSession(context.Background(), &pb.CreateSessionRequest{
-		ThreadId: "t1", Prompt: "hello", WorkspaceDir: "/tmp",
+		ThreadId: "t1", Prompt: "hello", WorkspaceDir: workspace,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -66,13 +67,13 @@ func TestSessionCRUD(t *testing.T) {
 		t.Fatalf("unexpected session: %v", session)
 	}
 
-	got, _ := client.GetSession(context.Background(), &pb.GetSessionRequest{ThreadId: "t1", WorkspaceDir: "/tmp"})
+	got, _ := client.GetSession(context.Background(), &pb.GetSessionRequest{ThreadId: "t1", WorkspaceDir: workspace})
 	if got.Prompt != "hello" {
 		t.Fatalf("expected hello, got %s", got.Prompt)
 	}
 
 	updated, _ := client.UpdateSession(context.Background(), &pb.UpdateSessionRequest{
-		ThreadId: "t1", WorkspaceDir: "/tmp",
+		ThreadId: "t1", WorkspaceDir: workspace,
 		Changes: map[string]string{"status": "completed"},
 	})
 	if updated.Status != "completed" {
@@ -81,25 +82,25 @@ func TestSessionCRUD(t *testing.T) {
 }
 
 func TestAppendAndListEvents(t *testing.T) {
-	client, cleanup := startTestServer(t)
+	client, workspace, cleanup := startTestServer(t)
 	defer cleanup()
 
 	client.AppendEvent(context.Background(), &pb.AppendEventRequest{
-		ThreadId: "t1", EventType: "message", Title: "hi", WorkspaceDir: "/tmp",
+		ThreadId: "t1", EventType: "message", Title: "hi", WorkspaceDir: workspace,
 	})
 	client.AppendEvent(context.Background(), &pb.AppendEventRequest{
-		ThreadId: "t1", EventType: "done", WorkspaceDir: "/tmp",
+		ThreadId: "t1", EventType: "done", WorkspaceDir: workspace,
 	})
 
 	list, _ := client.ListEvents(context.Background(), &pb.ListEventsRequest{
-		ThreadId: "t1", WorkspaceDir: "/tmp",
+		ThreadId: "t1", WorkspaceDir: workspace,
 	})
 	if len(list.Events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(list.Events))
 	}
 
 	count, _ := client.CountEvents(context.Background(), &pb.CountEventsRequest{
-		ThreadId: "t1", WorkspaceDir: "/tmp",
+		ThreadId: "t1", WorkspaceDir: workspace,
 	})
 	if count.Count != 2 {
 		t.Fatalf("expected 2, got %d", count.Count)
@@ -107,11 +108,11 @@ func TestAppendAndListEvents(t *testing.T) {
 }
 
 func TestSubscribeEvents(t *testing.T) {
-	client, cleanup := startTestServer(t)
+	client, workspace, cleanup := startTestServer(t)
 	defer cleanup()
 
 	stream, err := client.SubscribeEvents(context.Background(), &pb.SubscribeEventsRequest{
-		ThreadId: "t1", WorkspaceDir: "/tmp",
+		ThreadId: "t1", WorkspaceDir: workspace,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +121,7 @@ func TestSubscribeEvents(t *testing.T) {
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		client.AppendEvent(context.Background(), &pb.AppendEventRequest{
-			ThreadId: "t1", EventType: "test", WorkspaceDir: "/tmp",
+			ThreadId: "t1", EventType: "test", WorkspaceDir: workspace,
 		})
 	}()
 
@@ -134,11 +135,11 @@ func TestSubscribeEvents(t *testing.T) {
 }
 
 func TestWorkspaceForThread(t *testing.T) {
-	client, cleanup := startTestServer(t)
+	client, workspace, cleanup := startTestServer(t)
 	defer cleanup()
 
 	client.CreateSession(context.Background(), &pb.CreateSessionRequest{
-		ThreadId: "t1", WorkspaceDir: "/tmp",
+		ThreadId: "t1", WorkspaceDir: workspace,
 	})
 	resp, _ := client.WorkspaceForThread(context.Background(), &pb.WorkspaceForThreadRequest{ThreadId: "t1"})
 	if !resp.Found {

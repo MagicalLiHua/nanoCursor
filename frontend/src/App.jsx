@@ -39,6 +39,11 @@ export default function App() {
   useSSE();
   useBootstrap();
 
+  useEffect(() => {
+    const savedTheme = localStorage.getItem("nc_theme") || "light";
+    document.documentElement.setAttribute("data-theme", savedTheme);
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e) {

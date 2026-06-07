@@ -4,6 +4,7 @@ export const STORAGE_KEYS = {
   layout: "nanocursor_layout",
   layoutMode: "nanocursor_layout_mode",
   recommendationMuted: "nanocursor_recommendation_muted",
+  activeSessions: "nanocursor_active_sessions",
 };
 
 export const LEGACY_STORAGE_KEYS = {
@@ -60,5 +61,68 @@ export function saveLayoutMode(mode) {
     localStorage.setItem(STORAGE_KEYS.layoutMode, mode);
   } catch {
     // Layout mode persistence is nice-to-have.
+  }
+}
+
+function storageOrDefault(storage) {
+  if (storage) return storage;
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function workspaceKey(workspaceDir) {
+  return String(workspaceDir || "").trim();
+}
+
+export function loadActiveSession(workspaceDir, storage) {
+  const target = storageOrDefault(storage);
+  const key = workspaceKey(workspaceDir);
+  if (!target || !key) return null;
+  try {
+    const sessions = JSON.parse(target.getItem(STORAGE_KEYS.activeSessions) || "{}");
+    const saved = sessions?.[key];
+    if (!saved || typeof saved !== "object") return null;
+    const conversationId = String(saved.conversationId || "").trim();
+    const threadId = String(saved.threadId || "").trim();
+    if (!conversationId && (!threadId || threadId === "pending")) return null;
+    return { workspaceDir: key, conversationId, threadId };
+  } catch {
+    return null;
+  }
+}
+
+export function saveActiveSession({ workspaceDir, conversationId = "", threadId = "" } = {}, storage) {
+  const target = storageOrDefault(storage);
+  const key = workspaceKey(workspaceDir);
+  const normalizedThreadId = String(threadId || "").trim();
+  const normalizedConversationId = String(conversationId || "").trim();
+  if (!target || !key || (!normalizedConversationId && (!normalizedThreadId || normalizedThreadId === "pending"))) {
+    return;
+  }
+  try {
+    const sessions = JSON.parse(target.getItem(STORAGE_KEYS.activeSessions) || "{}");
+    sessions[key] = {
+      conversationId: normalizedConversationId,
+      threadId: normalizedThreadId === "pending" ? "" : normalizedThreadId,
+    };
+    target.setItem(STORAGE_KEYS.activeSessions, JSON.stringify(sessions));
+  } catch {
+    // Session persistence is best effort; backend state remains authoritative.
+  }
+}
+
+export function clearActiveSession(workspaceDir, storage) {
+  const target = storageOrDefault(storage);
+  const key = workspaceKey(workspaceDir);
+  if (!target || !key) return;
+  try {
+    const sessions = JSON.parse(target.getItem(STORAGE_KEYS.activeSessions) || "{}");
+    delete sessions[key];
+    target.setItem(STORAGE_KEYS.activeSessions, JSON.stringify(sessions));
+  } catch {
+    // Ignore unavailable or malformed storage.
   }
 }

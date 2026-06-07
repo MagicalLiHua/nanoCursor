@@ -57,6 +57,10 @@ def run_loop_controller_step(
     commit: bool = False,
     auto_repair: bool = True,
     execute_tools: bool = False,
+    context_pack_id: str | None = None,
+    status: str | None = None,
+    summary: str = "",
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one observe-check-repair-commit controller step."""
     observation = get_loop_observation(thread_id, workspace_dir)
@@ -83,8 +87,10 @@ def run_loop_controller_step(
             workspace_dir,
             action=selected_action,
             phase=_phase_for_action(str(selected_action.get("type") or "")),
-            status="waiting" if selected_action.get("type") == "request_approval" else "completed",
-            summary=_summary_for_action(selected_action, repaired=repaired),
+            status=status or ("waiting" if selected_action.get("type") == "request_approval" else "completed"),
+            summary=summary or _summary_for_action(selected_action, repaired=repaired),
+            event_id=event_id,
+            context_pack_id=context_pack_id,
         )
         committed = True
         step = state.steps[-1].model_dump() if state.steps else None

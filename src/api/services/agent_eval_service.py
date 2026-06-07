@@ -7,16 +7,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.api.services.context_service import build_context_pack
-from src.api.services.conversation_service import (
-    create_conversation,
-    link_run_to_conversation,
-    list_conversation_runs,
-    list_conversations,
-)
-from src.api.services.event_store import get_event_store
 from src.api.services.eval_service import _evals_root, _workspace, run_eval
 from src.api.services.intent_eval_service import run_intent_eval_suite
+from src.api.services.agent_eval_runtime_probe_service import (
+    run_runtime_context_section,
+    run_runtime_delivery_section,
+    run_runtime_memory_section,
+)
+from src.api.services.agent_eval_runtime_metrics_service import run_runtime_quality_metrics_section
 from src.runtime.action_policy import ActionKind, check_action
 
 
@@ -121,6 +119,39 @@ def list_agent_eval_catalog() -> dict[str, Any]:
                     "recovery_context_injection",
                 ],
             },
+            {
+                "id": "runtime_memory",
+                "label": "Memory Governance",
+                "description": "Memory relevance, stale blocking, scope isolation and follow-up recall probes.",
+                "case_ids": [
+                    "memory_precision",
+                    "stale_memory_blocked",
+                    "memory_scope_isolation",
+                    "followup_memory_hit",
+                ],
+            },
+            {
+                "id": "runtime_delivery",
+                "label": "Runtime Loop Delivery",
+                "description": "Controller Loop、small edit 交付证据和高风险动作边界探针。",
+                "case_ids": [
+                    "small_edit_rejects_claim_only",
+                    "small_edit_accepts_change_evidence",
+                    "small_edit_blocks_risky_shell",
+                ],
+            },
+            {
+                "id": "runtime_quality_metrics",
+                "label": "Runtime Quality Metrics",
+                "description": "Evidence-based metrics across direct answer, read only, edit, approval, and recovery runs.",
+                "case_ids": [
+                    "direct_answer_metrics",
+                    "read_only_metrics",
+                    "small_edit_metrics",
+                    "approval_metrics",
+                    "failure_recovery_metrics",
+                ],
+            },
         ],
     }
 
@@ -142,7 +173,10 @@ def run_agent_eval_suite(
         _run_intent_section(workspace_dir=str(workspace)),
         _run_policy_section(),
         _run_task_eval_section(task_eval_ids or CORE_TASK_EVAL_IDS, workspace_dir=str(workspace)),
-        _run_runtime_context_section(workspace),
+        run_runtime_context_section(workspace),
+        run_runtime_memory_section(workspace),
+        run_runtime_delivery_section(workspace),
+        run_runtime_quality_metrics_section(workspace),
     ]
     total_checks = sum(int(section.get("total", 0)) for section in sections)
     passed = sum(int(section.get("passed", 0)) for section in sections)
@@ -320,150 +354,6 @@ def _run_task_eval_section(eval_ids: list[str], *, workspace_dir: str) -> dict[s
         "pass_rate": round(passed_count / max(len(results), 1), 3),
         "results": results,
         "summary": "确定性任务评测，覆盖 bugfix、路径保护和高风险审批场景。",
-    }
-
-
-def _run_runtime_context_section(workspace: Path) -> dict[str, Any]:
-    cases = [
-        _probe_context_selection_accuracy(workspace),
-        _probe_workspace_scope_isolation(workspace),
-        _probe_recovery_context_injection(workspace),
-    ]
-    passed_count = sum(1 for case in cases if case["status"] == "passed")
-    failed_count = len(cases) - passed_count
-    return {
-        "id": "runtime_context",
-        "label": "Context And Isolation",
-        "status": "passed" if failed_count == 0 else "failed",
-        "total": len(cases),
-        "passed": passed_count,
-        "failed": failed_count,
-        "pass_rate": round(passed_count / max(len(cases), 1), 3),
-        "cases": cases,
-        "summary": "上下文选择、工作区隔离和失败恢复上下文探针。",
-    }
-
-
-def _probe_context_selection_accuracy(workspace: Path) -> dict[str, Any]:
-    probe = _make_probe_workspace(workspace, "context-selection")
-    pack = build_context_pack(
-        prompt="修复 app.py 里的 add 函数并运行测试",
-        workspace_dir=str(probe),
-        execution_plan={
-            "strategy": "bug_fix",
-            "stages": [
-                {"id": "inspect", "title": "定位失败文件"},
-                {"id": "verify", "title": "运行 pytest"},
-            ],
-        },
-    )
-    data = pack.to_dict()
-    selected = data.get("selected_files") if isinstance(data.get("selected_files"), list) else []
-    app_item = next((item for item in selected if item.get("path") == "app.py"), None)
-    checks = [
-        _case_check("selected_app_py", app_item is not None, [item.get("path") for item in selected], "app.py"),
-        _case_check("has_reasons", bool(app_item and app_item.get("reasons")), app_item, "non-empty reasons"),
-        _case_check("budget_included", app_item and app_item.get("budget_decision") == "included", app_item, "included"),
-        _case_check("selection_reasons", bool(data.get("selection_reasons")), data.get("selection_reasons"), "non-empty"),
-        _case_check("p0_preserved", data.get("context_debug", {}).get("protected_context", {}).get("preserved") is True, data.get("context_debug", {}).get("protected_context"), True),
-    ]
-    return _probe_result("context_selection_accuracy", checks)
-
-
-def _probe_workspace_scope_isolation(workspace: Path) -> dict[str, Any]:
-    left = _make_probe_workspace(workspace, "scope-left")
-    right = _make_probe_workspace(workspace, "scope-right")
-    left_conversation = create_conversation("左侧工作区任务", str(left))
-    right_conversation = create_conversation("右侧工作区任务", str(right))
-    left_id = left_conversation["conversation_id"]
-    right_id = right_conversation["conversation_id"]
-    link_run_to_conversation(left_id, "left-run-1", str(left), prompt="只属于左侧")
-    link_run_to_conversation(right_id, "right-run-1", str(right), prompt="只属于右侧")
-
-    left_runs = list_conversation_runs(left_id, str(left)) or {}
-    right_runs = list_conversation_runs(right_id, str(right)) or {}
-    left_list = list_conversations(str(left), limit=20)
-    right_list = list_conversations(str(right), limit=20)
-    checks = [
-        _case_check("left_run_scoped", [run.get("thread_id") for run in left_runs.get("runs", [])] == ["left-run-1"], left_runs.get("runs"), "left-run-1 only"),
-        _case_check("right_run_scoped", [run.get("thread_id") for run in right_runs.get("runs", [])] == ["right-run-1"], right_runs.get("runs"), "right-run-1 only"),
-        _case_check("left_list_isolated", right_id not in {item.get("conversation_id") for item in left_list}, [item.get("conversation_id") for item in left_list], f"no {right_id}"),
-        _case_check("right_list_isolated", left_id not in {item.get("conversation_id") for item in right_list}, [item.get("conversation_id") for item in right_list], f"no {left_id}"),
-    ]
-    return _probe_result("workspace_scope_isolation", checks)
-
-
-def _probe_recovery_context_injection(workspace: Path) -> dict[str, Any]:
-    probe = _make_probe_workspace(workspace, "recovery-context")
-    thread_id = f"agent-eval-recovery-{int(time.time() * 1000)}"
-    store = get_event_store()
-    store.create_session(thread_id, "修复测试失败", str(probe), status="failed")
-    store.append_event(
-        thread_id,
-        "error",
-        title="pytest failed",
-        content="FAILED test_app.py::test_add - AssertionError: expected add(1, 2) == 4",
-        agent="tester",
-        payload={"task_id": "verify", "error": "test_app.py failed"},
-        workspace_dir=str(probe),
-    )
-    pack = build_context_pack(
-        prompt="继续修复刚才的测试失败",
-        workspace_dir=str(probe),
-        thread_id=thread_id,
-        execution_plan={"strategy": "bug_fix", "stages": [{"id": "verify", "title": "验证"}]},
-    )
-    data = pack.to_dict()
-    failures = data.get("recent_failures") if isinstance(data.get("recent_failures"), list) else []
-    related_files = {
-        path
-        for failure in failures
-        for path in failure.get("related_files", [])
-        if isinstance(failure, dict)
-    }
-    selected_paths = [item.get("path") for item in data.get("selected_files", []) if isinstance(item, dict)]
-    checks = [
-        _case_check("failure_included", bool(failures), failures, "non-empty recent_failures"),
-        _case_check("related_file_extracted", "test_app.py" in related_files, sorted(related_files), "test_app.py"),
-        _case_check("related_file_selected", "test_app.py" in selected_paths, selected_paths, "test_app.py"),
-        _case_check("debug_counts_related_file", data.get("context_debug", {}).get("failure_context", {}).get("related_file_count", 0) >= 1, data.get("context_debug", {}).get("failure_context"), "related_file_count >= 1"),
-    ]
-    return _probe_result("recovery_context_injection", checks)
-
-
-def _make_probe_workspace(workspace: Path, name: str) -> Path:
-    probe = workspace / ".nanocursor" / "eval_probe_workspaces" / f"{name}-{int(time.time() * 1000)}"
-    probe.mkdir(parents=True, exist_ok=True)
-    (probe / "app.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n",
-        encoding="utf-8",
-    )
-    (probe / "test_app.py").write_text(
-        "from app import add\n\n"
-        "def test_add():\n"
-        "    assert add(1, 2) == 3\n",
-        encoding="utf-8",
-    )
-    (probe / "README.md").write_text("# probe workspace\n", encoding="utf-8")
-    return probe
-
-
-def _case_check(check_id: str, ok: bool, actual: Any, expected: Any) -> dict[str, Any]:
-    return {
-        "id": check_id,
-        "status": "passed" if ok else "failed",
-        "actual": actual,
-        "expected": expected,
-    }
-
-
-def _probe_result(case_id: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
-    failed = [check for check in checks if check["status"] != "passed"]
-    return {
-        "id": case_id,
-        "status": "passed" if not failed else "failed",
-        "checks": checks,
     }
 
 

@@ -10,7 +10,7 @@ from src.api.services.event_store import EventStore
 
 class TestChangeAPI:
     def test_get_changes_nonexistent_run_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"noexist_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/changes")
@@ -19,7 +19,7 @@ class TestChangeAPI:
             assert "request_id" in resp.json()["error"]
 
     def test_collect_and_get_changes(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -56,7 +56,7 @@ class TestChangeAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_review_after_collect(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -90,7 +90,7 @@ class TestChangeAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_approve_changes(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -124,7 +124,7 @@ class TestChangeAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_reject_changes(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -158,7 +158,7 @@ class TestChangeAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_approve_without_collect_404(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"

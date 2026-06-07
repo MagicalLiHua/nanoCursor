@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x66iletools.proto\x12\x14nanocursor.filetools\"6\n\x0fReadFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\"#\n\x10ReadFileResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"Q\n\x13ReadFunctionRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\"\'\n\x14ReadFunctionResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"K\n\x10ReadClassRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x12\n\nclass_name\x18\x03 \x01(\t\"$\n\x11ReadClassResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"a\n\x14ReadFileRangeRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x12\n\nstart_line\x18\x03 \x01(\x05\x12\x10\n\x08\x65nd_line\x18\x04 \x01(\x05\"(\n\x15ReadFileRangeResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"7\n\x14ListDirectoryRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\"(\n\x15ListDirectoryResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"H\n\x10WriteFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\"$\n\x11WriteFileResponse\x12\x0f\n\x07message\x18\x01 \x01(\t\"c\n\x0f\x45\x64itFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0csearch_block\x18\x03 \x01(\t\x12\x15\n\rreplace_block\x18\x04 \x01(\t\"\"\n\x10\x45\x64itFileResponse\x12\x0e\n\x06result\x18\x01 \x01(\t\"8\n\x11\x42\x61\x63kupFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\")\n\x12\x42\x61\x63kupFileResponse\x12\x13\n\x0b\x62\x61\x63kup_path\x18\x01 \x01(\t\"P\n\x13RollbackFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0c\x62\x61\x63kup_index\x18\x03 \x01(\x05\"\'\n\x14RollbackFileResponse\x12\x0f\n\x07message\x18\x01 \x01(\t\"9\n\x12ListBackupsRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\"&\n\x13ListBackupsResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"\x0f\n\rHealthRequest\">\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07service\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t2\xb9\x08\n\tFileTools\x12Y\n\x08ReadFile\x12%.nanocursor.filetools.ReadFileRequest\x1a&.nanocursor.filetools.ReadFileResponse\x12\x65\n\x0cReadFunction\x12).nanocursor.filetools.ReadFunctionRequest\x1a*.nanocursor.filetools.ReadFunctionResponse\x12\\\n\tReadClass\x12&.nanocursor.filetools.ReadClassRequest\x1a\'.nanocursor.filetools.ReadClassResponse\x12h\n\rReadFileRange\x12*.nanocursor.filetools.ReadFileRangeRequest\x1a+.nanocursor.filetools.ReadFileRangeResponse\x12h\n\rListDirectory\x12*.nanocursor.filetools.ListDirectoryRequest\x1a+.nanocursor.filetools.ListDirectoryResponse\x12\\\n\tWriteFile\x12&.nanocursor.filetools.WriteFileRequest\x1a\'.nanocursor.filetools.WriteFileResponse\x12Y\n\x08\x45\x64itFile\x12%.nanocursor.filetools.EditFileRequest\x1a&.nanocursor.filetools.EditFileResponse\x12_\n\nBackupFile\x12\'.nanocursor.filetools.BackupFileRequest\x1a(.nanocursor.filetools.BackupFileResponse\x12\x65\n\x0cRollbackFile\x12).nanocursor.filetools.RollbackFileRequest\x1a*.nanocursor.filetools.RollbackFileResponse\x12\x62\n\x0bListBackups\x12(.nanocursor.filetools.ListBackupsRequest\x1a).nanocursor.filetools.ListBackupsResponse\x12S\n\x06Health\x12#.nanocursor.filetools.HealthRequest\x1a$.nanocursor.filetools.HealthResponseB2Z0nanocursor/go-services/filetools/internal/serverb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x66iletools.proto\x12\x14nanocursor.filetools\"6\n\x0fReadFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\"#\n\x10ReadFileResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"Q\n\x13ReadFunctionRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\"\'\n\x14ReadFunctionResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"K\n\x10ReadClassRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x12\n\nclass_name\x18\x03 \x01(\t\"$\n\x11ReadClassResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"a\n\x14ReadFileRangeRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x12\n\nstart_line\x18\x03 \x01(\x05\x12\x10\n\x08\x65nd_line\x18\x04 \x01(\x05\"(\n\x15ReadFileRangeResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"7\n\x14ListDirectoryRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\"(\n\x15ListDirectoryResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"t\n\x10WriteFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\x12\x11\n\toverwrite\x18\x04 \x01(\x08\x12\x17\n\x0f\x62\x61\x63kup_existing\x18\x05 \x01(\x08\"$\n\x11WriteFileResponse\x12\x0f\n\x07message\x18\x01 \x01(\t\"\xcc\x01\n\x0f\x45\x64itFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0csearch_block\x18\x03 \x01(\t\x12\x15\n\rreplace_block\x18\x04 \x01(\t\x12\x12\n\nstart_line\x18\x05 \x01(\x05\x12\x10\n\x08\x65nd_line\x18\x06 \x01(\x05\x12\x10\n\x08new_text\x18\x07 \x01(\t\x12\x15\n\rcreate_backup\x18\t \x01(\x08\x12\x12\n\nmatch_mode\x18\n \x01(\tJ\x04\x08\x08\x10\t\"\xba\x01\n\x10\x45\x64itFileResponse\x12\x0e\n\x06result\x18\x01 \x01(\t\x12\x0c\n\x04\x64iff\x18\x02 \x01(\t\x12\x10\n\x08strategy\x18\x03 \x01(\t\x12\x1a\n\x12matched_start_line\x18\x04 \x01(\x05\x12\x18\n\x10matched_end_line\x18\x05 \x01(\x05\x12\x1a\n\x12\x63hanged_line_count\x18\x06 \x01(\x05\x12\x13\n\x0b\x62\x61\x63kup_path\x18\x07 \x01(\t\x12\x0f\n\x07\x63hanged\x18\x08 \x01(\x08\"8\n\x11\x42\x61\x63kupFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\")\n\x12\x42\x61\x63kupFileResponse\x12\x13\n\x0b\x62\x61\x63kup_path\x18\x01 \x01(\t\"P\n\x13RollbackFileRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0c\x62\x61\x63kup_index\x18\x03 \x01(\x05\"\'\n\x14RollbackFileResponse\x12\x0f\n\x07message\x18\x01 \x01(\t\"9\n\x12ListBackupsRequest\x12\x11\n\tworkspace\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\"&\n\x13ListBackupsResponse\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\"\x0f\n\rHealthRequest\">\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07service\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t2\xb9\x08\n\tFileTools\x12Y\n\x08ReadFile\x12%.nanocursor.filetools.ReadFileRequest\x1a&.nanocursor.filetools.ReadFileResponse\x12\x65\n\x0cReadFunction\x12).nanocursor.filetools.ReadFunctionRequest\x1a*.nanocursor.filetools.ReadFunctionResponse\x12\\\n\tReadClass\x12&.nanocursor.filetools.ReadClassRequest\x1a\'.nanocursor.filetools.ReadClassResponse\x12h\n\rReadFileRange\x12*.nanocursor.filetools.ReadFileRangeRequest\x1a+.nanocursor.filetools.ReadFileRangeResponse\x12h\n\rListDirectory\x12*.nanocursor.filetools.ListDirectoryRequest\x1a+.nanocursor.filetools.ListDirectoryResponse\x12\\\n\tWriteFile\x12&.nanocursor.filetools.WriteFileRequest\x1a\'.nanocursor.filetools.WriteFileResponse\x12Y\n\x08\x45\x64itFile\x12%.nanocursor.filetools.EditFileRequest\x1a&.nanocursor.filetools.EditFileResponse\x12_\n\nBackupFile\x12\'.nanocursor.filetools.BackupFileRequest\x1a(.nanocursor.filetools.BackupFileResponse\x12\x65\n\x0cRollbackFile\x12).nanocursor.filetools.RollbackFileRequest\x1a*.nanocursor.filetools.RollbackFileResponse\x12\x62\n\x0bListBackups\x12(.nanocursor.filetools.ListBackupsRequest\x1a).nanocursor.filetools.ListBackupsResponse\x12S\n\x06Health\x12#.nanocursor.filetools.HealthRequest\x1a$.nanocursor.filetools.HealthResponseB2Z0nanocursor/go-services/filetools/internal/serverb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -53,29 +53,29 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_LISTDIRECTORYRESPONSE']._serialized_start=571
   _globals['_LISTDIRECTORYRESPONSE']._serialized_end=611
   _globals['_WRITEFILEREQUEST']._serialized_start=613
-  _globals['_WRITEFILEREQUEST']._serialized_end=685
-  _globals['_WRITEFILERESPONSE']._serialized_start=687
-  _globals['_WRITEFILERESPONSE']._serialized_end=723
-  _globals['_EDITFILEREQUEST']._serialized_start=725
-  _globals['_EDITFILEREQUEST']._serialized_end=824
-  _globals['_EDITFILERESPONSE']._serialized_start=826
-  _globals['_EDITFILERESPONSE']._serialized_end=860
-  _globals['_BACKUPFILEREQUEST']._serialized_start=862
-  _globals['_BACKUPFILEREQUEST']._serialized_end=918
-  _globals['_BACKUPFILERESPONSE']._serialized_start=920
-  _globals['_BACKUPFILERESPONSE']._serialized_end=961
-  _globals['_ROLLBACKFILEREQUEST']._serialized_start=963
-  _globals['_ROLLBACKFILEREQUEST']._serialized_end=1043
-  _globals['_ROLLBACKFILERESPONSE']._serialized_start=1045
-  _globals['_ROLLBACKFILERESPONSE']._serialized_end=1084
-  _globals['_LISTBACKUPSREQUEST']._serialized_start=1086
-  _globals['_LISTBACKUPSREQUEST']._serialized_end=1143
-  _globals['_LISTBACKUPSRESPONSE']._serialized_start=1145
-  _globals['_LISTBACKUPSRESPONSE']._serialized_end=1183
-  _globals['_HEALTHREQUEST']._serialized_start=1185
-  _globals['_HEALTHREQUEST']._serialized_end=1200
-  _globals['_HEALTHRESPONSE']._serialized_start=1202
-  _globals['_HEALTHRESPONSE']._serialized_end=1264
-  _globals['_FILETOOLS']._serialized_start=1267
-  _globals['_FILETOOLS']._serialized_end=2348
+  _globals['_WRITEFILEREQUEST']._serialized_end=729
+  _globals['_WRITEFILERESPONSE']._serialized_start=731
+  _globals['_WRITEFILERESPONSE']._serialized_end=767
+  _globals['_EDITFILEREQUEST']._serialized_start=770
+  _globals['_EDITFILEREQUEST']._serialized_end=974
+  _globals['_EDITFILERESPONSE']._serialized_start=977
+  _globals['_EDITFILERESPONSE']._serialized_end=1163
+  _globals['_BACKUPFILEREQUEST']._serialized_start=1165
+  _globals['_BACKUPFILEREQUEST']._serialized_end=1221
+  _globals['_BACKUPFILERESPONSE']._serialized_start=1223
+  _globals['_BACKUPFILERESPONSE']._serialized_end=1264
+  _globals['_ROLLBACKFILEREQUEST']._serialized_start=1266
+  _globals['_ROLLBACKFILEREQUEST']._serialized_end=1346
+  _globals['_ROLLBACKFILERESPONSE']._serialized_start=1348
+  _globals['_ROLLBACKFILERESPONSE']._serialized_end=1387
+  _globals['_LISTBACKUPSREQUEST']._serialized_start=1389
+  _globals['_LISTBACKUPSREQUEST']._serialized_end=1446
+  _globals['_LISTBACKUPSRESPONSE']._serialized_start=1448
+  _globals['_LISTBACKUPSRESPONSE']._serialized_end=1486
+  _globals['_HEALTHREQUEST']._serialized_start=1488
+  _globals['_HEALTHREQUEST']._serialized_end=1503
+  _globals['_HEALTHRESPONSE']._serialized_start=1505
+  _globals['_HEALTHRESPONSE']._serialized_end=1567
+  _globals['_FILETOOLS']._serialized_start=1570
+  _globals['_FILETOOLS']._serialized_end=2651
 # @@protoc_insertion_point(module_scope)

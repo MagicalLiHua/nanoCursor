@@ -2,7 +2,7 @@
 
 from fastapi.testclient import TestClient
 
-import api_server
+from src.api import legacy_runtime as api_server
 
 
 def test_concurrent_run_limit_enforced(tmp_path, monkeypatch):

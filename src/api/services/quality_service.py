@@ -9,6 +9,7 @@ from src.api.models import AgentEvent
 from src.api.services.diff_service import get_run_diff
 from src.api.services.event_store import get_event_store
 from src.infra import config as config_module
+from src.runtime.task_board import load_task_board
 
 
 def _workspace(workspace_dir: str | None = None) -> Path:
@@ -45,7 +46,7 @@ def _check(
     }
 
 
-def _task_completion(events: list[AgentEvent]) -> tuple[int, int]:
+def _task_completion(events: list[AgentEvent], run_dir: Path) -> tuple[int, int]:
     created: set[str] = set()
     completed: set[str] = set()
 
@@ -61,7 +62,15 @@ def _task_completion(events: list[AgentEvent]) -> tuple[int, int]:
             if task_id and status == "completed":
                 completed.add(str(task_id))
 
-    return len(created), len(created & completed)
+    if created:
+        return len(created), len(created & completed)
+
+    board = load_task_board(run_dir)
+    if not board:
+        return 0, 0
+    tasks = list(board.nodes)
+    terminal = {"passed", "skipped", "cancelled"}
+    return len(tasks), sum(1 for task in tasks if task.status in terminal)
 
 
 def _planned_stages(session: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -79,6 +88,52 @@ def _stage_evidence_count(stages: list[dict[str, Any]]) -> int:
         if isinstance(evidence, list):
             count += len(evidence)
     return count
+
+
+def _execution_strategy(session: dict[str, Any] | None) -> str:
+    if not isinstance(session, dict):
+        return ""
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    return str(plan.get("strategy") or session.get("strategy") or "")
+
+
+def _is_lead_direct_reply(session: dict[str, Any] | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    if _execution_strategy(session) == "lead_direct_reply":
+        return True
+    intent = session.get("intent_decision") if isinstance(session.get("intent_decision"), dict) else {}
+    if intent.get("execution_route") == "lead_direct_reply":
+        return True
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    plan_intent = plan.get("intent_decision") if isinstance(plan.get("intent_decision"), dict) else {}
+    return plan_intent.get("execution_route") == "lead_direct_reply"
+
+
+def _is_analysis_only(session: dict[str, Any] | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    if _execution_strategy(session) == "analysis_only":
+        return True
+    intent = session.get("intent_decision") if isinstance(session.get("intent_decision"), dict) else {}
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    plan_intent = plan.get("intent_decision") if isinstance(plan.get("intent_decision"), dict) else {}
+    return str(intent.get("strategy") or plan_intent.get("strategy") or "") == "analysis_only"
+
+
+def _requires_verification(session: dict[str, Any] | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    intent = session.get("intent_decision") if isinstance(session.get("intent_decision"), dict) else {}
+    plan = session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {}
+    plan_intent = plan.get("intent_decision") if isinstance(plan.get("intent_decision"), dict) else {}
+    route = str(intent.get("route") or plan_intent.get("route") or "")
+    if route == "test_only":
+        return True
+    tool_policy = plan.get("tool_policy") if isinstance(plan.get("tool_policy"), dict) else {}
+    allowed_tools = {str(tool).lower() for tool in tool_policy.get("allowed_tools", [])}
+    budgets = tool_policy.get("budgets") if isinstance(tool_policy.get("budgets"), dict) else {}
+    return "run_tests" in allowed_tools or int(budgets.get("max_test_runs") or 0) > 0
 
 
 def _has_verification_evidence(events: list[AgentEvent]) -> bool:
@@ -116,6 +171,10 @@ def _has_report_evidence(events: list[AgentEvent], run_dir: Path) -> bool:
     return False
 
 
+def _has_assistant_response(events: list[AgentEvent]) -> bool:
+    return any(event.type == "assistant_message" and str(event.content or "").strip() for event in events)
+
+
 def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
     """Build a deterministic quality gate result for a run."""
     workspace = _workspace(workspace_dir)
@@ -127,8 +186,12 @@ def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict
     diff_info = get_run_diff(thread_id, str(workspace))
     changed_files = diff_info.get("changed_files", [])
     error_events = [event for event in events if event.type == "error"]
-    created_tasks, completed_tasks = _task_completion(events)
+    created_tasks, completed_tasks = _task_completion(events, run_dir)
     stages = _planned_stages(session)
+    is_lead_direct = _is_lead_direct_reply(session)
+    is_analysis_only = _is_analysis_only(session)
+    requires_delivery_artifacts = not (is_lead_direct or is_analysis_only)
+    requires_verification = _requires_verification(session)
     stage_statuses = [str(stage.get("status") or "pending") for stage in stages]
     failed_stages = [stage for stage in stages if stage.get("status") == "failed"]
     non_terminal_stages = [
@@ -174,72 +237,113 @@ def build_quality_gate(thread_id: str, workspace_dir: str | None = None) -> dict
             "One or more error events were recorded.",
             {"error_count": len(error_events)},
         ),
-        _check(
-            "plan_created",
-            "Plan was created",
-            "plan_created" in types,
-            "recommended",
-            "A plan_created event exists.",
-            "No plan_created event was found.",
-            {"event_count": len(events)},
-        ),
-        _check(
-            "tasks_created",
-            "Tasks were created",
-            created_tasks > 0,
-            "required",
-            "Task creation events exist.",
-            "No task_created events were found.",
-            {"created_tasks": created_tasks},
-        ),
-        _check(
-            "tasks_completed",
-            "Created tasks were completed",
-            created_tasks > 0 and completed_tasks == created_tasks,
-            "recommended",
-            "All created tasks reached completed status.",
-            "Some created tasks are not completed.",
-            {"created_tasks": created_tasks, "completed_tasks": completed_tasks},
-        ),
-        _check(
-            "file_changes",
-            "Files changed",
-            "file_changed" in types or bool(changed_files),
-            "required",
-            "File changes were recorded.",
-            "No file changes were recorded.",
-            {"changed_files_count": len(changed_files)},
-        ),
-        _check(
-            "diff_available",
-            "Diff is available",
-            "diff_updated" in types or diff_exists or bool(diff_info.get("diff")),
-            "required",
-            "Diff evidence is available.",
-            "No Diff evidence was found.",
-            {"has_diff_patch": diff_exists, "diff_source": diff_info.get("source")},
-        ),
-        _check(
-            "tests_finished",
-            "Verification finished",
-            has_verification,
-            "recommended",
-            "Verification evidence is available.",
-            "No verification evidence was found.",
-            {"has_test_finished": "test_finished" in types, "inferred_from_tool": has_verification and "test_finished" not in types},
-        ),
-        _check(
-            "report_ready",
-            "Delivery report is ready",
-            has_report,
-            "required",
-            "A delivery report is available.",
-            "No delivery report was found.",
-            {"has_report_file": any((run_dir / name).exists() for name in ("report.md", "delivery.md", "delivery.json"))},
-        ),
     ]
 
-    if stages:
+    if not requires_delivery_artifacts:
+        checks.append(
+            _check(
+                "assistant_response_ready",
+                "Assistant response is ready",
+                _has_assistant_response(events) or has_report,
+                "recommended",
+                "A user-facing assistant response is available.",
+                "No assistant response or report was found.",
+                {"strategy": _execution_strategy(session)},
+            )
+        )
+        if requires_verification:
+            checks.append(
+                _check(
+                    "tests_finished",
+                    "Verification finished",
+                    has_verification,
+                    "recommended",
+                    "Verification evidence is available.",
+                    "No verification evidence was found.",
+                    {
+                        "has_test_finished": "test_finished" in types,
+                        "inferred_from_tool": has_verification and "test_finished" not in types,
+                    },
+                )
+            )
+    else:
+        checks.extend(
+            [
+                _check(
+                    "plan_created",
+                    "Plan was created",
+                    "plan_created" in types,
+                    "recommended",
+                    "A plan_created event exists.",
+                    "No plan_created event was found.",
+                    {"event_count": len(events)},
+                ),
+                _check(
+                    "tasks_created",
+                    "Tasks were created",
+                    created_tasks > 0,
+                    "required",
+                    "Task creation events exist.",
+                    "No task_created events were found.",
+                    {"created_tasks": created_tasks},
+                ),
+                _check(
+                    "tasks_completed",
+                    "Created tasks were completed",
+                    created_tasks > 0 and completed_tasks == created_tasks,
+                    "recommended",
+                    "All created tasks reached completed status.",
+                    "Some created tasks are not completed.",
+                    {"created_tasks": created_tasks, "completed_tasks": completed_tasks},
+                ),
+                _check(
+                    "file_changes",
+                    "Files changed",
+                    "file_changed" in types or bool(changed_files),
+                    "required",
+                    "File changes were recorded.",
+                    "No file changes were recorded.",
+                    {"changed_files_count": len(changed_files)},
+                ),
+                _check(
+                    "diff_available",
+                    "Diff is available",
+                    "diff_updated" in types or diff_exists or bool(diff_info.get("diff")),
+                    "required",
+                    "Diff evidence is available.",
+                    "No Diff evidence was found.",
+                    {"has_diff_patch": diff_exists, "diff_source": diff_info.get("source")},
+                ),
+                _check(
+                    "tests_finished",
+                    "Verification finished",
+                    has_verification,
+                    "recommended",
+                    "Verification evidence is available.",
+                    "No verification evidence was found.",
+                    {
+                        "has_test_finished": "test_finished" in types,
+                        "inferred_from_tool": has_verification and "test_finished" not in types,
+                    },
+                ),
+                _check(
+                    "report_ready",
+                    "Delivery report is ready",
+                    has_report,
+                    "required",
+                    "A delivery report is available.",
+                    "No delivery report was found.",
+                    {
+                        "has_report_file": any(
+                            (run_dir / name).exists()
+                            for name in ("report.md", "delivery.md", "delivery.json")
+                        )
+                    },
+                ),
+            ]
+        )
+
+    if stages and requires_delivery_artifacts:
         checks.extend(
             [
                 _check(

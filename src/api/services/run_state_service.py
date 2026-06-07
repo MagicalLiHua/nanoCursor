@@ -19,6 +19,7 @@ from src.runtime.task_board import (
     load_task_board,
     save_task_board,
 )
+from src.tools.tool_result import is_tool_error_output
 
 
 TASK_EVENT_STATUS_MAP = {
@@ -384,6 +385,8 @@ def mirror_domain_event_to_task_board(
             "kind": evidence.get("kind"),
         },
     )
+    if event_type == "done":
+        _settle_task_board_from_done(board, data)
     save_task_board(board, _run_dir(thread_id, workspace_dir))
     return True
 
@@ -534,7 +537,14 @@ def sync_failures_to_task_board(
     return board
 
 
-def build_run_context_pack(thread_id: str, workspace_dir: str) -> dict[str, Any]:
+def build_run_context_pack(
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    purpose: str = "lead_global",
+    task_id: str | None = None,
+    turn_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build and persist the run-level ContextPack."""
     store = get_event_store()
     session = store.get_session(thread_id, workspace_dir) or {}
@@ -545,9 +555,10 @@ def build_run_context_pack(thread_id: str, workspace_dir: str) -> dict[str, Any]
         execution_plan=session.get("execution_plan") if isinstance(session.get("execution_plan"), dict) else {},
         conversation_id=session.get("conversation_id"),
         thread_id=thread_id,
+        turn_context=turn_context,
     )
     data = pack.to_dict()
-    data = _stamp_context_pack(data, thread_id, workspace_dir, purpose="lead_global")
+    data = _stamp_context_pack(data, thread_id, workspace_dir, purpose=purpose, task_id=task_id)
     context_dir = _run_dir(thread_id, workspace_dir) / "context"
     context_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(context_dir / "run_context_pack.json", data)
@@ -561,6 +572,14 @@ def build_run_context_pack(thread_id: str, workspace_dir: str) -> dict[str, Any]
         payload={
             "selected_file_count": len(data.get("selected_files", [])),
             "used_tokens_estimate": data.get("token_budget", {}).get("used_tokens_estimate", 0),
+            "purpose": purpose,
+            "task_id": task_id,
+            "turn_context": {
+                "step": (data.get("turn_context") or {}).get("step")
+                if isinstance(data.get("turn_context"), dict) else None,
+                "active_task_id": ((data.get("turn_context") or {}).get("active_task") or {}).get("id")
+                if isinstance((data.get("turn_context") or {}).get("active_task"), dict) else None,
+            },
         },
         workspace_dir=workspace_dir,
     )
@@ -853,6 +872,10 @@ def _find_task_for_event(
                 return task
 
     kind = _kind_for_event(payload, agent=agent, event_type=event_type)
+    if event_type in {"report_ready", "done", "assistant_message"}:
+        report_tasks = [task for task in board.nodes if task.type == "report"]
+        if report_tasks:
+            return sorted(report_tasks, key=_task_match_rank)[0]
     role = _agent_role_from_event(
         payload.get("agent_role")
         or payload.get("agent")
@@ -868,6 +891,31 @@ def _find_task_for_event(
     if not candidates:
         return None
     return sorted(candidates, key=_task_match_rank)[0]
+
+
+def _settle_task_board_from_done(board: RunTaskBoard, payload: dict[str, Any]) -> None:
+    """Make a terminal run's task board terminal as well."""
+    status = str(payload.get("status") or "").lower()
+    if status != "completed":
+        return
+
+    for task in board.nodes:
+        if task.status in {"passed", "failed", "skipped", "cancelled"}:
+            continue
+        if task.type in {"context_build", "report"}:
+            task.status = "passed"
+        else:
+            task.status = "skipped"
+        board.record_change(
+            "task_status",
+            {
+                "node_id": task.id,
+                "task_id": task.id,
+                "status": task.status,
+                "reason": "run_completed",
+            },
+        )
+    board.status = "completed"
 
 
 def _task_matches_stage(task: RunTask, stage_id: str) -> bool:
@@ -993,7 +1041,7 @@ def _evidence_from_event(
             timestamp=timestamp,
             payload={
                 "tool": payload.get("tool"),
-                "ok": not output.startswith("Error:"),
+                "ok": not is_tool_error_output(output),
                 "stage_id": payload.get("stage_id"),
                 "task_id": payload.get("task_id"),
                 "path": target_path,

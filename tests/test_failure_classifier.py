@@ -438,7 +438,7 @@ class TestRemediationPlanner:
 class TestFailureAPI:
     def test_get_failures_no_run(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"nofail_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/failures")
@@ -446,7 +446,7 @@ class TestFailureAPI:
 
     def test_get_failure_404(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"badf_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/failures/fake_id")
@@ -454,7 +454,7 @@ class TestFailureAPI:
 
     def test_post_remediate_404(self):
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"badr_{uuid.uuid4().hex[:8]}"
         resp = client.post(
@@ -466,7 +466,7 @@ class TestFailureAPI:
     def test_full_failure_flow(self, tmp_path):
         """End-to-end: create failed run, classify, query, remediate."""
         from fastapi.testclient import TestClient
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"

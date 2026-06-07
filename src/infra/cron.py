@@ -53,9 +53,9 @@ def _field_matches(field: str, value: int, lo: int, hi: int) -> bool:
         return True
 
     if "/" in field:
-        step_str, base = field.split("/", 1)
-        base = int(base) if base != "*" else 0
-        return value % int(step_str) == 0
+        base_str, step_str = field.split("/", 1)
+        base = int(base_str) if base_str != "*" else 0
+        return (value - base) % int(step_str) == 0
 
     if "-" in field:
         start, end = field.split("-")

@@ -14,7 +14,7 @@ def _workspace(tmp_path: Path) -> Path:
 
 
 def _client_for_workspace(workspace: Path):
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     original_workspace = api_server._get_workspace()
     api_server._set_active_workspace(str(workspace))
@@ -181,6 +181,58 @@ def test_completed_snapshot_recovers_conversation_from_durable_events(tmp_path):
         api_server._set_active_workspace(original_workspace)
 
 
+def test_snapshot_exposes_skill_and_mcp_capabilities(tmp_path):
+    from src.api.services.event_store import get_event_store
+
+    workspace = _workspace(tmp_path)
+    thread_id = f"snapshot-capabilities-{uuid.uuid4().hex}"
+    client, original_workspace, api_server = _client_for_workspace(workspace)
+    try:
+        store = get_event_store()
+        store.create_session(thread_id, "请用 Python 补测试", str(workspace), status="running")
+        store.update_session(
+            thread_id,
+            str(workspace),
+            execution_plan={
+                "strategy": "bug_fix",
+                "mcp_plan": [{"server_id": "mcp.docs", "usable": True, "tool_count": 2}],
+                "routing_decision": {
+                    "schema_version": "routing-decision-1",
+                    "next_action": "create_agents",
+                },
+            },
+            routing_decision={
+                "schema_version": "routing-decision-1",
+                "next_action": "create_agents",
+                "summary": {"skill_count": 1},
+            },
+            context_pack={
+                "selected_skill_details": [
+                    {
+                        "id": "skill.python-dev",
+                        "name": "Python Dev",
+                        "selection_reasons": ["命中 trigger: python"],
+                    }
+                ],
+                "omitted_skills": [{"id": "skill.api-review", "reason": "skill disabled"}],
+                "skill_budget": {"context_budget": 1200},
+            },
+        )
+
+        response = client.get(f"/api/runs/{thread_id}/snapshot")
+
+        assert response.status_code == 200
+        capabilities = response.json()["capabilities"]
+        assert capabilities["selected_skills"][0]["id"] == "skill.python-dev"
+        assert capabilities["omitted_skills"][0]["reason"] == "skill disabled"
+        assert capabilities["summary"]["mcp_count"] == 1
+        assert capabilities["summary"]["usable_mcp_count"] == 1
+        assert capabilities["summary"]["skill_context_budget"] == 1200
+        assert response.json()["routing"]["decision"]["next_action"] == "create_agents"
+    finally:
+        api_server._set_active_workspace(original_workspace)
+
+
 def test_lead_direct_snapshot_does_not_surface_task_board(tmp_path):
     from src.api.services.event_store import get_event_store
     from src.runtime.task_board import build_task_board, save_task_board
@@ -212,9 +264,111 @@ def test_lead_direct_snapshot_does_not_surface_task_board(tmp_path):
         api_server._set_active_workspace(original_workspace)
 
 
+def test_lead_direct_snapshot_ignores_unrelated_workspace_git_diff(tmp_path):
+    import subprocess
+
+    from src.api.services.event_store import get_event_store
+
+    workspace = _workspace(tmp_path)
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(["git", "add", "README.md", "app.py"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=workspace,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+    (workspace / "unrelated.py").write_text("print('dirty before run')\n", encoding="utf-8")
+
+    thread_id = f"snapshot-direct-dirty-{uuid.uuid4().hex}"
+    client, original_workspace, api_server = _client_for_workspace(workspace)
+    try:
+        store = get_event_store()
+        store.create_session(thread_id, "哈喽", str(workspace), status="completed")
+        store.update_session(
+            thread_id,
+            str(workspace),
+            execution_plan={"strategy": "lead_direct_reply", "stages": [], "tasks": []},
+        )
+        store.append_event(
+            thread_id,
+            "assistant_message",
+            title="Lead 回复",
+            content="哈喽，我在。",
+            agent="lead",
+            workspace_dir=str(workspace),
+        )
+
+        response = client.get(f"/api/runs/{thread_id}/snapshot")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["run"]["strategy"] == "lead_direct_reply"
+        assert data["workspace"]["dirty"] is True
+        assert data["changes"]["files_changed"] == 0
+        assert data["changes"]["files"] == []
+        assert data["changes"]["source"] == "not_applicable"
+    finally:
+        api_server._set_active_workspace(original_workspace)
+
+
+def test_read_only_snapshot_ignores_unrelated_workspace_git_diff(tmp_path):
+    import subprocess
+
+    from src.api.services.event_store import get_event_store
+
+    workspace = _workspace(tmp_path)
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(["git", "add", "README.md", "app.py"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=workspace,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+    (workspace / "unrelated.py").write_text("print('dirty before read-only run')\n", encoding="utf-8")
+
+    thread_id = f"snapshot-readonly-dirty-{uuid.uuid4().hex}"
+    client, original_workspace, api_server = _client_for_workspace(workspace)
+    try:
+        store = get_event_store()
+        store.create_session(thread_id, "看看项目结构", str(workspace), status="completed")
+        store.update_session(
+            thread_id,
+            str(workspace),
+            execution_plan={
+                "strategy": "analysis_only",
+                "routing_decision": {"requires": {"workspace_write": False}},
+                "stages": [],
+                "tasks": [],
+            },
+        )
+
+        response = client.get(f"/api/runs/{thread_id}/snapshot")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["workspace"]["dirty"] is True
+        assert data["changes"]["files_changed"] == 0
+        assert data["changes"]["files"] == []
+        assert data["changes"]["source"] == "not_applicable"
+    finally:
+        api_server._set_active_workspace(original_workspace)
+
+
 def test_run_history_filters_by_workspace_dir(tmp_path):
     from src.api.services.event_store import get_event_store
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"

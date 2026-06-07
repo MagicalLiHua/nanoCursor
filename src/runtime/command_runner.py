@@ -18,7 +18,12 @@ except ImportError:
     _EXECUTOR_AVAILABLE = False
 
 from src.runtime.go_runtime_client import GoRuntimeUnavailable, run_command_via_go_runtime
-from src.runtime.runtime_feature_flags import go_runtime_enabled, go_runtime_fallback_enabled
+from src.runtime.runtime_feature_flags import (
+    go_executor_enabled,
+    go_executor_fallback_enabled,
+    go_runtime_enabled,
+    go_runtime_fallback_enabled,
+)
 
 
 # Commands that are never allowed in eval
@@ -60,8 +65,8 @@ def run_command(
         raise FileNotFoundError(f"工作目录不存在: {cwd}")
     backend = "python_subprocess"
 
-    # Try executor gRPC first (primary backend)
-    if _EXECUTOR_AVAILABLE:
+    # Try executor gRPC first only when explicitly enabled.
+    if _EXECUTOR_AVAILABLE and go_executor_enabled() and env is None:
         try:
             result = executor_client.run_command(
                 command,
@@ -73,7 +78,7 @@ def run_command(
             )
             return result
         except Exception:
-            if not go_runtime_fallback_enabled():
+            if not go_executor_fallback_enabled():
                 raise
             # fall through to next backend
 

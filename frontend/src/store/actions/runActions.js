@@ -24,6 +24,53 @@ function isPlaceholderConversationTitle(title = "") {
   return !String(title || "").trim() || String(title).trim() === "新会话";
 }
 
+export function mapConversationMessages(conversation = {}) {
+  const explicitMessages = Array.isArray(conversation.messages) ? conversation.messages : [];
+  if (explicitMessages.length) {
+    return explicitMessages
+      .filter((message) => String(message?.content || "").trim())
+      .map((message) => ({
+        role: message.role === "assistant" ? "assistant" : "user",
+        author: message.role === "assistant" ? `${message.agent || message.author || "Lead"} Agent` : "用户",
+        time: formatTime(message.timestamp || message.created_at || message.updated_at) || "",
+        content: message.content,
+      }));
+  }
+
+  const records = Array.isArray(conversation.run_records) ? conversation.run_records : [];
+  const messages = [];
+  for (const record of records) {
+    const isCurrentRun = Boolean(
+      conversation.current_thread_id &&
+      record?.thread_id === conversation.current_thread_id,
+    );
+    const prompt = String(record?.prompt || "").trim();
+    if (prompt) {
+      messages.push({
+        role: "user",
+        author: "用户",
+        time: formatTime(record.started_at || record.updated_at) || "",
+        content: prompt,
+      });
+    }
+    const summary = String(record?.summary || record?.error || "").trim();
+    // The current run snapshot carries the authoritative, untruncated reply.
+    if (summary && !isCurrentRun) {
+      messages.push({
+        role: "assistant",
+        author: "Lead Agent",
+        time: formatTime(record.completed_at || record.updated_at) || "",
+        content: summary,
+      });
+    }
+  }
+  return messages;
+}
+
+export function canStartRun(status = "idle") {
+  return !["running", "waiting_approval", "cancelling"].includes(status);
+}
+
 export function createRunActions(set, get) {
   function buildConversationHistory(nextPrompt) {
     const state = get();
@@ -38,6 +85,7 @@ export function createRunActions(set, get) {
   async function runPrompt(prompt, options = {}) {
     const api = getApiClient();
     const state = get();
+    if (!canStartRun(state.status)) return false;
 
     // Close existing connections
     closeEventSourceSSE();
@@ -85,6 +133,7 @@ export function createRunActions(set, get) {
       }
 
       set({ currentThreadId: run.thread_id });
+      get().persistActiveSession();
 
       const conversationId = get().currentConversationId;
       if (conversationId) {
@@ -140,24 +189,27 @@ export function createRunActions(set, get) {
       });
       get().showToast({ kind: "error", title: "运行启动失败", content: error.message });
     }
+    return true;
   }
 
   async function restoreRun(threadId, options = {}) {
-    if (!threadId) return;
+    if (!threadId) return false;
     const force = Boolean(options.force);
+    const quiet = Boolean(options.quiet);
+    const replaceMessages = options.replaceMessages !== false;
     const state = get();
     closeEventSourceSSE();
 
     const selectedRun = state.runs.find((r) => r.id === threadId);
     if (selectedRun?.kind === "conversation") {
       await restoreConversation(selectedRun.conversationId || selectedRun.id, { force });
-      return;
+      return true;
     }
-    if (threadId === state.currentThreadId && !force) return;
+    if (threadId === state.currentThreadId && !force) return true;
 
     if (selectedRun?.localOnly) {
       await get().startNewSession({ draftId: selectedRun.id, keepRunItem: true });
-      return;
+      return true;
     }
 
     set({
@@ -166,12 +218,19 @@ export function createRunActions(set, get) {
       prompt: "",
       activeTab: "report",
     });
+    get().persistActiveSession({ threadId });
+    const preservedMessages = replaceMessages ? null : [...(get().messages || [])];
     get().resetRunView(selectedRun?.prompt || "");
-    get().addTimelineEvent({
-      type: "run_restoring",
-      title: "正在恢复历史运行",
-      content: selectedRun?.title || threadId,
-    });
+    if (preservedMessages) {
+      set({ messages: preservedMessages });
+    }
+    if (!quiet) {
+      get().addTimelineEvent({
+        type: "run_restoring",
+        title: "正在恢复历史运行",
+        content: selectedRun?.title || threadId,
+      });
+    }
 
     try {
       const api = getApiClient();
@@ -183,7 +242,7 @@ export function createRunActions(set, get) {
       }
 
       if (snapshot) {
-        applySnapshotToStore(snapshot, { replaceMessages: true });
+        applySnapshotToStore(snapshot, { replaceMessages });
         get().upsertRun({
           id: threadId,
           title: runTitle(snapshot.run?.prompt || selectedRun?.prompt, threadId),
@@ -200,7 +259,8 @@ export function createRunActions(set, get) {
         if (["running", "waiting_approval", "cancelling"].includes(get().status)) {
           connectEventsSSE(threadId);
         }
-        return;
+        get().persistActiveSession();
+        return true;
       }
 
       const { sessionResult, eventsResult } = await loadRunSessionAndEvents({ fetchJson: api.fetchJson, threadId });
@@ -281,6 +341,8 @@ export function createRunActions(set, get) {
       } else if (updatedState.diff) {
         set({ activeTab: "diff" });
       }
+      get().persistActiveSession();
+      return true;
     } catch (error) {
       set({ status: "failed" });
       get().updateCurrentRunStatus("failed");
@@ -289,19 +351,23 @@ export function createRunActions(set, get) {
         title: "恢复历史运行失败",
         content: error.message,
       });
+      return false;
     }
   }
 
   async function restoreConversation(conversationId, options = {}) {
-    if (!conversationId) return;
+    if (!conversationId) return false;
     const state = get();
+    const quiet = Boolean(options.quiet);
     set({ activeTab: "report" });
     get().resetRunView("");
-    get().addTimelineEvent({
-      type: "conversation_restoring",
-      title: "正在恢复会话",
-      content: conversationId,
-    });
+    if (!quiet) {
+      get().addTimelineEvent({
+        type: "conversation_restoring",
+        title: "正在恢复会话",
+        content: conversationId,
+      });
+    }
 
     try {
       const api = getApiClient();
@@ -311,8 +377,10 @@ export function createRunActions(set, get) {
 
       get().applyConversation(conversation, { reset: false });
       set({ currentConversationId: conversationId });
+      get().persistActiveSession();
+      const restoredMessages = mapConversationMessages(conversation);
       set({
-        messages: [{
+        messages: restoredMessages.length ? restoredMessages : [{
           role: "assistant",
           author: "Lead Agent",
           time: formatTime(conversation.updated_at) || nowTime(),
@@ -322,8 +390,13 @@ export function createRunActions(set, get) {
         }],
       });
       if (conversation.current_thread_id) {
-        await restoreRun(conversation.current_thread_id, { force: true });
+        await restoreRun(conversation.current_thread_id, {
+          force: true,
+          quiet,
+          replaceMessages: false,
+        });
       }
+      return true;
     } catch (error) {
       set({ status: "failed" });
       get().addTimelineEvent({
@@ -331,6 +404,7 @@ export function createRunActions(set, get) {
         title: "恢复会话失败",
         content: error.message,
       });
+      return false;
     }
   }
 
@@ -357,6 +431,7 @@ export function createRunActions(set, get) {
       const api = getApiClient();
       const run = await startBenchmarkApi({ requestJson: api.requestJson, benchmarkId, workspaceDir: state.workspaceDir });
       set({ currentThreadId: run.thread_id });
+      get().persistActiveSession();
       set((s) => ({
         runs: [{
           id: run.thread_id,
@@ -513,6 +588,11 @@ export function createRunActions(set, get) {
       selectedDiffFile: tempState.diffFiles?.some((file) => file.path === state.selectedDiffFile)
         ? state.selectedDiffFile
         : tempState.diffFiles?.[0]?.path || "",
+    });
+    get().persistActiveSession({
+      workspaceDir: tempState.workspaceDir || state.workspaceDir,
+      conversationId: tempState.currentConversationId,
+      threadId: tempState.currentThreadId,
     });
   }
 

@@ -92,14 +92,38 @@ def test_tool_policy_runtime_test_budget_only_blocks_test_tools():
     assert blocked.budget_exceeded == ["max_test_runs"]
 
 
+def test_small_patch_policy_allows_bounded_verification_tools():
+    policy = policy_for_strategy("small_patch")
+
+    assert policy.check("git_diff") is True
+    assert policy.check("git_status") is True
+    assert policy.check("run_tests") is True
+    assert policy.check("bash") is False
+
+
 def test_tool_policy_runtime_requires_approval():
     rt = ToolPolicyRuntime(
         policy={"allowed_tools": ["bash"], "approval_required": ["bash"]},
         budget=RunBudget(),
     )
-    d = rt.check("bash")
+    d = rt.check("bash", {"command": "pip install requests"})
     assert d.allowed is True
     assert d.requires_approval is True
+
+
+def test_empty_shell_command_is_blocked_instead_of_approval():
+    rt = ToolPolicyRuntime(
+        policy={
+            "allowed_tools": ["bash"],
+            "approval_required_levels": ["risky_write", "shell_risky"],
+        },
+        budget=RunBudget(),
+    )
+    d = rt.check("bash")
+    assert d.allowed is False
+    assert d.requires_approval is False
+    assert d.status == "blocked"
+    assert "command" in d.reason
 
 
 def test_shell_safe_command_auto_allowed_by_permission_level():
@@ -132,6 +156,42 @@ def test_shell_risky_command_requires_approval_by_permission_level():
 
 def test_large_edit_is_risky_write():
     assert classify_tool_permission("edit_file", {"new_text": "x" * 13000}) == "risky_write"
+
+
+def test_sensitive_file_write_is_risky_write():
+    assert classify_tool_permission("write_file", {"path": ".env", "content": "KEY=value"}) == "risky_write"
+    assert classify_tool_permission("write_file", {"path": "package.json", "content": "{}"}) == "risky_write"
+    assert classify_tool_permission("edit_file", {"path": ".github/workflows/ci.yml", "new_text": "x"}) == "risky_write"
+    assert classify_tool_permission("edit_file", {"filename": "src/secrets.py", "new_text": "x"}) == "risky_write"
+
+
+def test_large_write_payload_is_risky_write():
+    assert classify_tool_permission("write_file", {"path": "src/generated.txt", "content": "x" * (201 * 1024)}) == "risky_write"
+    assert classify_tool_permission("write_file", {"path": "src/small.txt", "content": "hello"}) == "safe_write"
+
+
+def test_risky_file_write_requires_approval_by_permission_level():
+    rt = ToolPolicyRuntime(
+        policy={
+            "allowed_tools": ["read_file", "write_file", "edit_file", "rollback_file"],
+            "approval_required_levels": ["risky_write", "shell_risky"],
+        },
+        budget=RunBudget(),
+    )
+
+    normal = rt.check("write_file", {"path": "src/app.py", "content": "print('ok')\n"})
+    sensitive = rt.check("write_file", {"path": "package.json", "content": "{}"})
+    rollback = rt.check("rollback_file", {"filename": "src/app.py"})
+
+    assert normal.allowed is True
+    assert normal.requires_approval is False
+    assert normal.permission_level == "safe_write"
+    assert sensitive.allowed is True
+    assert sensitive.requires_approval is True
+    assert sensitive.permission_level == "risky_write"
+    assert rollback.allowed is True
+    assert rollback.requires_approval is True
+    assert rollback.permission_level == "risky_write"
 
 
 def test_shell_classifier_distinguishes_safe_and_risky():

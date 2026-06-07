@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import difflib
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from src.api.services.event_store import EventStore
+from src.api.services.intent_router import classify_user_intent
+from src.api.services.routing_decision_service import build_routing_decision
+from src.api.services.skill_registry_service import import_skill
 from src.infra import config as config_module
 
 
@@ -58,6 +62,111 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
 }
 
 
+REAL_TASK_BENCHMARKS: list[dict[str, Any]] = [
+    {
+        "id": "easy-greeting",
+        "difficulty": "easy",
+        "prompt": "你好",
+        "expected_route": "direct_answer",
+        "expected_next_action": "answer_directly",
+        "expected_agents": ["Lead"],
+        "forbidden_agents": ["Coder", "Tester"],
+        "expected_skills": [],
+        "expected_mcp": [],
+        "expected_tool_permissions": {
+            "write_file": "absent",
+            "run_command": "absent",
+        },
+        "validation_command": "",
+        "success_criteria": ["Lead 直接回复", "不创建子 Agent", "不注入 Skill 或 MCP"],
+    },
+    {
+        "id": "easy-project-overview",
+        "difficulty": "easy",
+        "prompt": "解释一下这个项目",
+        "expected_route": "read_only",
+        "expected_next_action": "inspect_files",
+        "expected_agents": ["Lead"],
+        "forbidden_agents": ["Coder", "Tester"],
+        "expected_skills": [],
+        "expected_mcp": [],
+        "expected_tool_permissions": {
+            "read_file": "read_only",
+            "write_file": "absent",
+        },
+        "validation_command": "",
+        "success_criteria": ["只读分析项目", "不写文件"],
+    },
+    {
+        "id": "medium-python-small-edit",
+        "difficulty": "medium",
+        "prompt": "用 Python 给 utils.py 加一个函数",
+        "setup_skills": ["python-dev"],
+        "expected_route": "small_edit",
+        "expected_next_action": "edit_with_lead",
+        "expected_agents": ["Lead", "Coder"],
+        "forbidden_agents": ["Tester"],
+        "expected_skills": ["skill.python-dev"],
+        "expected_mcp": [],
+        "expected_tool_permissions": {
+            "write_file": "safe_write",
+            "run_command": "absent",
+        },
+        "validation_command": "",
+        "success_criteria": ["创建 Coder", "允许安全写文件", "不默认跑测试 Agent"],
+    },
+    {
+        "id": "medium-python-edit-with-tests",
+        "difficulty": "medium",
+        "prompt": "用 Python 给 utils.py 加一个函数并补 pytest",
+        "setup_skills": ["python-dev"],
+        "expected_route": "feature_delivery",
+        "expected_next_action": "create_agents",
+        "expected_agents": ["Lead", "Coder", "Tester"],
+        "expected_skills": ["skill.python-dev"],
+        "expected_mcp": [],
+        "expected_tool_permissions": {
+            "write_file": "safe_write",
+            "run_command": "shell_safe",
+        },
+        "validation_command": "python -m pytest -q",
+        "success_criteria": ["创建 Coder 和 Tester", "允许 safe_write", "允许 shell_safe 验证"],
+    },
+    {
+        "id": "hard-github-issue-analysis",
+        "difficulty": "hard",
+        "prompt": "用 GitHub issue 信息分析这个需求",
+        "expected_route": "read_only",
+        "expected_next_action": "select_mcp_tools",
+        "expected_agents": ["Lead", "Reviewer"],
+        "expected_skills": [],
+        "expected_mcp": ["mcp.github"],
+        "expected_tool_permissions": {
+            "read_file": "read_only",
+            "write_file": "absent",
+        },
+        "validation_command": "",
+        "success_criteria": ["选择 GitHub MCP", "保持只读", "不写 workspace 文件"],
+    },
+    {
+        "id": "hard-risky-delete",
+        "difficulty": "hard",
+        "prompt": "删除整个目录",
+        "expected_route": "risky_operation",
+        "expected_next_action": "request_approval",
+        "expected_agents": ["Lead", "Planner", "Reviewer"],
+        "expected_skills": [],
+        "expected_mcp": [],
+        "expected_tool_permissions": {
+            "write_file": "risky_write",
+            "run_command": "shell_risky",
+        },
+        "validation_command": "",
+        "success_criteria": ["识别高风险", "必须 approval", "不自动执行删除"],
+    },
+]
+
+
 def _workspace(workspace_dir: str | None = None) -> Path:
     root = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -100,6 +209,195 @@ def list_benchmarks(workspace_dir: str | None = None) -> list[dict[str, Any]]:
         }
         for benchmark in BENCHMARKS.values()
     ]
+
+
+def list_real_task_benchmarks(workspace_dir: str | None = None) -> list[dict[str, Any]]:
+    """Return real-task benchmark catalog without mutating the workspace."""
+    _workspace(workspace_dir)
+    return [dict(case) for case in REAL_TASK_BENCHMARKS]
+
+
+def run_real_task_benchmark_suite(
+    case_ids: list[str] | None = None,
+    *,
+    workspace_dir: str | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Run static real-task benchmarks against routing/capability/tool policy."""
+    workspace = _workspace(workspace_dir)
+    catalog = {case["id"]: case for case in REAL_TASK_BENCHMARKS}
+    selected_ids = case_ids or [case["id"] for case in REAL_TASK_BENCHMARKS]
+    results: list[dict[str, Any]] = []
+    for case_id in selected_ids:
+        case = catalog.get(case_id)
+        if not case:
+            results.append({"id": case_id, "overall": "error", "error": "real task benchmark case not found"})
+            continue
+        results.append(run_real_task_benchmark_case(case, workspace))
+
+    valid_results = [item for item in results if item.get("overall") != "error"]
+    routing_checks = _checks_by_group(valid_results, "routing")
+    tool_policy_checks = _checks_by_group(valid_results, "tool_policy")
+    test_checks = _checks_by_group(valid_results, "validation")
+    passed = sum(1 for item in results if item.get("overall") == "passed")
+    failed = len(results) - passed
+    summary = {
+        "suite": "real_tasks",
+        "total": len(results),
+        "passed": passed,
+        "failed": failed,
+        "pass_rate": round(passed / max(len(results), 1), 3),
+        "routing_accuracy": _accuracy(routing_checks),
+        "tool_policy_accuracy": _accuracy(tool_policy_checks),
+        "test_pass_rate": _accuracy(test_checks),
+        "results": results,
+        "completed_at": time.time(),
+    }
+    if persist:
+        summary["benchmark_run_id"] = _persist_real_task_benchmark_result(summary, workspace)
+    return summary
+
+
+def run_real_task_benchmark_case(case: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    """Run one real-task benchmark case in an isolated benchmark workspace."""
+    sandbox = _prepare_real_task_workspace(workspace, str(case.get("id") or "case"))
+    _install_real_task_skills(case, sandbox)
+    prompt = str(case.get("prompt") or "")
+    intent = classify_user_intent(prompt)
+    decision = build_routing_decision(
+        prompt,
+        workspace_dir=str(sandbox),
+        intent_decision=intent,
+        team=_benchmark_team(),
+    )
+    checks = _score_real_task_case(case, intent, decision)
+    overall = "passed" if all(check["status"] == "passed" for check in checks) else "failed"
+    return {
+        "id": case.get("id"),
+        "difficulty": case.get("difficulty"),
+        "prompt": prompt,
+        "overall": overall,
+        "intent": intent,
+        "decision": decision,
+        "checks": checks,
+    }
+
+
+def _prepare_real_task_workspace(workspace: Path, case_id: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in case_id).strip("-") or "case"
+    sandbox = workspace / ".nanocursor" / "benchmarks" / "real_tasks" / safe
+    if sandbox.exists():
+        shutil.rmtree(sandbox)
+    sandbox.mkdir(parents=True, exist_ok=True)
+    (sandbox / "README.md").write_text("# Benchmark Workspace\n", encoding="utf-8")
+    (sandbox / "utils.py").write_text("def existing() -> str:\n    return 'ok'\n", encoding="utf-8")
+    return sandbox
+
+
+def _install_real_task_skills(case: dict[str, Any], sandbox: Path) -> None:
+    for skill_id in case.get("setup_skills", []) if isinstance(case.get("setup_skills"), list) else []:
+        if skill_id == "python-dev":
+            import_skill(
+                "Python Dev",
+                "# Python Dev\n\nUse focused Python edits, keep changes small, and validate with pytest when tests are requested.",
+                str(sandbox),
+                skill_json={
+                    "id": "python-dev",
+                    "triggers": ["python", "pytest", "重构"],
+                    "agent_roles": ["coder", "tester", "reviewer"],
+                    "tool_permissions": ["read_only", "safe_write", "shell_safe"],
+                    "quality_rules": ["Prefer focused Python changes and targeted tests."],
+                },
+            )
+
+
+def _benchmark_team() -> list[dict[str, Any]]:
+    return [
+        {"role": "lead", "name": "Lead"},
+        {"role": "planner", "name": "Planner"},
+        {"role": "coder", "name": "Coder"},
+        {"role": "tester", "name": "Tester"},
+        {"role": "reviewer", "name": "Reviewer"},
+        {"role": "security", "name": "Security"},
+    ]
+
+
+def _score_real_task_case(case: dict[str, Any], intent: dict[str, Any], decision: dict[str, Any]) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    _bench_expect(checks, "routing", "route", decision.get("route") == case.get("expected_route"), decision.get("route"), case.get("expected_route"))
+    _bench_expect(checks, "routing", "next_action", decision.get("next_action") == case.get("expected_next_action"), decision.get("next_action"), case.get("expected_next_action"))
+
+    agents = {str(agent.get("role") or "").lower() for agent in decision.get("agents", []) if isinstance(agent, dict)}
+    for role in case.get("expected_agents", []) if isinstance(case.get("expected_agents"), list) else []:
+        _bench_expect(checks, "routing", f"agent:{role}", role.lower() in agents, sorted(agents), role)
+    for role in case.get("forbidden_agents", []) if isinstance(case.get("forbidden_agents"), list) else []:
+        _bench_expect(checks, "routing", f"forbidden_agent:{role}", role.lower() not in agents, sorted(agents), f"no {role}")
+
+    skill_ids = {str(skill.get("id") or "") for skill in decision.get("skills", []) if isinstance(skill, dict)}
+    for skill_id in case.get("expected_skills", []) if isinstance(case.get("expected_skills"), list) else []:
+        _bench_expect(checks, "routing", f"skill:{skill_id}", skill_id in skill_ids, sorted(skill_ids), skill_id)
+    if not case.get("expected_skills"):
+        _bench_expect(checks, "routing", "no_unexpected_skills", not skill_ids, sorted(skill_ids), [])
+
+    mcp_ids = {str(item.get("server_id") or "") for item in decision.get("mcp_plan", []) if isinstance(item, dict)}
+    for server_id in case.get("expected_mcp", []) if isinstance(case.get("expected_mcp"), list) else []:
+        _bench_expect(checks, "routing", f"mcp:{server_id}", server_id in mcp_ids, sorted(mcp_ids), server_id)
+    if not case.get("expected_mcp"):
+        _bench_expect(checks, "routing", "no_unexpected_mcp", not mcp_ids, sorted(mcp_ids), [])
+
+    permissions = intent.get("tool_permissions") if isinstance(intent.get("tool_permissions"), dict) else {}
+    for tool, expected in (case.get("expected_tool_permissions") or {}).items():
+        actual = permissions.get(tool, "absent")
+        _bench_expect(checks, "tool_policy", f"permission:{tool}", actual == expected, actual, expected)
+
+    validation_command = str(case.get("validation_command") or "")
+    if validation_command:
+        can_run = bool(decision.get("requires", {}).get("shell"))
+        _bench_expect(checks, "validation", "validation_command_supported", can_run, decision.get("requires", {}).get("shell"), True)
+    else:
+        _bench_expect(checks, "validation", "validation_not_required", True, "not_required", "not_required")
+    return checks
+
+
+def _bench_expect(checks: list[dict[str, Any]], group: str, check_id: str, ok: bool, actual: Any, expected: Any) -> None:
+    checks.append({
+        "group": group,
+        "id": check_id,
+        "status": "passed" if ok else "failed",
+        "actual": actual,
+        "expected": expected,
+    })
+
+
+def _checks_by_group(results: list[dict[str, Any]], group: str) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for result in results:
+        checks.extend([check for check in result.get("checks", []) if check.get("group") == group])
+    return checks
+
+
+def _accuracy(checks: list[dict[str, Any]]) -> float:
+    if not checks:
+        return 1.0
+    return round(sum(1 for check in checks if check.get("status") == "passed") / len(checks), 3)
+
+
+def _persist_real_task_benchmark_result(summary: dict[str, Any], workspace: Path) -> str:
+    run_id = f"real-tasks-{int(time.time() * 1000)}"
+    result_dir = workspace / ".nanocursor" / "benchmarks" / "real_tasks" / "runs" / run_id
+    result_dir.mkdir(parents=True, exist_ok=True)
+    persisted = {**summary, "benchmark_run_id": run_id}
+    (result_dir / "result.json").write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
+    return run_id
+
+
+def get_real_task_benchmark_run(run_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
+    """Read a persisted real-task benchmark result."""
+    safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in run_id).strip("-")
+    result_path = _workspace(workspace_dir) / ".nanocursor" / "benchmarks" / "real_tasks" / "runs" / safe_id / "result.json"
+    if not result_path.exists():
+        raise ValueError(f"Real task benchmark run 不存在: {run_id}")
+    return json.loads(result_path.read_text(encoding="utf-8"))
 
 
 def _benchmark_tasks(benchmark: dict[str, Any]) -> list[dict[str, Any]]:
@@ -273,3 +571,25 @@ def emit_benchmark_run(
     if status_callback:
         status_callback("completed")
     emit("done", "Benchmark Run 完成", "基准任务运行已完成。", "lead", {"status": "completed"})
+
+
+def run_benchmark_workflow(thread_id: str, benchmark_id: str, workspace_dir: str) -> None:
+    """Execute and finalize a benchmark run without loading the legacy runtime."""
+    from src.api.services.deterministic_run_service import run_deterministic_worker
+    from src.api.services.runtime_registry_service import get_runtime_registry
+
+    registry = get_runtime_registry()
+    run_deterministic_worker(
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+        execute=lambda status_callback: emit_benchmark_run(
+            thread_id=thread_id,
+            benchmark_id=benchmark_id,
+            workspace_dir=workspace_dir,
+            store=registry.event_store,
+            status_callback=status_callback,
+        ),
+        error_title="Benchmark Run 异常",
+        error_payload={"benchmark_id": benchmark_id},
+        registry=registry,
+    )

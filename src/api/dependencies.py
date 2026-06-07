@@ -16,8 +16,8 @@ def get_event_store():
 
 
 def get_run_manager():
-    import api_server
-    return api_server.run_manager
+    from src.api.services.runtime_registry_service import get_run_manager as _get
+    return _get()
 
 
 def raise_404(message: str):

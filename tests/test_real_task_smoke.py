@@ -61,6 +61,25 @@ def test_validate_python_slugify_requires_diff_and_changes():
     assert validate_outcome(task, outcome, [])["ok"] is True
 
 
+def test_validate_reports_pending_approval():
+    task = _task("tiny_python_slugify")
+    outcome = {
+        "thread_id": "run-approval",
+        "status": "waiting_approval",
+        "strategy": "feature_delivery",
+        "summary": {"final_message": ""},
+        "stages": [{"id": "intake"}, {"id": "implement"}],
+        "changes": {"files": [], "diff": ""},
+        "team": {"members": [{"role": "lead"}, {"role": "coder"}], "runtime_source": "runtime_recommended"},
+        "pending_approvals": [{"tool_name": "run_tests", "kind": "run_command"}],
+    }
+
+    result = validate_outcome(task, outcome, [])
+
+    assert result["ok"] is False
+    assert any("waiting for approval" in error for error in result["errors"])
+
+
 def test_validate_mixed_task_requires_runtime_agent_activity():
     task = _task("tiny_frontend_mixed")
     outcome = {
@@ -95,4 +114,3 @@ def test_prepare_workspace_copies_fixture(tmp_path):
     assert (workspace / "index.html").exists()
     assert (workspace / "src" / "main.js").exists()
     assert Path(workspace).name == "tiny_frontend_mixed"
-

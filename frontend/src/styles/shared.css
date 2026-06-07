@@ -7,6 +7,7 @@ textarea {
 button {
   border: 0;
   cursor: pointer;
+  writing-mode: horizontal-tb;
 }
 
 .pill {
@@ -82,6 +83,7 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   min-height: 32px;
   padding: 0 13px;
   border-radius: 9px;
@@ -89,6 +91,8 @@ button {
   color: #ffffff;
   font-size: 12px;
   font-weight: 670;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
   box-shadow: none;
   transition: background-color 160ms ease,
     border-color 160ms ease,
@@ -320,6 +324,7 @@ button.project-mini-item:hover {
   min-height: 28px;
   padding: 0 10px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .recommend-capabilities {
@@ -1479,4 +1484,151 @@ button.project-mini-item:hover {
 .rail-panel {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.78);
+}
+
+[data-theme="dark"] .workspace,
+[data-theme="dark"] body {
+  background: var(--bg);
+}
+
+[data-theme="dark"] .sidebar-v2,
+[data-theme="dark"] .sidebar-rail,
+[data-theme="dark"] .sidebar-panel,
+[data-theme="dark"] .settings-page,
+[data-theme="dark"] .right-panel,
+[data-theme="dark"] .bottom-panel,
+[data-theme="dark"] .codex-inspector-card,
+[data-theme="dark"] .panel-header,
+[data-theme="dark"] .context-head,
+[data-theme="dark"] .right-tabs,
+[data-theme="dark"] .bottom-tabs,
+[data-theme="dark"] .side-tabs {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+[data-theme="dark"] .chat-panel,
+[data-theme="dark"] .right-sidebar {
+  background: transparent;
+}
+
+[data-theme="dark"] .settings-nav,
+[data-theme="dark"] .settings-field,
+[data-theme="dark"] .settings-info-item,
+[data-theme="dark"] .llm-provider-card,
+[data-theme="dark"] .recent-project-item,
+[data-theme="dark"] .shortcut-item,
+[data-theme="dark"] .mcp-server-item,
+[data-theme="dark"] .mcp-preset-item,
+[data-theme="dark"] .run-item,
+[data-theme="dark"] .sidebar-project-item,
+[data-theme="dark"] .sidebar-workspace-form,
+[data-theme="dark"] .project-card,
+[data-theme="dark"] .project-section,
+[data-theme="dark"] .agent-dot,
+[data-theme="dark"] .agent-activity-item,
+[data-theme="dark"] .message-content,
+[data-theme="dark"] .approval-card,
+[data-theme="dark"] .prompt-box,
+[data-theme="dark"] .welcome-input-form,
+[data-theme="dark"] .evidence-card,
+[data-theme="dark"] .artifact-card,
+[data-theme="dark"] .quality-card,
+[data-theme="dark"] .metric-item,
+[data-theme="dark"] .task-card,
+[data-theme="dark"] .team-member,
+[data-theme="dark"] .capability-card,
+[data-theme="dark"] .benchmark-card,
+[data-theme="dark"] .preference-bucket,
+[data-theme="dark"] .ephemeral-card,
+[data-theme="dark"] .mcp-preset-card {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: none;
+}
+
+[data-theme="dark"] .run-item.active,
+[data-theme="dark"] .project-card.active,
+[data-theme="dark"] .tab-button.active {
+  border-color: rgba(118, 167, 255, 0.45);
+  background: rgba(118, 167, 255, 0.14);
+  color: var(--text);
+}
+
+[data-theme="dark"] .button.secondary,
+[data-theme="dark"] .icon-button,
+[data-theme="dark"] .rail-toggle,
+[data-theme="dark"] .tab-button,
+[data-theme="dark"] .panel-collapse-button,
+[data-theme="dark"] .pill,
+[data-theme="dark"] .context-chip {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+
+[data-theme="dark"] .button.secondary:hover:not(:disabled),
+[data-theme="dark"] .icon-button:hover,
+[data-theme="dark"] .rail-toggle:hover,
+[data-theme="dark"] .tab-button:hover,
+[data-theme="dark"] .panel-collapse-button:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+[data-theme="dark"] .button,
+[data-theme="dark"] .button.primary {
+  background: #eef2f7;
+  color: #111827;
+}
+
+[data-theme="dark"] .button:hover:not(:disabled),
+[data-theme="dark"] .button.primary:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select,
+[data-theme="dark"] .sidebar-workspace-row input,
+[data-theme="dark"] .prompt-input {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder {
+  color: var(--muted-2);
+}
+
+[data-theme="dark"] .panel-title,
+[data-theme="dark"] .context-head strong,
+[data-theme="dark"] .review-head strong,
+[data-theme="dark"] .run-item-title,
+[data-theme="dark"] .project-card > strong,
+[data-theme="dark"] .rail-nav-button strong,
+[data-theme="dark"] .rail-stat strong {
+  color: var(--text);
+}
+
+[data-theme="dark"] .agent-dot.status-running {
+  border-color: rgba(241, 200, 107, 0.28);
+  background: rgba(241, 200, 107, 0.13);
+  color: var(--amber);
+}
+
+[data-theme="dark"] .agent-dot.status-completed {
+  border-color: rgba(99, 210, 159, 0.24);
+  background: rgba(99, 210, 159, 0.12);
+  color: var(--green);
+}
+
+[data-theme="dark"] .agent-dot.status-failed {
+  border-color: rgba(255, 125, 144, 0.24);
+  background: rgba(255, 125, 144, 0.12);
+  color: var(--coral);
 }

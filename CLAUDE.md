@@ -47,7 +47,7 @@ mypy src/
 cd frontend && npm run check
 
 # Start web backend
-python -m uvicorn api_server:app --host 127.0.0.1 --port 8100
+python -m uvicorn src.api.server:app --host 127.0.0.1 --port 8100
 
 # Start web frontend (separate terminal)
 cd frontend && npm run dev
@@ -57,34 +57,50 @@ cd frontend && npm run dev
 
 ### Core Engine
 
-The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agent_loop.py):
-- `src/agent/engine.py` - Agent loop + 20 个工具处理函数
+The current backend is a FastAPI + Agent Runtime split:
+- `src/api/server.py` is the public ASGI entrypoint.
+- `src/api/app.py` builds the FastAPI app and registers modular routers.
+- The old root `api_server.py` shim has been removed; compatibility exports live in `src/api/legacy_runtime.py`.
+- `src/api/services/runtime_registry_service.py` owns the process-wide RunManager and EventStore.
+- `src/api/services/runtime_lifecycle_service.py` owns startup recovery, cleanup, and shutdown persistence.
+- `src/api/services/runtime_executor_service.py` owns the core workflow executor.
+- `src/api/services/workflow_thread_service.py` is the only allowed caller of the remaining workflow compatibility adapters.
+- `src/api/services/deterministic_run_service.py` owns demo/benchmark worker finalization.
+- `src/api/legacy_runtime.py` now owns only compatibility wrappers, old monkeypatch exports, and production static serving.
+- `src/agent/engine.py` contains the model/tool adapter and low-level agent loop.
+- `src/api/services/runtime_turn_service.py` and `src/api/services/agent_loop_controller_service.py` contain the newer controlled loop path.
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
-| `api_server.py` | FastAPI 后端，Web 工作台 API |
+| `src/api/server.py` | Public ASGI entrypoint |
+| `src/api/app.py` | FastAPI app factory and router registration |
+| `src/api/legacy_runtime.py` | Compatibility wrapper for legacy imports and static serving |
+| `src/api/services/runtime_executor_service.py` | Core Agent workflow executor |
+| `src/api/services/runtime_registry_service.py` | Single owner of active run state |
+| `src/api/services/runtime_lifecycle_service.py` | Shared FastAPI runtime lifecycle |
+| `src/api/services/workflow_thread_service.py` | Single boundary for workflow start/resume/retry/remediation threads |
+| `src/api/services/deterministic_run_service.py` | Shared demo/benchmark worker lifecycle |
 | `frontend/src/` | React + Vite 前端工作台 |
-| `src/agent/engine.py` | Agent loop + 20 个工具处理函数 |
+| `src/agent/engine.py` | Model/tool adapter and low-level agent loop |
 | `src/agent/state.py` | AgentState + WorkflowCancelledError |
-| `src/agent/prompt.py` | 管道式系统提示构建 |
-| `src/agent/error_recovery.py` | 错误恢复 + 指数退避 |
+| `src/agent/prompt_builder.py` | Runtime system prompt construction |
 | `src/agent/learner.py` | Agent 学习器（从运行中学习） |
 | `src/api/models.py` | API Pydantic 数据模型 |
-| `src/api/services/` | 业务服务层（会话、运行、蓝图、质量、报告等 20 个服务） |
+| `src/api/routes/` | FastAPI route modules |
+| `src/api/services/` | Backend service layer for runs, conversations, context, tools, recovery, quality and evals |
 | `src/indexer/indexer.py` | 项目索引器 |
-| `src/team/team.py` | 团队协作（MessageBus + TeammateManager） |
-| `src/memory/manager.py` | 跨会话记忆（Markdown 持久化） |
-| `src/memory/compactor.py` | 三层上下文压缩 |
+| `src/team/team.py` | Legacy teammate runtime; do not extend unless explicitly reviving persistent teammates |
+| `src/api/services/memory_governance_service.py` | Governed memory 的唯一存储与生命周期入口 |
+| `src/api/services/memory_selection_service.py` | 按作用域、相关性和预算选择记忆 |
 | `src/tasks/manager.py` | 早期任务池工具 |
 | `src/tasks/skill.py` | 技能按需加载 |
 | `src/tools/file_tools.py` | 文件操作 |
-| `src/tools/bash_tools.py` | Bash 命令执行 |
+| `src/tools/bash.py` | Bash 命令执行 |
 | `src/tools/git_tools.py` | Git 操作 |
 | `src/tools/memory_tools.py` | 记忆 CRUD 工具 |
 | `src/tools/project_tools.py` | 项目级工具 |
-| `src/tools/todo_tools.py` | Todo 管理工具 |
 | `src/infra/config.py` | 配置管理 |
 | `src/infra/llm_config.py` | LLM 提供商配置 |
 | `src/infra/hooks.py` | 事件钩子系统 |
@@ -92,7 +108,6 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 | `src/infra/cron.py` | 定时任务调度 |
 | `src/infra/worktree.py` | Git worktree 隔离 |
 | `src/infra/permission.py` | 权限管道 + Bash 安全验证 |
-| `src/infra/db.py` | SQLite 持久化（todos/memories） |
 | `src/infra/metrics.py` | MetricsCollector |
 | `src/infra/schemas.py` | 共享 Pydantic schemas |
 | `src/infra/messages.py` | 消息流管理 |
@@ -117,19 +132,20 @@ The framework uses a simple agent loop pattern (inspired by s_full.py / s01_agen
 **Subagents**: `run_subagent()` spawns independent agent contexts for isolated tasks.
 
 **Team System**: Persistent autonomous teammates with JSONL inbox communication:
-- `spawn_teammate`: Launch a named teammate with role and system prompt
-- `list_teammates`, `send_message`, `read_inbox`, `broadcast`: Team communication
-- `shutdown_request`, `shutdown_response`: Graceful shutdown protocol
-- `plan_approval`: Plan review workflow with RequestStore
-- Teammates auto-poll for tasks and claim unclaimed work
+- `spawn_agent`: Launch a run-scoped temporary specialist with a constrained tool set
+- `gather_agents`: Wait for asynchronous specialists and merge their results
+- `task_create`, `task_update`, `task_list`: Coordinate work through the shared task board
+- Legacy teammate messaging and Todo tools are retired from the model-facing runtime
 
 **Task System**: JSON file-based task persistence in `.tasks/` directory with task dependency support.
 
-**Memory System**: Markdown file-based persistent memories organized by category (user/feedback/project/reference).
+**Memory System**: Workspace-scoped governed memory with explicit scope, source, confidence, freshness, evidence, status, and budget-aware Context Pack selection. Legacy `.memory/*.md` data can be imported once with `scripts/migrate_legacy_memory.py`; product runtime must not read it directly.
 
-### Legacy CLI
+### Legacy Runtime / CLI
 
-`src/cli/**` is an early REPL experiment and is not used by the current frontend/backend product path. Do not add new product work there unless the CLI is explicitly revived.
+There is no active CLI product path. Do not add new product work to CLI-style modules unless the CLI is explicitly revived.
+
+The old root `api_server.py` shim has been removed. Keep compatibility-only behavior inside `src/api/legacy_runtime.py`; new runtime work should live in focused package modules such as `runtime_executor_service.py`.
 
 ### Backend API
 
@@ -137,10 +153,12 @@ The FastAPI backend is the primary integration layer for the frontend.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/run` | Start workflow |
-| `GET /api/run/{id}/events` | SSE event stream |
+| `POST /api/run` / `POST /api/runs` | Start workflow |
+| `GET /api/run/{id}/events` / `GET /api/runs/{id}/events` | SSE event stream |
 | `GET /api/files` | Workspace file tree |
-| `GET /api/metrics` | Metrics dump + historical |
+| `GET /api/runs/{id}/state` | Run task board and runtime state |
+| `GET /api/runs/{id}/context-pack` | Context pack for a run |
+| `GET /api/runs/{id}/loop` | Agent loop state |
 | `GET /api/config` | LLM provider status, system config |
 | `GET/POST /api/memories` | Memory CRUD + search |
 
@@ -171,7 +189,7 @@ Each provider also has a `*_MODEL` env var (e.g., `ANTHROPIC_MODEL`, `DEEPSEEK_M
 - Prefer local or staging database.
 - Use readonly credentials for MCP database access.
 - For migrations, inspect existing migrations first.
-- This project uses SQLite locally (via `src/infra/db.py`). No production database in repo.
+- Runtime state, events, task boards, and governed memory are persisted under each workspace.
 
 ## Git Rules
 

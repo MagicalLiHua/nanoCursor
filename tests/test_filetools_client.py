@@ -91,3 +91,9 @@ class TestFileToolsClient:
         stub.ReadFileRange.return_value = MagicMock(content="line 1\nline 2")
         resp = stub.ReadFileRange(MagicMock())
         assert "line 1" in resp.content
+
+    def test_health_sync(self):
+        client, stub = self._make_client()
+        stub.Health.return_value = MagicMock(ok=True, service="nanocursor-filetools", version="0.1.0")
+        resp = client.health_sync(timeout_seconds=0.2)
+        assert resp == {"ok": True, "service": "nanocursor-filetools", "version": "0.1.0"}

@@ -8,12 +8,19 @@ export function useBootstrap() {
     if (mounted.current) return;
     mounted.current = true;
 
-    const store = useStore.getState();
-    store.loadWorkspaceState().finally(() => {
-      store.loadWorkspaceOverview();
-      store.loadRunHistory();
-      store.loadRecentProjects();
-      store.refreshWorkspaceData({ allowEmpty: false }).catch(() => {});
-    });
+    const bootstrap = async () => {
+      const store = useStore.getState();
+      await store.loadWorkspaceState();
+      await Promise.allSettled([
+        store.loadWorkspaceOverview(),
+        store.loadRunHistory(),
+        store.loadRecentProjects(),
+        store.loadFiletoolsStatus(),
+        store.loadIndexerStatus(),
+        store.refreshWorkspaceData({ allowEmpty: false, includeRunState: false }),
+      ]);
+      await useStore.getState().restoreActiveSession();
+    };
+    bootstrap().catch(() => {});
   }, []);
 }

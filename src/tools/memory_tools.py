@@ -2,8 +2,8 @@
 Memory tools - agents can store and retrieve persistent cross-session memories.
 """
 
+from src.infra import config as config_module
 from src.infra.logger import logger
-from src.memory.manager import get_memory_manager
 
 
 # ==========================================
@@ -74,14 +74,37 @@ def add_memory(
     category: str,
     importance: int = 1,
     tags: list[str] | None = None,
+    workspace_dir: str | None = None,
+    conversation_id: str | None = None,
+    run_id: str | None = None,
 ) -> str:
-    """Store a new memory entry."""
+    """Store a user-approved governed memory entry."""
     try:
-        mm = get_memory_manager()
-        result = mm.save(category=category, content=content, importance=importance, tags=tags)
+        from src.api.services.memory_governance_service import create_memory_record
+
+        category_map = {
+            "user": ("global", "user_preference"),
+            "feedback": ("workspace", "failure_pattern"),
+            "project": ("workspace", "workflow_note"),
+            "reference": ("workspace", "project_fact"),
+        }
+        scope, kind = category_map.get(category, ("workspace", "workflow_note"))
+        result = create_memory_record(
+            workspace_dir or config_module.WORKSPACE_DIR,
+            scope=scope,
+            kind=kind,
+            content=content,
+            source="user",
+            importance=importance,
+            tags=tags or [],
+            conversation_id=conversation_id,
+            run_id=run_id,
+            source_ref=f"tool:add_memory:{run_id}" if run_id else "tool:add_memory",
+            evidence_refs=[f"run:{run_id}"] if run_id else [],
+            automatic=False,
+        )
         if result.get("id"):
-            imp_note = " (will prime on new sessions)" if importance >= 7 else ""
-            return f"Memory stored: [{result['id'][:8]}] {category}@{importance}{imp_note}"
+            return f"Memory stored: [{result['id'][:12]}] {scope}/{kind}@{importance}"
         return f"Failed to store memory: {result.get('error')}"
     except Exception as e:
         logger.error(f"add_memory failed: {e}")
@@ -92,29 +115,33 @@ def recall_memories(
     query: str,
     category: str | None = None,
     limit: int = 10,
+    workspace_dir: str | None = None,
+    conversation_id: str | None = None,
+    run_id: str | None = None,
 ) -> str:
-    """Search and retrieve memories."""
+    """Retrieve memories through the governed selector."""
     try:
-        mm = get_memory_manager()
+        from src.api.services.memory_selection_service import select_memories
 
-        if query:
-            memories = mm.search(query, limit)
-        else:
-            memories = mm.get(category=category, limit=limit)
-
+        result = select_memories(
+            workspace_dir or config_module.WORKSPACE_DIR,
+            prompt=query,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            budget_tokens=max(200, min(limit, 20) * 180),
+        )
+        memories = result.get("selected", [])[:limit]
         if not memories:
             return "No memories found."
 
-        lines = [f"=== Memory Recall ({len(memories)} items) ==="]
+        lines = [f"=== Governed Memory Recall ({len(memories)} items) ==="]
         for m in memories:
-            cat = m.get("category", "?").upper()
+            cat = f"{m.get('scope', '?')}/{m.get('kind', '?')}".upper()
             imp = m.get("importance", 0)
-            acc = m.get("access_count", 0)
-            content = m.get("content", "")[:150]
-            tags = m.get("tags", [])
-            tag_str = f" [{', '.join(tags[:3])}]" if tags else ""
-            lines.append(f"\n[{cat}@{imp}|×{acc}]{tag_str}")
-            lines.append(f"  {content}")
+            score = m.get("score", 0)
+            summary = m.get("summary", "")[:220]
+            lines.append(f"\n[{cat}@{imp}|score={score}]")
+            lines.append(f"  {summary}")
 
         return "\n".join(lines)
     except Exception as e:
@@ -126,14 +153,21 @@ def update_memory(
     memory_id: str,
     content: str | None = None,
     importance: int | None = None,
+    workspace_dir: str | None = None,
 ) -> str:
-    """Update an existing memory."""
+    """Update an existing governed memory."""
     try:
-        mm = get_memory_manager()
-        result = mm.update(memory_id, content, importance)
+        from src.api.services.memory_governance_service import update_memory_record
+
+        result = update_memory_record(
+            workspace_dir or config_module.WORKSPACE_DIR,
+            memory_id,
+            content=content,
+            importance=importance,
+        )
         if result is None:
-            return f"Memory not found: {memory_id[:8]}"
-        return f"Memory updated: [{memory_id[:8]}] {result['category']}@{result['importance']}"
+            return f"Memory not found: {memory_id[:12]}"
+        return f"Memory updated: [{memory_id[:12]}] {result['scope']}/{result['kind']}@{result['importance']}"
     except Exception as e:
         logger.error(f"update_memory failed: {e}")
         return f"Failed to update memory: {e}"

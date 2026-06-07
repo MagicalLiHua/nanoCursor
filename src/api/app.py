@@ -2,7 +2,7 @@
 
 Creates and configures the FastAPI app with CORS, middleware, exception handlers,
 and modular route includes. ``src.api.server`` is the public ASGI entrypoint;
-``api_server.py`` remains as a legacy compatibility module during migration.
+``src.api.legacy_runtime`` remains as a compatibility wrapper during migration.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from fastapi.exceptions import RequestValidationError
 
 from src.api.errors import ApiError, http_status_to_code
+from src.runtime.git_runner import run_git
 
 
 class ErrorResponse(BaseModel):
@@ -39,12 +40,22 @@ def _error_body(code: str, message: str, request_id: str, hint: str = "", detail
     ).model_dump()}
 
 
-def create_app() -> FastAPI:
+def create_app(*, lifespan=None) -> FastAPI:
     """Build and return the configured FastAPI application."""
+    if lifespan is None:
+        from src.api.services.runtime_lifecycle_service import (
+            initialize_runtime_services,
+            runtime_lifespan,
+        )
+
+        initialize_runtime_services()
+        lifespan = runtime_lifespan
+
     app = FastAPI(
         title="nanoCursor API",
         description="nanoCursor 智能体框架的后端 API 服务",
         version="2.0.0",
+        lifespan=lifespan,
     )
 
     # ---- CORS ----
@@ -153,30 +164,22 @@ def create_app() -> FastAPI:
     @app.get("/ready")
     async def ready():
         try:
-            from src.agent.engine import MODEL
-            return {"status": "ready", "llm": "available", "model": MODEL}
+            from src.infra.llm_config import get_model_name
+            return {"status": "ready", "llm": "available", "model": get_model_name()}
         except Exception as exc:
             return {"status": "degraded", "llm": "unavailable", "error": str(exc)}
 
     @app.get("/version")
     async def version():
-        import subprocess
         commit_sha = os.getenv("COMMIT_SHA", "")
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                commit_sha = result.stdout.strip()
-        except Exception:
-            pass
+        result = run_git(os.getcwd(), ["rev-parse", "--short", "HEAD"], timeout_seconds=5)
+        if result.returncode == 0:
+            commit_sha = result.stdout.strip()
         return {"version": "2.1.0", "commit": commit_sha or "dev"}
 
     # ---- Modular routers ----
     from src.api.routes.evals import router as evals_router
     from src.api.routes.runs import (
-        legacy_runtime_router as legacy_run_runtime_router,
         router as runs_router,
         runtime_router as run_runtime_router,
     )
@@ -192,12 +195,15 @@ def create_app() -> FastAPI:
     from src.api.routes.benchmarks import router as benchmarks_router
     from src.api.routes.demo_runs import router as demo_runs_router
     from src.api.routes.run_entry import router as run_entry_router
+    from src.api.routes.memory import router as memory_router
+    from src.api.routes.mcp import router as mcp_router
+    from src.api.routes.skills import router as skills_router
+    from src.api.routes.runtime import router as runtime_status_router
 
     app.include_router(system_router)
     app.include_router(evals_router)
     app.include_router(run_entry_router)
     app.include_router(run_runtime_router)
-    app.include_router(legacy_run_runtime_router)
     app.include_router(runs_router)
     app.include_router(benchmarks_router)
     app.include_router(demo_runs_router)
@@ -209,5 +215,9 @@ def create_app() -> FastAPI:
     app.include_router(run_analytics_router)
     app.include_router(recovery_router)
     app.include_router(approvals_router)
+    app.include_router(memory_router)
+    app.include_router(mcp_router)
+    app.include_router(skills_router)
+    app.include_router(runtime_status_router)
 
     return app

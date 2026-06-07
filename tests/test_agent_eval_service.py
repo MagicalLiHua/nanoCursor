@@ -28,6 +28,9 @@ def test_agent_eval_core_suite_passes_and_persists(tmp_path):
         "tool_policy",
         "task_scoring",
         "runtime_context",
+        "runtime_memory",
+        "runtime_delivery",
+        "runtime_quality_metrics",
     }
     runtime_section = next(section for section in result["sections"] if section["id"] == "runtime_context")
     assert runtime_section["status"] == "passed"
@@ -35,6 +38,30 @@ def test_agent_eval_core_suite_passes_and_persists(tmp_path):
         "context_selection_accuracy",
         "workspace_scope_isolation",
         "recovery_context_injection",
+    }
+    memory_section = next(section for section in result["sections"] if section["id"] == "runtime_memory")
+    assert memory_section["status"] == "passed"
+    assert {case["id"] for case in memory_section["cases"]} == {
+        "memory_precision",
+        "stale_memory_blocked",
+        "memory_scope_isolation",
+        "followup_memory_hit",
+    }
+    delivery_section = next(section for section in result["sections"] if section["id"] == "runtime_delivery")
+    assert delivery_section["status"] == "passed"
+    assert {case["id"] for case in delivery_section["cases"]} == {
+        "small_edit_rejects_claim_only",
+        "small_edit_accepts_change_evidence",
+        "small_edit_blocks_risky_shell",
+    }
+    quality_metrics_section = next(section for section in result["sections"] if section["id"] == "runtime_quality_metrics")
+    assert quality_metrics_section["status"] == "passed"
+    assert {case["id"] for case in quality_metrics_section["cases"]} == {
+        "direct_answer_metrics",
+        "read_only_metrics",
+        "small_edit_metrics",
+        "approval_metrics",
+        "failure_recovery_metrics",
     }
 
     persisted = get_agent_eval_run(result["eval_run_id"], str(workspace))
@@ -134,7 +161,7 @@ def test_run_agent_evals_cli_summary_json(tmp_path):
 
 
 def test_agent_eval_api_routes():
-    from api_server import app
+    from src.api.server import app
 
     client = TestClient(app)
     catalog = client.get("/api/evals/agent/catalog")
@@ -154,7 +181,7 @@ def test_agent_eval_api_routes():
 
 
 def test_agent_eval_api_returns_persisted_result():
-    from api_server import app
+    from src.api.server import app
 
     client = TestClient(app)
     run = client.post(

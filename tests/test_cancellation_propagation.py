@@ -43,7 +43,7 @@ def test_cancel_all_stops_running_agents():
 
 def test_cancel_propagation_via_should_cancel():
     """When _should_cancel_run detects cancellation, it should cancel the pool."""
-    from api_server import _cancel_agent_pool
+    from src.api.legacy_runtime import _cancel_agent_pool
 
     thread_id = "test-cancel-prop"
 

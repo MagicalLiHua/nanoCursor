@@ -12,7 +12,7 @@ class TestDeliveryAPI:
     """Test delivery endpoints with real data in a temp workspace."""
 
     def test_get_delivery_nonexistent_run_404(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"nonexistent_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/delivery")
@@ -23,7 +23,7 @@ class TestDeliveryAPI:
 
     def test_get_delivery_for_run_without_data(self, tmp_path):
         """Delivery can be built on-the-fly even without prior finalize."""
-        from api_server import app
+        from src.api.server import app
 
         ws = tmp_path / "workspace"
         ws.mkdir(parents=True)
@@ -51,7 +51,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_get_delivery_uses_indexed_run_workspace_after_switch(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         run_ws = tmp_path / "run_workspace"
@@ -82,7 +82,7 @@ class TestDeliveryAPI:
 
     def test_inline_routes_resolve_indexed_run_workspace_after_switch(self, tmp_path):
         import src.infra.config as cfg
-        import api_server
+        from src.api import legacy_runtime as api_server
 
         run_ws = tmp_path / "run_workspace"
         other_ws = tmp_path / "other_workspace"
@@ -106,7 +106,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_finalize_nonexistent_run(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"noexist_{uuid.uuid4().hex[:8]}"
         resp = client.post(
@@ -116,7 +116,7 @@ class TestDeliveryAPI:
         assert resp.status_code == 404
 
     def test_finalize_with_force_creates_delivery(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -147,7 +147,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_finalize_no_force_on_non_terminal(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -175,7 +175,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_regenerate_creates_delivery_files(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -224,7 +224,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_delivery_error_response_format(self):
-        from api_server import app
+        from src.api.server import app
         client = TestClient(app, raise_server_exceptions=False)
         thread_id = f"bad_run_{uuid.uuid4().hex[:8]}"
         resp = client.get(f"/api/runs/{thread_id}/delivery")
@@ -237,7 +237,7 @@ class TestDeliveryAPI:
         assert "x-request-id" in resp.headers
 
     def test_finalize_completed_run(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -268,7 +268,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_finalize_failed_run(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"
@@ -300,7 +300,7 @@ class TestDeliveryAPI:
             cfg.WORKSPACE_DIR = old_ws
 
     def test_regenerate_without_markdown(self, tmp_path):
-        from api_server import app
+        from src.api.server import app
         import src.infra.config as cfg
 
         ws = tmp_path / "workspace"

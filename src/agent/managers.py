@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from src.runtime.command_runner import run_command_async
+
 
 # ========== Todo Manager ==========
 
@@ -142,12 +144,23 @@ class BackgroundManager:
         return task_id
 
     async def _run_background(self, task_id: str, command: str):
-        import subprocess
         try:
-            r = subprocess.run(command, shell=True, cwd=str(self._workdir), capture_output=True, timeout=300)
-            out = r.stdout.decode("gbk", errors="replace") + r.stderr.decode("gbk", errors="replace")
+            result = await run_command_async(
+                command,
+                cwd=self._workdir,
+                timeout_seconds=300,
+                max_stdout_chars=50000,
+                max_stderr_chars=50000,
+                permission_level="shell_safe",
+            )
+            out = str(result.get("stdout") or "") + str(result.get("stderr") or "")
             async with self._lock:
                 if task_id in self._tasks:
+                    if result.get("timed_out"):
+                        self._tasks[task_id]["status"] = "failed"
+                        self._tasks[task_id]["error"] = "Timeout (300s)"
+                        self._tasks[task_id]["result"] = out.strip()
+                        return
                     self._tasks[task_id]["status"] = "completed"
                     self._tasks[task_id]["result"] = out.strip()
         except Exception as e:

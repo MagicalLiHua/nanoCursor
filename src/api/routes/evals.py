@@ -5,7 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from src.api.dependencies import get_workspace, raise_404, raise_400
-from src.api.models import AgentEvalRunRequest, EvalScoreRequest, EvalSuiteRunRequest, IntentEvalRunRequest
+from src.api.models import (
+    AgentEvalRunRequest,
+    EvalScoreRequest,
+    EvalSuiteRunRequest,
+    IntentEvalRunRequest,
+    RoutingEvalRunRequest,
+)
 from src.api.services.agent_eval_service import (
     get_agent_eval_run,
     list_agent_eval_runs,
@@ -27,6 +33,15 @@ from src.api.services.intent_eval_service import (
     get_intent_eval_run,
     list_intent_eval_cases,
     run_intent_eval_suite,
+)
+from src.api.services.routing_eval_service import (
+    get_routing_eval_run,
+    list_routing_eval_cases,
+    run_routing_eval_suite,
+)
+from src.api.services.run_eval_metrics_service import (
+    build_run_eval_metrics,
+    build_workspace_eval_metrics,
 )
 
 router = APIRouter(prefix="/api/evals", tags=["evals"])
@@ -67,6 +82,30 @@ async def get_intent_eval_result(eval_run_id: str):
         raise_404(str(exc))
 
 
+@router.get("/routing/catalog")
+async def list_routing_evals():
+    """Return the Routing Decision core eval catalog."""
+    return {"suite": "routing_core", "cases": list_routing_eval_cases()}
+
+
+@router.post("/routing/run")
+async def run_routing_evals(request: RoutingEvalRunRequest):
+    """Run Routing Decision core evals."""
+    return run_routing_eval_suite(
+        request.case_ids or None,
+        workspace_dir=get_workspace(),
+        persist=request.persist,
+    )
+
+
+@router.get("/routing/runs/{eval_run_id}")
+async def get_routing_eval_result(eval_run_id: str):
+    try:
+        return get_routing_eval_run(eval_run_id, get_workspace())
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
 @router.get("/agent/catalog")
 async def list_agent_evals():
     """Return aggregate agent-runtime eval catalog."""
@@ -102,6 +141,21 @@ async def get_agent_eval_result(eval_run_id: str):
         return get_agent_eval_run(eval_run_id, get_workspace())
     except ValueError as exc:
         raise_404(str(exc))
+
+
+@router.get("/runtime/summary")
+async def runtime_eval_summary(limit: int = 50):
+    """Return evidence-based quality trends for recent workspace runs."""
+    return build_workspace_eval_metrics(get_workspace(), limit=min(max(limit, 1), 200))
+
+
+@router.get("/runtime/runs/{thread_id}/metrics")
+async def runtime_run_eval_metrics(thread_id: str):
+    """Return explainable loop/context/tool/recovery metrics for one run."""
+    result = build_run_eval_metrics(thread_id, get_workspace())
+    if result.get("status") == "not_found":
+        raise_404(f"Run 不存在: {thread_id}")
+    return result
 
 
 @router.get("/{eval_id}")

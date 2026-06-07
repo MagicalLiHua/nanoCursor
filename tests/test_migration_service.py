@@ -78,7 +78,7 @@ def test_migration_dry_run_does_not_write_files(tmp_path):
 
 
 def test_workspace_migration_api(tmp_path):
-    import api_server
+    from src.api import legacy_runtime as api_server
 
     original_workspace = api_server._get_workspace()
     workspace = tmp_path / "workspace"

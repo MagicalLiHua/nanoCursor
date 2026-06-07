@@ -112,3 +112,33 @@ def test_run_context_marks_failed_stage_and_skips_remaining():
     assert statuses["implement"] == "failed"
     assert statuses["verify"] == "skipped"
     assert context.metadata["lifecycle"]["failed_stage_id"] == "implement"
+
+
+def test_run_context_recovers_failed_stage_when_later_tool_succeeds():
+    context = RunContext(
+        thread_id="run-1",
+        workspace_dir="/tmp/workspace",
+        queue=queue.Queue(),
+        execution_plan={
+            "stages": [
+                {"id": "implement", "title": "Implement", "owner": "Coder", "capabilities": ["tool.file_ops"]},
+                {"id": "verify", "title": "Verify", "owner": "Tester", "capabilities": ["skill.delivery-review"]},
+            ],
+            "tasks": [
+                {"id": "stage-01-implement", "title": "Implement"},
+                {"id": "stage-02-verify", "title": "Verify"},
+            ],
+        },
+    )
+
+    context.start_first_stage()
+    context.apply_tool_event("edit_file", "tool.file_ops", agent="Coder", ok=False, output="Error: bad patch")
+    assert context.execution_plan["stages"][0]["status"] == "failed"
+
+    context.apply_tool_event("edit_file", "tool.file_ops", agent="Coder", ok=True, output="Edited README.md")
+    context.finalize_lifecycle("completed")
+    statuses = {stage["id"]: stage["status"] for stage in context.execution_plan["stages"]}
+
+    assert statuses["implement"] == "completed"
+    assert statuses["verify"] == "completed"
+    assert context.metadata["lifecycle"]["failed_stage_id"] is None

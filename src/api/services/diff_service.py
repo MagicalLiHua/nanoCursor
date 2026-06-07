@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from src.infra import config as config_module
+from src.api.services.change_path_filter import should_hide_change_path
+from src.api.services.event_change_parser import collect_event_changes
+from src.runtime.git_runner import GitCompletedProcess, run_git
 
 
 def _workspace(workspace_dir: str | None = None) -> Path:
@@ -19,14 +21,8 @@ def _run_dir(thread_id: str, workspace_dir: str | None = None) -> Path:
     return _workspace(workspace_dir) / ".nanocursor" / "runs" / safe_id
 
 
-def _run_git(workspace: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(workspace), *args],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+def _run_git(workspace: Path, args: list[str]) -> GitCompletedProcess:
+    return run_git(workspace, args, timeout_seconds=10)
 
 
 def _parse_status(output: str) -> list[dict[str, Any]]:
@@ -57,8 +53,43 @@ def _parse_status(output: str) -> list[dict[str, Any]]:
 
 
 def _is_internal_path(path: str) -> bool:
-    normalized = path.replace("\\", "/").strip("/")
-    return normalized == ".nanocursor" or normalized.startswith((".nanocursor/", ".backups/", ".tasks/", ".snapshots/"))
+    return should_hide_change_path(path)
+
+
+def _path_from_diff_header(line: str) -> str:
+    parts = line.split()
+    if len(parts) < 4:
+        return ""
+    candidate = parts[3]
+    if candidate.startswith("b/"):
+        return candidate[2:]
+    return candidate
+
+
+def _filter_diff_for_hidden_paths(diff: str) -> str:
+    if not diff.strip():
+        return diff
+
+    kept: list[str] = []
+    block: list[str] = []
+    hidden = False
+
+    def flush() -> None:
+        if block and not hidden:
+            kept.extend(block)
+
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            flush()
+            block = [line]
+            hidden = should_hide_change_path(_path_from_diff_header(line))
+            continue
+        if block:
+            block.append(line)
+        else:
+            kept.append(line)
+    flush()
+    return ("\n".join(kept).rstrip() + "\n") if kept else ""
 
 
 def _diff_contains_path(diff: str, path: str) -> bool:
@@ -109,13 +140,14 @@ def _expand_untracked_directories(workspace: Path, changed_files: list[dict[str,
             if not child.is_file():
                 continue
             relative = child.relative_to(workspace).as_posix()
-            if "/.git/" in f"/{relative}/":
+            if "/.git/" in f"/{relative}/" or should_hide_change_path(relative):
                 continue
             item = {"path": relative, "status": "??", "change_type": "created"}
             if _is_binary_file(child):
                 item["binary"] = True
             found_files.append(item)
-        expanded.extend(found_files or [item])
+        if found_files:
+            expanded.extend(found_files)
     return expanded
 
 
@@ -177,23 +209,8 @@ def _append_untracked_file_patches(workspace: Path, diff: str, changed_files: li
 
 def _changed_files_from_events(thread_id: str, workspace_dir: str | None = None) -> list[dict[str, Any]]:
     """Derive changed files from run events when git cannot see the workspace."""
-    from src.api.services.event_store import get_event_store
-
-    files_by_path: dict[str, dict[str, Any]] = {}
-    for event in get_event_store().list_events(thread_id, str(_workspace(workspace_dir))):
-        if event.type != "file_changed" or not isinstance(event.payload, dict):
-            continue
-        path = str(event.payload.get("path") or "").strip()
-        if not path:
-            continue
-        output = str(event.payload.get("output") or event.content or "")
-        change_type = "created" if output.startswith("Created ") else str(event.payload.get("change_type") or "modified")
-        files_by_path[path] = {
-            "path": path,
-            "status": "event",
-            "change_type": "created" if change_type == "added" else change_type,
-        }
-    return [files_by_path[path] for path in sorted(files_by_path)]
+    _, changed_files = collect_event_changes(thread_id, str(_workspace(workspace_dir)))
+    return changed_files
 
 
 def get_run_diff(thread_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
@@ -225,6 +242,7 @@ def get_run_diff(thread_id: str, workspace_dir: str | None = None) -> dict[str, 
         diff_result = _run_git(workspace, ["diff", "--no-ext-diff", "--", "."])
 
     diff = diff_result.stdout if diff_result.returncode == 0 else ""
+    diff = _filter_diff_for_hidden_paths(diff)
     changed_files = _parse_status(status_result.stdout) if status_result.returncode == 0 else []
     changed_files = _expand_untracked_directories(workspace, changed_files)
     for item in changed_files:
@@ -237,9 +255,10 @@ def get_run_diff(thread_id: str, workspace_dir: str | None = None) -> dict[str, 
         diff = _append_untracked_file_patches(workspace, diff, changed_files)
     source = "git"
     if not changed_files:
-        changed_files = _changed_files_from_events(thread_id, str(workspace))
+        event_diff, changed_files = collect_event_changes(thread_id, str(workspace))
         if changed_files:
             source = "events"
+            diff = event_diff
 
     return {
         "thread_id": thread_id,
@@ -247,5 +266,5 @@ def get_run_diff(thread_id: str, workspace_dir: str | None = None) -> dict[str, 
         "diff": diff,
         "changed_files": changed_files,
         "source": source,
-        "error": diff_result.stderr.strip() if diff_result.returncode != 0 else "",
+        "error": "" if source == "events" else (diff_result.stderr.strip() if diff_result.returncode != 0 else ""),
     }

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	pb "nanocursor/go-services/executor/proto"
 	"nanocursor/go-services/executor/internal/runner"
+	pb "nanocursor/go-services/executor/proto"
 )
 
 type ExecutorServiceImpl struct {
@@ -97,7 +97,7 @@ func (s *ExecutorServiceImpl) StreamToolRunEvents(req *pb.StreamEventsRequest, s
 			}
 			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

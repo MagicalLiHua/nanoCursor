@@ -282,6 +282,45 @@ class SkillImportRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
     content: str = Field(default="", max_length=8000)
+    enabled: bool | None = None
+    skill_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillPreviewRequest(BaseModel):
+    """预览本次请求会选择哪些 Skills"""
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    team: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SkillEnabledRequest(BaseModel):
+    """Skill 启停请求"""
+    enabled: bool = True
+
+
+class GitHubSkillImportPreviewRequest(BaseModel):
+    """GitHub 静态 Skill 导入预览"""
+    repo_url: str = Field(..., min_length=1, max_length=500)
+    ref: str = Field(default="", max_length=120)
+    path: str = Field(default="", max_length=300)
+    token: str = Field(default="", max_length=500)
+
+
+class GitHubSkillImportRequest(GitHubSkillImportPreviewRequest):
+    """确认导入 GitHub 静态 Skill"""
+    candidate_id: str = Field(default="", max_length=120)
+    enabled: bool | None = None
+
+
+class GitHubSkillUpdateRequest(BaseModel):
+    """GitHub Skill 更新检查/预览请求"""
+    ref: str = Field(default="", max_length=120)
+    token: str = Field(default="", max_length=500)
+
+
+class GitHubSkillUpdateApplyRequest(GitHubSkillUpdateRequest):
+    """确认应用 GitHub Skill 更新"""
+    confirmed: bool = False
+    enabled: bool | None = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -313,6 +352,12 @@ class BenchmarkRunRequest(BaseModel):
     benchmark_id: str = Field(..., min_length=1)
     thread_id: str | None = None
     workspace_dir: str | None = None
+
+
+class RealTaskBenchmarkRunRequest(BaseModel):
+    """运行真实任务静态 benchmark"""
+    case_ids: list[str] = Field(default_factory=list)
+    persist: bool = True
 
 
 class BenchmarkRunResponse(BaseModel):
@@ -387,6 +432,19 @@ class RunSnapshotQuality(BaseModel):
     risks: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class RunSnapshotCapabilities(BaseModel):
+    """Run snapshot: Skills and MCP capabilities selected for this run."""
+    selected_skills: list[dict[str, Any]] = Field(default_factory=list)
+    omitted_skills: list[dict[str, Any]] = Field(default_factory=list)
+    mcp_plan: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSnapshotRouting(BaseModel):
+    """Run snapshot: structured routing decision for this run."""
+    decision: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunSnapshot(BaseModel):
     """Frontend-facing aggregate for one run.
 
@@ -403,6 +461,8 @@ class RunSnapshot(BaseModel):
     changes: RunSnapshotChanges = Field(default_factory=RunSnapshotChanges)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     quality: RunSnapshotQuality = Field(default_factory=RunSnapshotQuality)
+    capabilities: RunSnapshotCapabilities = Field(default_factory=RunSnapshotCapabilities)
+    routing: RunSnapshotRouting = Field(default_factory=RunSnapshotRouting)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     outcome: dict[str, Any] = Field(default_factory=dict)
 
@@ -1015,6 +1075,12 @@ class IntentEvalRunRequest(BaseModel):
     persist: bool = True
 
 
+class RoutingEvalRunRequest(BaseModel):
+    """Routing Decision eval suite request."""
+    case_ids: list[str] = Field(default_factory=list)
+    persist: bool = True
+
+
 class AgentEvalRunRequest(BaseModel):
     """Aggregate agent-runtime eval suite request."""
     suite: Literal["core"] = "core"
@@ -1076,13 +1142,37 @@ class McpEnabledRequest(BaseModel):
 
 class McpToolCallRequest(BaseModel):
     """MCP 工具调用请求"""
+    server_id: str = ""
+    tool_name: str = ""
     arguments: dict[str, Any] = Field(default_factory=dict)
+    thread_id: str = ""
+    approval_id: str = ""
+    permission_level: str = ""
+    timeout_seconds: int = 10
 
     @model_validator(mode="before")
     @classmethod
     def accept_legacy_body(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "arguments" not in data:
+        known = {
+            "server_id",
+            "server",
+            "tool_name",
+            "tool",
+            "arguments",
+            "thread_id",
+            "approval_id",
+            "permission_level",
+            "timeout_seconds",
+        }
+        if isinstance(data, dict) and "arguments" not in data and not (set(data) & known):
             return {"arguments": data}
+        if isinstance(data, dict):
+            normalized = dict(data)
+            if "server" in normalized and "server_id" not in normalized:
+                normalized["server_id"] = normalized.pop("server")
+            if "tool" in normalized and "tool_name" not in normalized:
+                normalized["tool_name"] = normalized.pop("tool")
+            return normalized
         return data
 
 

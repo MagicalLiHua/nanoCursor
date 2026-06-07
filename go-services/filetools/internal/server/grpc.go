@@ -58,7 +58,10 @@ func (s *FileToolsServiceImpl) ListDirectory(ctx context.Context, req *pb.ListDi
 }
 
 func (s *FileToolsServiceImpl) WriteFile(ctx context.Context, req *pb.WriteFileRequest) (*pb.WriteFileResponse, error) {
-	message, err := filetools.WriteFile(req.GetWorkspace(), req.GetFilename(), req.GetContent())
+	message, err := filetools.WriteFileWithOptions(req.GetWorkspace(), req.GetFilename(), req.GetContent(), filetools.WriteOptions{
+		Overwrite:      req.GetOverwrite(),
+		BackupExisting: req.GetBackupExisting(),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -66,11 +69,32 @@ func (s *FileToolsServiceImpl) WriteFile(ctx context.Context, req *pb.WriteFileR
 }
 
 func (s *FileToolsServiceImpl) EditFile(ctx context.Context, req *pb.EditFileRequest) (*pb.EditFileResponse, error) {
-	result, err := filetools.EditFile(req.GetWorkspace(), req.GetFilename(), req.GetSearchBlock(), req.GetReplaceBlock())
+	createBackup := req.GetCreateBackup()
+	if req.GetMatchMode() == "" && req.GetStartLine() == 0 && req.GetEndLine() == 0 {
+		createBackup = true
+	}
+	result, err := filetools.EditFileWithOptions(req.GetWorkspace(), req.GetFilename(), filetools.EditOptions{
+		SearchBlock:  req.GetSearchBlock(),
+		ReplaceBlock: req.GetReplaceBlock(),
+		StartLine:    int(req.GetStartLine()),
+		EndLine:      int(req.GetEndLine()),
+		NewText:      req.GetNewText(),
+		MatchMode:    req.GetMatchMode(),
+		CreateBackup: createBackup,
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &pb.EditFileResponse{Result: result}, nil
+	return &pb.EditFileResponse{
+		Result:           result.Result,
+		Diff:             result.Diff,
+		Strategy:         result.Strategy,
+		MatchedStartLine: int32(result.MatchedStartLine),
+		MatchedEndLine:   int32(result.MatchedEndLine),
+		ChangedLineCount: int32(result.ChangedLineCount),
+		BackupPath:       result.BackupPath,
+		Changed:          result.Changed,
+	}, nil
 }
 
 func (s *FileToolsServiceImpl) BackupFile(ctx context.Context, req *pb.BackupFileRequest) (*pb.BackupFileResponse, error) {

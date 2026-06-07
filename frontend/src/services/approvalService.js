@@ -33,8 +33,9 @@ export async function submitApprovalDecision(decision, context) {
   try {
     if (isToolApproval) {
       const decisionId = state.approval.decisionId;
+      const approvalThreadId = state.approval.threadId || state.currentThreadId;
       await requestJson(
-        `/api/runs/${encodeURIComponent(state.currentThreadId)}/approvals/${encodeURIComponent(decisionId)}`,
+        `/api/runs/${encodeURIComponent(approvalThreadId)}/approvals/${encodeURIComponent(decisionId)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -46,7 +47,7 @@ export async function submitApprovalDecision(decision, context) {
         title: approvalDecisionLabel(decision),
         content: comment || `工具 ${state.approval.tool || ""} ${approvalDecisionLabel(decision)}。`,
         agent: "user",
-        payload: { decision_id: decisionId, decision, approved, comment },
+        payload: { decision_id: decisionId, thread_id: approvalThreadId, decision, approved, comment },
       });
     } else {
       const event = await requestJson(`/api/runs/${encodeURIComponent(state.currentThreadId)}/approval`, {

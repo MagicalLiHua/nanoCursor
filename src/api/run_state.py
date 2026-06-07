@@ -1,36 +1,42 @@
 """Shared run state singleton for API routes.
 
 Centralizes RunManager, EventStore, and helper functions that were previously
-scattered as module-level globals in api_server.py.
+scattered as module-level globals in legacy runtime.
 """
 
 from __future__ import annotations
 
-import json
 import time as _time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from src.api.models import AgentEvent
-from src.api.services.event_store import get_event_store
+from src.api.services.runtime_registry_service import get_runtime_registry
+from src.infra.logging import get_logger
 from src.runtime.audit_log import AuditRecord, get_audit_repo
-from src.runtime.run_manager import RunManager
 from src.runtime.run_state import RunStatus
 
 
 # --- Singletons ---
-run_manager = RunManager()
-event_store = get_event_store()
-
-# Convenience aliases
-active_runs = run_manager._active
-runs_lock = run_manager._lock
+logger = get_logger()
+_registry = get_runtime_registry()
+run_manager = _registry.run_manager
+event_store = _registry.event_store
+active_runs = _registry.active_runs
+runs_lock = _registry.runs_lock
 
 
 def get_workspace() -> str:
-    import src.infra.config as config_module
-    return config_module.WORKSPACE_DIR
+    from src.api.services.workspace_runtime_service import get_active_workspace
+
+    return get_active_workspace()
+
+
+def set_active_workspace(workspace_dir: str) -> str:
+    from src.api.services.workspace_runtime_service import set_active_workspace as _set
+
+    return _set(workspace_dir)
 
 
 def workspace_for_thread(thread_id: str) -> str:
@@ -57,8 +63,12 @@ def workspace_for_thread(thread_id: str) -> str:
                 candidate = item.get("path") if isinstance(item, dict) else None
                 if candidate and store.get_session(thread_id, candidate):
                     return str(Path(candidate).resolve())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "workspace_resolution_fallback",
+                extra={"thread_id": thread_id},
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     return get_workspace()
 
@@ -75,7 +85,12 @@ def session_for_thread(thread_id: str) -> dict[str, Any] | None:
 
     try:
         indexed_workspace = event_store.workspace_for_thread(thread_id)
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "session_resolution_index_failed",
+            extra={"thread_id": thread_id},
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
         indexed_workspace = None
     if indexed_workspace:
         session = event_store.get_session(thread_id, indexed_workspace)
@@ -87,8 +102,12 @@ def session_for_thread(thread_id: str) -> dict[str, Any] | None:
         session = event_store.get_session(thread_id, current_workspace)
         if session:
             return session
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "session_resolution_active_workspace_failed",
+            extra={"thread_id": thread_id},
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
     try:
         from src.api.services.workspace_registry_service import list_recent_projects
@@ -99,8 +118,12 @@ def session_for_thread(thread_id: str) -> dict[str, Any] | None:
             session = event_store.get_session(thread_id, candidate)
             if session:
                 return session
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "session_resolution_recent_projects_failed",
+            extra={"thread_id": thread_id},
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
     return None
 
 
@@ -125,15 +148,16 @@ def emit_agenthub_event(
     content: str = "",
     agent: str = "lead",
     payload: dict[str, Any] | None = None,
+    legacy_event: dict[str, Any] | None = None,
     workspace_dir: str | None = None,
 ) -> AgentEvent:
-    """Persist a unified nanoCursor event. Publishes to SSEBroker automatically via monkey-patch."""
+    """Persist a unified event, mirror task-board state, and optionally enqueue legacy SSE."""
     if workspace_dir is None:
         with runs_lock:
             run_info = active_runs.get(thread_id)
             workspace_dir = run_info.get("workspace_dir") if run_info else None
     workspace_dir = workspace_dir or get_workspace()
-    return event_store.append_event(
+    event = event_store.append_event(
         thread_id=thread_id,
         event_type=event_type,
         title=title,
@@ -142,6 +166,60 @@ def emit_agenthub_event(
         payload=payload or {},
         workspace_dir=workspace_dir,
     )
+    if event_type in {
+        "task_created",
+        "task_updated",
+        "stage_updated",
+        "tool_call_finished",
+        "file_changed",
+        "diff_updated",
+        "test_finished",
+        "report_ready",
+        "done",
+        "assistant_message",
+        "quality_gate",
+        "delivery_scored",
+        "agent_run_started",
+        "agent_result_merged",
+        "agent_run_failed",
+        "parallel_agent_progress",
+        "parallel_agent_result",
+        "parallel_agent_failed",
+        "parallel_agents_completed",
+    }:
+        try:
+            from src.api.services.run_state_service import mirror_domain_event_to_task_board
+
+            mirror_domain_event_to_task_board(
+                thread_id=thread_id,
+                workspace_dir=workspace_dir,
+                event_type=event_type,
+                payload=payload or {},
+                title=title,
+                content=content,
+                agent=agent,
+                event_id=event.id,
+                timestamp=event.timestamp,
+            )
+        except Exception as exc:
+            logger.warning(
+                "task_board_mirror_failed",
+                extra={"thread_id": thread_id, "path": workspace_dir},
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    if legacy_event is not None:
+        import json
+
+        with runs_lock:
+            run_info = active_runs.get(thread_id)
+            event_queue = run_info.get("queue") if run_info else None
+        if event_queue:
+            enriched = dict(legacy_event)
+            enriched["agenthub_event"] = event.model_dump()
+            event_queue.put(json.dumps(enriched, ensure_ascii=False))
+
+    return event
 
 
 def emit_agent_activity(
@@ -183,7 +261,11 @@ def sync_run_context(thread_id: str, workspace_dir: str) -> Any:
         from src.api.services.run_ledger_service import sync_steps_from_lifecycle
         sync_steps_from_lifecycle(thread_id, metadata, workspace_dir)
     except Exception:
-        pass
+        logger.warning(
+            "run_ledger_sync_failed",
+            extra={"thread_id": thread_id, "workspace_id": workspace_dir},
+            exc_info=True,
+        )
     return run_info
 
 
@@ -246,4 +328,8 @@ def audit_route_action(
             workspace_dir,
         )
     except Exception:
-        pass
+        logger.warning(
+            "route_audit_persist_failed",
+            extra={"thread_id": thread_id, "workspace_id": workspace_dir},
+            exc_info=True,
+        )

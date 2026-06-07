@@ -6,6 +6,7 @@ import { normalizeApprovalTasks } from "../../services/approvalService.js";
 import { normalizeTask as normalizeTaskBase, mapBackendTeam as mapBackendTeamBase } from "../../state/mappers.js";
 import { inferTaskCapabilities } from "../../state/selectors.js";
 import { blankReport, blankArtifactCenter, blankRecoveryCenter, blankEphemeralAgents } from "../../state/runDefaults.js";
+import { updateAgentActivityQueue } from "../../state/chatState.js";
 
 function normalizeAgentName(agent, payload = {}) {
   const hinted = payload?.capability_trace?.agent || agent || "Lead";
@@ -83,6 +84,18 @@ function normalizeTask(task) {
 
 function mapBackendTeam(members) {
   return mapBackendTeamBase(members, { agentToneFromName });
+}
+
+function eventIndicatesLeadDirect(eventType, payload = {}, state = {}) {
+  const snapshotStrategy = state.runSnapshot?.run?.strategy || "";
+  const currentStrategy = state.currentRunStrategy || snapshotStrategy;
+  const intentRoute = payload?.intent_decision?.execution_route ||
+    payload?.complexity?.execution_route ||
+    payload?.complexity?.intent_decision?.execution_route;
+  return currentStrategy === "lead_direct_reply" ||
+    payload?.strategy === "lead_direct_reply" ||
+    intentRoute === "lead_direct_reply" ||
+    (eventType === "plan_created" && payload?.strategy === "lead_direct_reply");
 }
 
 function blankApproval() {
@@ -215,6 +228,9 @@ export function createEventActions(set, get) {
   function settleTasksForRunStatus(status) {
     set((state) => {
       if (!["completed", "failed", "cancelled"].includes(status)) return {};
+      if (state.currentRunStrategy === "lead_direct_reply" || state.runSnapshot?.run?.strategy === "lead_direct_reply") {
+        return { tasks: [], metrics: { ...state.metrics, tasks: 0 } };
+      }
       return {
         tasks: state.tasks.map((t) => {
           if (t.status === "completed" || t.status === "failed") return t;
@@ -267,11 +283,12 @@ export function createEventActions(set, get) {
         text,
         eventType,
         time,
+        payload,
         explicitAgentWork: isExplicitAgentWorkEvent(eventType, payload),
         inputTokens,
         outputTokens,
       };
-      const agentActivities = [next, ...state.agentActivities].slice(0, 24);
+      const agentActivities = updateAgentActivityQueue(state.agentActivities, next);
 
       // Update team member status
       const team = state.team.map((member) => {
@@ -306,6 +323,8 @@ export function createEventActions(set, get) {
     const eventType = event.type || "message";
     const title = event.title || eventType;
     const content = event.content || "";
+    const payload = event.payload || {};
+    const isLeadDirectRun = eventIndicatesLeadDirect(eventType, payload, state);
     const time = event.timestamp
       ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(event.timestamp * 1000))
       : nowTime();
@@ -329,6 +348,12 @@ export function createEventActions(set, get) {
       }],
     }));
 
+    if (eventType === "plan_created" && payload?.strategy) {
+      set({ currentRunStrategy: payload.strategy });
+    } else if (isLeadDirectRun && !get().currentRunStrategy) {
+      set({ currentRunStrategy: "lead_direct_reply" });
+    }
+
     // Record agent activity
     recordAgentActivity({
       agent: event.agent || event.payload?.capability_trace?.agent || "Lead",
@@ -336,7 +361,7 @@ export function createEventActions(set, get) {
       content,
       time,
       eventType,
-      payload: event.payload || {},
+      payload,
     });
 
     const shouldFocusPanel = options.focusPanel !== false;
@@ -353,12 +378,12 @@ export function createEventActions(set, get) {
       });
     }
 
-    if (eventType === "plan_created" && event.payload?.tasks) {
-      event.payload.tasks.forEach((task) => upsertTask(task));
+    if (eventType === "plan_created" && payload?.tasks && !isLeadDirectRun) {
+      payload.tasks.forEach((task) => upsertTask(task));
       if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
-    if (["run_state_created", "run_state_patched", "task_started"].includes(eventType) || eventType.startsWith("task_")) {
+    if (!isLeadDirectRun && (["run_state_created", "run_state_patched", "task_started"].includes(eventType) || eventType.startsWith("task_"))) {
       get().refreshRunState?.(get().currentThreadId, { focusPanel: shouldFocusPanel });
     }
 
@@ -366,7 +391,7 @@ export function createEventActions(set, get) {
       set({ team: mapBackendTeam(event.payload.members) });
     }
 
-    if (eventType === "stage_updated" && event.payload?.stage_id) {
+    if (eventType === "stage_updated" && event.payload?.stage_id && !isLeadDirectRun) {
       patchStageTask(event.payload);
       if (shouldFocusPanel) set({ rightTab: "progress" });
     }
@@ -434,12 +459,12 @@ export function createEventActions(set, get) {
       }
     }
 
-    if (eventType === "task_created" && event.payload?.task) {
+    if (eventType === "task_created" && event.payload?.task && !isLeadDirectRun) {
       upsertTask(event.payload.task);
       if (shouldFocusPanel) set({ rightTab: "progress" });
     }
 
-    if (eventType === "task_updated" && event.payload?.task_id) {
+    if (eventType === "task_updated" && event.payload?.task_id && !isLeadDirectRun) {
       patchTask(event.payload.task_id, {
         status: event.payload.status,
         title: event.payload.title,
@@ -620,6 +645,7 @@ export function createEventActions(set, get) {
       agentActivities: [],
       agentTokenCounts: {},
       currentRunStatus: "idle",
+      currentRunStrategy: "",
       showCompletedTasks: false,
       approval: { status: "idle", planId: "", title: "", content: "", riskLevel: "", tasks: [], decision: "", comment: "" },
       approvalComment: "",
@@ -646,8 +672,9 @@ export function createEventActions(set, get) {
     try {
       if (isToolApproval) {
         const decisionId = state.approval.decisionId;
+        const approvalThreadId = state.approval.threadId || state.currentThreadId;
         await apiClient.requestJson(
-          `/api/runs/${encodeURIComponent(state.currentThreadId)}/approvals/${encodeURIComponent(decisionId)}`,
+          `/api/runs/${encodeURIComponent(approvalThreadId)}/approvals/${encodeURIComponent(decisionId)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -659,7 +686,7 @@ export function createEventActions(set, get) {
           title: approvalDecisionLabel(decision),
           content: comment || `工具 ${state.approval.tool || ""} ${approvalDecisionLabel(decision)}。`,
           agent: "user",
-          payload: { decision_id: decisionId, decision, approved: decision === "approved", comment },
+          payload: { decision_id: decisionId, thread_id: approvalThreadId, decision, approved: decision === "approved", comment },
         });
       } else {
         const event = await apiClient.requestJson(

@@ -277,6 +277,7 @@ class RunTaskBoard(BaseModel):
                     "writes_files": node.writes_files,
                     "resource_locks": node.resource_locks,
                     "context_policy": node.context_policy,
+                    "acceptance": [item.model_dump() for item in node.acceptance],
                     "evidence_count": len(node.evidence),
                     "output_count": len(node.outputs),
                     "evidence_preview": node.evidence[-6:],
@@ -353,6 +354,15 @@ def build_task_board(
         if not isinstance(stage, dict):
             continue
         stage_id = str(stage.get("id") or f"stage-{index}")
+        if stage_id == "intake":
+            canonical_intake = nodes[0]
+            canonical_intake.title = str(stage.get("title") or canonical_intake.title)
+            canonical_intake.goal = str(stage.get("description") or canonical_intake.goal)
+            canonical_intake.tool_policy = (
+                plan.get("tool_policy", {}) if isinstance(plan.get("tool_policy"), dict) else {}
+            )
+            canonical_intake.context_policy = _context_policy_for_node("intake", stage)
+            continue
         role = str(stage.get("owner_role") or stage.get("owner") or "agent").lower()
         title = str(stage.get("title") or stage_id)
         desc = str(stage.get("description") or "")

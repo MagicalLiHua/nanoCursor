@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import queue
-import threading
 import uuid
-from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.api.dependencies import get_workspace, raise_404
@@ -45,28 +43,36 @@ from src.api.services.delivery_service import (
     regenerate_delivery,
 )
 from src.api.services.event_store import get_event_store
+from src.api.run_state import (
+    active_runs,
+    emit_agenthub_event,
+    emit_stage_updates,
+    event_store,
+    run_manager,
+    runs_lock,
+    session_for_thread,
+    sync_run_context,
+    workspace_for_thread,
+)
 from src.api.services.run_context import RunContext
 from src.api.services.run_history import list_run_history_with_active
+from src.api.services.retry_context_service import build_retry_prompt, collect_retry_context
 from src.api.services.sse_broker import stream_events_push
+from src.api.services.workflow_thread_service import (
+    start_resumed_workflow_thread,
+    start_workflow_thread,
+)
 from src.api.services.workspace_registry_service import list_recent_projects
 from src.infra.messages import HumanMessage
 from src.runtime.run_state import TERMINAL_STATUSES
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 runtime_router = APIRouter(prefix="/api", tags=["runs"])
-legacy_runtime_router = APIRouter(prefix="/api/run", tags=["runs"])
-
-
-def _runtime() -> Any:
-    """Return the legacy runtime module without importing it during app creation."""
-    import api_server
-
-    return api_server
 
 
 def _workspace_for_run(thread_id: str, *, require_session: bool = False) -> str:
     """Resolve the workspace associated with a run before reading run artifacts."""
-    store = get_event_store()
+    store = event_store
 
     indexed_workspace = store.workspace_for_thread(thread_id)
     if indexed_workspace and store.get_session(thread_id, indexed_workspace):
@@ -89,11 +95,10 @@ def _workspace_for_run(thread_id: str, *, require_session: bool = False) -> str:
 
 @runtime_router.get("/runs")
 async def list_agenthub_runs(limit: int = 50, workspace_dir: str | None = None):
-    runtime = _runtime()
-    workspace = workspace_dir or runtime._get_workspace()
+    workspace = workspace_dir or get_workspace()
     return {
         "runs": list_run_history_with_active(
-            runtime.run_manager,
+            run_manager,
             workspace,
             limit=min(max(limit, 1), 200),
         )
@@ -102,22 +107,21 @@ async def list_agenthub_runs(limit: int = 50, workspace_dir: str | None = None):
 
 @runtime_router.get("/runs/active")
 async def list_active_runs():
-    return {"active_runs": _runtime().run_manager.list_active()}
+    return {"active_runs": run_manager.list_active()}
 
 
 @runtime_router.get("/runs/{thread_id}")
 async def get_agenthub_run_detail(thread_id: str):
-    runtime = _runtime()
-    with runtime.runs_lock:
-        run_info = runtime.active_runs.get(thread_id)
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
     if run_info:
         return {
             "thread_id": thread_id,
             "status": run_info.get("status"),
-            "workspace_dir": run_info.get("workspace_dir", runtime._get_workspace()),
+            "workspace_dir": run_info.get("workspace_dir", get_workspace()),
             "conversation_id": run_info.get("conversation_id"),
         }
-    session = runtime._session_for_thread(thread_id)
+    session = session_for_thread(thread_id)
     if session:
         return session
     raise HTTPException(status_code=404, detail="Run 不存在")
@@ -125,17 +129,19 @@ async def get_agenthub_run_detail(thread_id: str):
 
 @runtime_router.get("/runs/{thread_id}/events/history")
 async def get_agenthub_run_events_history(thread_id: str):
-    runtime = _runtime()
-    events = runtime.event_store.list_events(thread_id, runtime._workspace_for_thread(thread_id))
+    events = event_store.list_events(thread_id, workspace_for_thread(thread_id))
     return {"events": [event.model_dump() for event in events]}
 
 
 @runtime_router.get("/runs/{thread_id}/events")
-async def get_run_events_push(thread_id: str):
-    runtime = _runtime()
-    workspace_dir = runtime._workspace_for_thread(thread_id)
+async def get_run_events_push(thread_id: str, request: Request):
+    workspace_dir = workspace_for_thread(thread_id)
     return StreamingResponse(
-        stream_events_push(thread_id, workspace_dir),
+        stream_events_push(
+            thread_id,
+            workspace_dir,
+            last_event_id=request.headers.get("last-event-id"),
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -146,9 +152,8 @@ async def get_run_events_push(thread_id: str):
 
 
 async def _cancel_run_impl(thread_id: str):
-    runtime = _runtime()
-    with runtime.runs_lock:
-        run_info = runtime.active_runs.get(thread_id)
+    with runs_lock:
+        run_info = active_runs.get(thread_id)
 
     if not run_info:
         raise HTTPException(status_code=404, detail="未找到该线程的运行记录")
@@ -160,14 +165,14 @@ async def _cancel_run_impl(thread_id: str):
         raise HTTPException(status_code=400, detail=f"工作流状态为 {run_info.get('status')}，无法取消")
 
     try:
-        runtime.run_manager.request_cancel(thread_id)
+        run_manager.request_cancel(thread_id)
     except ValueError:
         pass
     run_info.set_status("cancelling")
-    workspace_dir = run_info.get("workspace_dir") or runtime._workspace_for_thread(thread_id)
-    runtime._sync_run_context(thread_id, workspace_dir)
-    runtime.event_store.update_session(thread_id, workspace_dir, status="cancelling")
-    runtime._emit_agenthub_event(
+    workspace_dir = run_info.get("workspace_dir") or workspace_for_thread(thread_id)
+    sync_run_context(thread_id, workspace_dir)
+    event_store.update_session(thread_id, workspace_dir, status="cancelling")
+    emit_agenthub_event(
         thread_id=thread_id,
         event_type="run_cancelling",
         title="正在取消运行",
@@ -184,14 +189,9 @@ async def cancel_run(thread_id: str):
     return await _cancel_run_impl(thread_id)
 
 
-@legacy_runtime_router.post("/{thread_id}/cancel")
-async def cancel_legacy_run(thread_id: str):
-    return await _cancel_run_impl(thread_id)
-
-
 @runtime_router.get("/runs/{thread_id}/runtime-state")
 async def get_run_runtime_state(thread_id: str):
-    sm = _runtime().run_manager.get_state_machine(thread_id)
+    sm = run_manager.get_state_machine(thread_id)
     if not sm:
         raise HTTPException(status_code=404, detail=f"Run 不在活跃列表中: {thread_id}")
     return {"thread_id": thread_id, "state": sm.to_dict()}
@@ -199,12 +199,11 @@ async def get_run_runtime_state(thread_id: str):
 
 @runtime_router.post("/runs/{thread_id}/resume")
 async def resume_run(thread_id: str):
-    runtime = _runtime()
-    sm = runtime.run_manager.get_state_machine(thread_id)
+    sm = run_manager.get_state_machine(thread_id)
     if sm:
         raise HTTPException(status_code=409, detail="Run 已在活跃列表中。")
 
-    session = runtime._session_for_thread(thread_id)
+    session = session_for_thread(thread_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
 
@@ -219,7 +218,7 @@ async def resume_run(thread_id: str):
     if not saved_messages:
         raise HTTPException(status_code=400, detail="该 run 没有保存的消息历史，无法恢复。")
 
-    workspace_dir = session.get("workspace_dir") or runtime._workspace_for_thread(thread_id)
+    workspace_dir = session.get("workspace_dir") or workspace_for_thread(thread_id)
     previous_status = session.get("status")
 
     run_context = RunContext(
@@ -229,14 +228,14 @@ async def resume_run(thread_id: str):
         status="running",
         conversation_id=session.get("conversation_id"),
     )
-    with runtime.runs_lock:
+    with runs_lock:
         try:
-            runtime.run_manager.register(run_context)
+            run_manager.register(run_context)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    runtime.event_store.update_session(thread_id, workspace_dir, status="running")
-    runtime.event_store.append_event(
+    event_store.update_session(thread_id, workspace_dir, status="running")
+    event_store.append_event(
         thread_id,
         "run_resumed",
         title="Run 已恢复",
@@ -258,14 +257,13 @@ async def resume_run(thread_id: str):
     if runtime_instructions:
         system = f"{system}\n{runtime_instructions}"
 
-    worker = threading.Thread(
-        target=runtime._run_workflow_from_messages,
-        args=(thread_id, saved_messages, system, workspace_dir),
-        daemon=True,
+    start_resumed_workflow_thread(
+        thread_id=thread_id,
+        messages=saved_messages,
+        system=system,
+        workspace_dir=workspace_dir,
+        run_context=run_context,
     )
-    with runtime.runs_lock:
-        runtime.active_runs[thread_id].thread = worker
-    worker.start()
 
     return {"thread_id": thread_id, "status": "running", "ok": True, "resumed_from": previous_status}
 
@@ -273,9 +271,8 @@ async def resume_run(thread_id: str):
 @runtime_router.get("/runs/{thread_id}/lifecycle")
 async def get_run_lifecycle(thread_id: str):
     """Get the full lifecycle status, history, and stage progress of a run."""
-    runtime = _runtime()
-    sm = runtime.run_manager.get_state_machine(thread_id)
-    session = runtime._session_for_thread(thread_id)
+    sm = run_manager.get_state_machine(thread_id)
+    session = session_for_thread(thread_id)
     if not sm and not session:
         raise HTTPException(status_code=404, detail=f"Run 不存在: {thread_id}")
 
@@ -295,8 +292,7 @@ async def get_run_lifecycle(thread_id: str):
 @runtime_router.post("/runs/{thread_id}/retry")
 async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
     """Create a new run from a failed/cancelled previous run."""
-    runtime = _runtime()
-    session = runtime._session_for_thread(thread_id)
+    session = session_for_thread(thread_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"原 run 不存在: {thread_id}")
 
@@ -311,11 +307,17 @@ async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
     retry_mode = request.retry_mode if request.retry_mode in {"full", "failed_stage"} else "full"
     new_thread_id = str(uuid.uuid4())
     original_prompt = session.get("prompt", "")
-    run_workspace = session.get("workspace_dir", runtime._get_workspace())
+    run_workspace = session.get("workspace_dir", get_workspace())
     team = session.get("team", [])
     execution_plan = session.get("execution_plan", {})
-    retry_context = runtime._retry_context_for_run(thread_id, run_workspace, request.failure_id)
-    prompt = runtime._build_retry_prompt(
+    retry_context = collect_retry_context(
+        thread_id=thread_id,
+        workspace_dir=run_workspace,
+        event_store=event_store,
+        session=session,
+        failure_id=request.failure_id,
+    )
+    prompt = build_retry_prompt(
         original_prompt=original_prompt,
         original_thread_id=thread_id,
         original_status=original_status,
@@ -333,20 +335,20 @@ async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
         team=team,
         execution_plan=execution_plan,
     )
-    with runtime.runs_lock:
+    with runs_lock:
         try:
-            runtime.run_manager.register(run_context)
+            run_manager.register(run_context)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    runtime.event_store.create_session(
+    event_store.create_session(
         thread_id=new_thread_id,
         prompt=prompt,
         workspace_dir=run_workspace,
         status="running",
         mode="retry",
     )
-    runtime.event_store.update_session(
+    event_store.update_session(
         new_thread_id,
         run_workspace,
         **run_context.session_metadata(),
@@ -357,9 +359,9 @@ async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
         retry_context=retry_context,
     )
     stage_updates = run_context.start_first_stage()
-    runtime._sync_run_context(new_thread_id, run_workspace)
-    runtime._emit_stage_updates(new_thread_id, run_workspace, stage_updates)
-    runtime.event_store.append_event(
+    sync_run_context(new_thread_id, run_workspace)
+    emit_stage_updates(new_thread_id, run_workspace, stage_updates)
+    event_store.append_event(
         thread_id=new_thread_id,
         event_type="run_retried",
         title="Run 已重试",
@@ -375,13 +377,12 @@ async def retry_run(thread_id: str, request: RetryRunRequest | None = None):
         workspace_dir=run_workspace,
     )
 
-    worker = threading.Thread(
-        target=runtime._run_workflow,
-        args=(new_thread_id, [HumanMessage(content=prompt)], run_workspace),
-        daemon=True,
+    start_workflow_thread(
+        thread_id=new_thread_id,
+        initial_messages=[HumanMessage(content=prompt)],
+        workspace_dir=run_workspace,
+        run_context=run_context,
     )
-    run_context.thread = worker
-    worker.start()
 
     return {
         "original_thread_id": thread_id,
@@ -590,13 +591,13 @@ async def post_action_check(thread_id: str, request: ActionCheckRequest):
 @router.post("/{thread_id}/actions/execute")
 async def post_action_execute(thread_id: str, request: ActionExecuteRequest):
     """Execute an action through the unified pipeline."""
-    from src.api.services.action_execution_service import execute_action
+    from src.api.services.action_execution_service import execute_action_async
     workspace = _workspace_for_run(thread_id)
     payload = dict(request.payload or {})
     if request.approval_id:
         payload["approval_id"] = request.approval_id
 
-    return execute_action(
+    return await execute_action_async(
         kind=request.kind,
         target=request.target,
         payload=payload,

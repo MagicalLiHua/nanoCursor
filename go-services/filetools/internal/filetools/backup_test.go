@@ -48,6 +48,20 @@ func TestListBackups(t *testing.T) {
 	}
 }
 
+func TestBackupFileNamesDoNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "data.txt"), []byte("first"), 0644)
+
+	first := BackupFile(dir, "data.txt")
+	second := BackupFile(dir, "data.txt")
+	if first == "" || second == "" {
+		t.Fatal("expected backup paths")
+	}
+	if first == second {
+		t.Fatalf("expected unique backup names, got %s", first)
+	}
+}
+
 func TestBackupNonExistent(t *testing.T) {
 	dir := t.TempDir()
 	result := BackupFile(dir, "nonexistent.txt")

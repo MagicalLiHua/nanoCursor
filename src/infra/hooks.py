@@ -7,10 +7,10 @@ Hook Manager - 借鉴 s08_hook_system.py
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 from src.infra.config import WORKSPACE_DIR
+from src.runtime.command_runner import run_command
 WORKDIR = Path(WORKSPACE_DIR)
 
 
@@ -124,19 +124,20 @@ class HookManager:
             hook_env["TOOL_OUTPUT"] = context.get("tool_output", "")
 
             try:
-                result = subprocess.run(
+                result = run_command(
                     command,
-                    shell=True,
                     cwd=WORKDIR,
-                    capture_output=True,
-                    timeout=30,
+                    timeout_seconds=30,
+                    max_stdout_chars=20000,
+                    max_stderr_chars=5000,
+                    permission_level="shell_safe",
                     env=hook_env,
                 )
-                stdout = result.stdout.decode("utf-8", errors="replace")
+                stdout = str(result.get("stdout") or "")
                 try:
                     return json.loads(stdout)
                 except json.JSONDecodeError:
-                    return {"exit_code": result.returncode, "output": stdout}
+                    return {"exit_code": int(result.get("exit_code") or 0), "output": stdout}
             except Exception as e:
                 return {"exit_code": 0, "error": str(e)}
 
