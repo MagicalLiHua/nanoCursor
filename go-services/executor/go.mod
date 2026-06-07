@@ -5,7 +5,10 @@ go 1.25.5
 require (
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
+	nanocursor/go-services/policy v0.0.0
 )
+
+replace nanocursor/go-services/policy => ../policy
 
 require (
 	golang.org/x/net v0.51.0 // indirect
