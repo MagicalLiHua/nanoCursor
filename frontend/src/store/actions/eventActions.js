@@ -21,8 +21,96 @@ function normalizeAgentName(agent, payload = {}) {
   return known[clean.toLowerCase()] || clean;
 }
 
-function isExplicitAgentWorkEvent(eventType, payload = {}) {
-  if (eventType === "agent_activity") return true;
+const ACTIVITY_EVENT_TYPES = new Set([
+  "agent_activity",
+  "tool_call_finished",
+  "tool_approval_required",
+  "run_waiting_approval",
+  "approval_resolved",
+]);
+
+const INTERNAL_NOISE_PATTERNS = [
+  /ev_poll_posix/i,
+  /FD from fork parent still in poll list/i,
+  /^\s*I\d{4}\s+\d{2}:\d{2}:\d{2}/,
+  /grpc\._cython/i,
+  /poller_completion_queue/i,
+];
+
+const TOOL_LABELS = {
+  bash: "执行命令",
+  run_command: "执行命令",
+  shell: "执行命令",
+  read_file: "读取",
+  write_file: "写入",
+  edit_file: "编辑",
+  replace_file: "替换",
+  list_directory: "列出目录",
+  search_codebase: "搜索",
+  run_tests: "运行测试",
+  project_context: "读取上下文",
+  task_create: "创建任务",
+  task_update: "更新任务",
+};
+
+function compactPath(value = "") {
+  const text = String(value || "").trim().replace(/\\/g, "/");
+  if (!text) return "";
+  const parts = text.split("/").filter(Boolean);
+  if (text.startsWith("/") && parts.length > 5) return `.../${parts.slice(-4).join("/")}`;
+  if (text.length <= 88) return text;
+  return `.../${parts.slice(-4).join("/")}`;
+}
+
+function cleanActivityPreview(value = "") {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !INTERNAL_NOISE_PATTERNS.some((pattern) => pattern.test(line)))
+    .find(Boolean) || "";
+}
+
+function readPayloadObject(payload = {}) {
+  const candidates = [payload.input, payload.args, payload.arguments, payload.params, payload.payload];
+  return candidates.find((item) => item && typeof item === "object" && !Array.isArray(item)) || {};
+}
+
+function pickToolTarget(payload = {}) {
+  const input = readPayloadObject(payload);
+  const target = input.path || input.file || input.filename || input.target ||
+    payload.path || payload.file || payload.filename || payload.target ||
+    payload.capability_trace?.target;
+  return compactPath(target);
+}
+
+function pickToolCommand(payload = {}, content = "") {
+  const input = readPayloadObject(payload);
+  return cleanActivityPreview(
+    input.command || input.cmd || payload.command || payload.cmd || content || payload.output,
+  );
+}
+
+export function summarizeToolActivity(payload = {}, content = "") {
+  const tool = payload?.tool || payload?.capability_trace?.capability_name || "tool";
+  const label = TOOL_LABELS[tool] || `调用 ${tool}`;
+  const target = pickToolTarget(payload);
+
+  if (["bash", "run_command", "shell"].includes(tool)) {
+    const command = pickToolCommand(payload, content);
+    return command ? `${label}：${command}` : `${label}完成`;
+  }
+
+  if (target) {
+    return `${label}：${target}`;
+  }
+
+  const preview = cleanActivityPreview(content || payload?.output || payload?.result);
+  return preview ? `${label}：${preview}` : `${label}完成`;
+}
+
+export function isExplicitAgentWorkEvent(eventType, payload = {}) {
+  if (ACTIVITY_EVENT_TYPES.has(eventType)) return true;
   if (["parallel_agent_progress", "parallel_agent_result", "parallel_agent_failed"].includes(eventType)) return true;
   if (["agent_run_started", "agent_result_merged", "agent_run_failed"].includes(eventType)) return true;
   if (eventType === "ephemeral_agent_updated") {
@@ -34,7 +122,7 @@ function isExplicitAgentWorkEvent(eventType, payload = {}) {
   return false;
 }
 
-function activityText({ title, content, eventType, payload }) {
+export function activityText({ title, content, eventType, payload }) {
   if (eventType === "agent_activity") {
     const phase = payload?.phase ? ` · ${payload.phase}` : "";
     return `${content || title || "Agent 正在工作"}${phase}`.slice(0, 220);
@@ -53,9 +141,7 @@ function activityText({ title, content, eventType, payload }) {
   if (eventType === "ephemeral_agent_completed") return `${payload?.name || "临时 Agent"} 已完成并准备归档。`;
   if (eventType === "ephemeral_agent_archived") return `${payload?.name || "临时 Agent"} 已自动归档。`;
   if (eventType === "tool_call_finished") {
-    const tool = payload?.tool || payload?.capability_trace?.capability_name || "tool";
-    const preview = String(content || payload?.output || "").split("\n").find(Boolean) || "工具调用完成。";
-    return `调用 ${tool}: ${preview}`.slice(0, 180);
+    return summarizeToolActivity(payload, content).slice(0, 180);
   }
   if (eventType === "stage_updated") {
     const status = payload?.status ? ` -> ${payload.status}` : "";

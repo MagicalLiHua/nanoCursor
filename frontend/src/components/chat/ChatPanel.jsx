@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { approvalDecisionLabel, shortId, agentToneFromName, statusLabel } from "../../core/format.js";
+import { shouldSubmitOnEnter } from "../../core/keyboard.js";
+import { cleanAssistantMessageForDisplay } from "../../core/messageDisplay.js";
 import { renderMarkdown } from "../../core/markdown.js";
 import { ArrowUp, Code2, FolderSearch, Pencil, Plus, Timer } from "lucide-react";
 import AgentActivityStream from "./AgentActivityStream.jsx";
-import ToolCallBubble from "./ToolCallBubble.jsx";
 import {
   agentActivityKey,
   currentAgentActivities,
@@ -32,6 +33,7 @@ function AgentAvatar({ name, tone, extraClass = "" }) {
 
 function WelcomeScreen({ onSubmit }) {
   const [inputValue, setInputValue] = React.useState("");
+  const isComposingRef = React.useRef(false);
   const suggestions = [
     { icon: Code2, label: "写代码", prompt: "帮我实现一个小功能，并给出测试说明" },
     { icon: Pencil, label: "改代码", prompt: "帮我阅读当前项目并优化一个可以改进的地方" },
@@ -61,8 +63,14 @@ function WelcomeScreen({ onSubmit }) {
             className="welcome-input"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (shouldSubmitOnEnter(e, isComposingRef.current)) {
                 e.preventDefault();
                 submitInput();
               }
@@ -90,6 +98,7 @@ function WelcomeScreen({ onSubmit }) {
 function Message({ message, index }) {
   const isUser = message.role === "user";
   const tone = isUser ? "user" : agentToneFromName(message.author);
+  const assistantContent = isUser ? "" : cleanAssistantMessageForDisplay(message.content);
   return (
     <article className={`message ${isUser ? "user" : ""}`} data-message-role={message.role} data-message-index={index}>
       <AgentAvatar name={message.author || "用户"} tone={tone} extraClass="avatar" />
@@ -101,7 +110,7 @@ function Message({ message, index }) {
         {isUser ? (
           <p className="message-text">{message.content}</p>
         ) : (
-          <div className="message-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
+          <div className="message-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(assistantContent || message.content) }} />
         )}
       </div>
     </article>
@@ -120,23 +129,6 @@ function AgentWorkMessage({ activity, compact = false }) {
           <span className="message-time">{activity.time || "实时"}</span>
         </div>
         <AgentActivityStream activities={[activity]} maxItems={1} />
-      </div>
-    </article>
-  );
-}
-
-function ToolCallMessage({ event }) {
-  const agent = event.payload?.capability_trace?.agent || event.agent || "Agent";
-  const tone = agentToneFromName(agent);
-  return (
-    <article className="message assistant tool-message" data-message-role="tool-call">
-      <AgentAvatar name={agent} tone={tone} extraClass="avatar" />
-      <div className="bubble">
-        <div className="message-head">
-          <span className="message-author">{agent}</span>
-          <span className="message-time">{event.time || ""}</span>
-        </div>
-        <ToolCallBubble event={event} />
       </div>
     </article>
   );
@@ -219,6 +211,7 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
   const messageListRef = useRef(null);
   const previousRunningRef = useRef(false);
   const previousMessageCountRef = useRef(0);
+  const isComposingRef = useRef(false);
   const running = ["running", "waiting_approval", "cancelling"].includes(state.status);
   const cancelling = state.status === "cancelling";
   const statusClass = state.status === "running" || state.status === "replaying" ? "running"
@@ -342,11 +335,6 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
               ))}
             </React.Fragment>
           ))}
-          {running && (state.events || [])
-            .filter((e) => e.type === "tool_call_finished")
-            .slice(-3)
-            .map((e, i) => <ToolCallMessage key={`tool-${i}`} event={e} />)
-          }
           {streamingContent && (
             <div className="message assistant streaming">
               <AgentAvatar name="Lead" tone="lead" extraClass="avatar" />
@@ -379,8 +367,14 @@ export default function ChatPanel({ state, isActionBusy, onSubmit, onCancel, onF
             title="Enter 发送，Shift + Enter 换行"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (shouldSubmitOnEnter(e, isComposingRef.current)) {
                 e.preventDefault();
                 submitDraft();
               }

@@ -24,10 +24,28 @@ const TERMINAL_ACTIVITY_STATUSES = new Set([
 ]);
 
 export function agentActivityKey(activity = {}) {
-  return String(activity.agent || "Lead")
+  const explicitId = activity.payload?.agent_id ||
+    activity.payload?.agent?.agent_id ||
+    activity.payload?.capability_trace?.agent_id;
+  if (explicitId) return String(explicitId).trim().toLowerCase();
+
+  const key = String(activity.agent || activity.payload?.capability_trace?.agent || "Lead")
     .replace(/\s*Agent$/i, "")
     .trim()
-    .toLowerCase() || "lead";
+    .toLowerCase();
+  const aliases = {
+    lead: "lead",
+    planner: "planner",
+    coder: "coder",
+    tester: "tester",
+    reviewer: "reviewer",
+    designer: "designer",
+    devops: "devops",
+    security: "security",
+    migration: "migration",
+    system: "system",
+  };
+  return aliases[key] || key || "lead";
 }
 
 export function isTerminalAgentActivity(activity = {}) {
@@ -77,7 +95,7 @@ export function buildAgentActivityQueue(activities = [], { initialQueue = [], ..
   );
 }
 
-export function currentAgentActivities(activities = [], { running = false, limit = 4 } = {}) {
+export function currentAgentActivities(activities = [], { running = false, limit = 6 } = {}) {
   if (!running) return [];
   return activities
     .filter((activity) => !isTerminalAgentActivity(activity))

@@ -5,11 +5,17 @@ import {
   applyRunSnapshot,
   mergeConversationMessages,
 } from "../../src/hydrators/runHydrator.js";
+import { cleanAssistantMessageForDisplay } from "../../src/core/messageDisplay.js";
+import {
+  activityText,
+  isExplicitAgentWorkEvent,
+} from "../../src/store/actions/eventActions.js";
 import {
   canStartRun,
   mapConversationMessages,
 } from "../../src/store/actions/runActions.js";
 import {
+  agentActivityKey,
   buildAgentActivityQueue,
   currentAgentActivities,
   latestUserMessageIndex,
@@ -258,6 +264,69 @@ test("runtime activity belongs only below the latest user turn", () => {
     ["latest lead work", "editing"],
   );
   assert.deepEqual(currentAgentActivities(activities, { running: false }), []);
+});
+
+
+test("tool calls are folded into the owning agent activity instead of separate chat cards", () => {
+  const first = {
+    agent: "Coder Agent",
+    text: "正在编辑文件",
+    eventType: "agent_activity",
+    explicitAgentWork: true,
+    time: "10:00",
+  };
+  const tool = {
+    agent: "Coder",
+    text: activityText({
+      eventType: "tool_call_finished",
+      payload: {
+        tool: "write_file",
+        path: "/Users/huali/code/python/nanoCursor/tests/src/solution.py",
+        capability_trace: { agent: "Coder" },
+      },
+      content: "Created /Users/huali/code/python/nanoCursor/tests/src/solution.py",
+    }),
+    eventType: "tool_call_finished",
+    explicitAgentWork: isExplicitAgentWorkEvent("tool_call_finished"),
+    time: "10:01",
+    payload: { tool: "write_file", capability_trace: { agent: "Coder" } },
+  };
+
+  const queue = buildAgentActivityQueue([first, tool]);
+
+  assert.equal(queue.length, 1);
+  assert.equal(agentActivityKey(first), agentActivityKey(tool));
+  assert.equal(queue[0].text, "写入：.../nanoCursor/tests/src/solution.py");
+});
+
+
+test("tool activity summary hides runtime internals", () => {
+  const text = activityText({
+    eventType: "tool_call_finished",
+    payload: { tool: "bash", args: { command: "pytest -q" } },
+    content: "I0607 16:47:06.372977 11316507 ev_poll_posix.cc:593 FD from fork parent still in poll list",
+  });
+
+  assert.equal(text, "执行命令：pytest -q");
+  assert.equal(/ev_poll_posix|FD from fork/.test(text), false);
+});
+
+
+test("assistant display cleanup removes phase glue and low level runtime noise", () => {
+  const cleaned = cleanAssistantMessageForDisplay(`
+好的，我来完成。
+阶段 1：接收需求与上下文边界
+## 阶段 2：任务拆解与验收标准
+I0607 16:47:06.372977 11316507 ev_poll_posix.cc:593 FD from fork parent still in poll list
+
+完成内容
+- 已创建测试文件
+`);
+
+  assert.equal(cleaned.includes("阶段 1"), false);
+  assert.equal(cleaned.includes("阶段 2"), false);
+  assert.equal(cleaned.includes("ev_poll_posix"), false);
+  assert.equal(cleaned.includes("完成内容"), true);
 });
 
 
