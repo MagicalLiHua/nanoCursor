@@ -54,6 +54,9 @@ frontend/dist/
 frontend/.vite/
 frontend/test-results/
 frontend/playwright-report/
+learning-site/node_modules/
+learning-site/dist/
+learning-site/.vite/
 
 # ==========================================
 # nanoCursor Runtime Artifacts

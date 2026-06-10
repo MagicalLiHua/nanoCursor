@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from src.api.dependencies import get_workspace, raise_404, raise_400
 from src.api.models import (
@@ -18,6 +21,13 @@ from src.api.services.agent_eval_service import (
     list_agent_eval_catalog,
     run_agent_eval_suite,
     summarize_agent_eval_runs,
+)
+from src.api.services.ablation_benchmark_service import (
+    build_ablation_matrix,
+    build_component_necessity_report,
+    list_ablation_components,
+    run_ablation_suite,
+    save_ablation_artifacts,
 )
 from src.api.services.eval_service import (
     compare_eval_runs, compare_eval_runs_detailed, get_eval_artifacts,
@@ -45,6 +55,29 @@ from src.api.services.run_eval_metrics_service import (
 )
 
 router = APIRouter(prefix="/api/evals", tags=["evals"])
+
+
+class AblationMatrixRequest(BaseModel):
+    eval_ids: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    include_baseline: bool = True
+    repetitions: int = Field(default=1, ge=1, le=20)
+    mode: str = "deterministic"
+
+
+class AblationReportRequest(BaseModel):
+    suite: dict[str, Any] = Field(default_factory=dict)
+    matrix: list[dict[str, Any]] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    persist: bool = False
+
+
+class AblationSuiteRunRequest(BaseModel):
+    eval_ids: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    repetitions: int = Field(default=1, ge=1, le=10)
+    mode: str = "deterministic"
+    persist: bool = True
 
 
 @router.get("")
@@ -156,6 +189,56 @@ async def runtime_run_eval_metrics(thread_id: str):
     if result.get("status") == "not_found":
         raise_404(f"Run 不存在: {thread_id}")
     return result
+
+
+@router.get("/ablation/components")
+async def ablation_components():
+    """Return supported components for ablation benchmarks."""
+    return {"components": list_ablation_components()}
+
+
+@router.post("/ablation/matrix")
+async def ablation_matrix(request: AblationMatrixRequest):
+    """Build baseline + single-component-disable ablation matrix."""
+    try:
+        return build_ablation_matrix(
+            request.eval_ids,
+            request.components,
+            include_baseline=request.include_baseline,
+            repetitions=request.repetitions,
+            mode=request.mode,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        raise_400(str(exc))
+
+
+@router.post("/ablation/report")
+async def ablation_report(request: AblationReportRequest):
+    """Score component contribution from completed ablation results."""
+    suite_result = {
+        "suite": request.suite,
+        "matrix": request.matrix,
+        "results": request.results,
+    }
+    if request.persist:
+        return save_ablation_artifacts(get_workspace(), suite_result)
+    return build_component_necessity_report(suite_result)
+
+
+@router.post("/ablation/suite/run")
+async def ablation_suite_run(request: AblationSuiteRunRequest):
+    """Run a baseline + single-disable ablation suite."""
+    try:
+        return run_ablation_suite(
+            get_workspace(),
+            request.eval_ids,
+            request.components,
+            repetitions=request.repetitions,
+            mode=request.mode,  # type: ignore[arg-type]
+            persist=request.persist,
+        )
+    except ValueError as exc:
+        raise_400(str(exc))
 
 
 @router.get("/{eval_id}")

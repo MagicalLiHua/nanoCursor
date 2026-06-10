@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-soft: #f3f5f8;
+  --text: #1f232b;
+  --muted: #687284;
+  --faint: #9aa3b2;
+  --border: #e1e6ee;
+  --border-strong: #cfd7e3;
+  --accent: #2f6df6;
+  --accent-soft: #eef4ff;
+  --green: #16875d;
+  --green-soft: #e7f7ef;
+  --yellow: #9c6a05;
+  --shadow: 0 18px 50px rgba(29, 39, 59, 0.08);
+  --radius: 18px;
+  --radius-sm: 10px;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 1080px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  letter-spacing: 0;
+  overscroll-behavior: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: #cfe0ff;
+}

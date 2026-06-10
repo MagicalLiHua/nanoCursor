@@ -48,6 +48,10 @@ class FailureRecord(BaseModel):
     thread_id: str
     failure_class: FailureClass
     title: str
+    summary: str = ""
+    stage_id: str | None = None
+    task_id: str | None = None
+    agent: str = ""
     evidence: dict[str, Any] = Field(default_factory=dict)
     related_files: list[str] = Field(default_factory=list)
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)

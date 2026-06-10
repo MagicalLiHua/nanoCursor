@@ -665,6 +665,13 @@ def check_loop_action_guard(
     route = state.intent.route
     execution_route = state.intent.execution_route
     blocked_reason = ""
+    recovery_context = payload.get("recovery_context") if isinstance(payload, dict) else None
+    if (
+        isinstance(recovery_context, dict)
+        and recovery_context.get("mode") == "failure_recovery"
+        and permission in {"read_only", "shell_safe"}
+    ):
+        return None
     if execution_route == "lead_direct_reply" and permission not in {"read_only", "mcp_read"}:
         blocked_reason = f"{route} 只允许 Lead 直接回答或只读动作，禁止调用 {permission} 工具。"
     elif route in {"read_only", "review_only", "test_only"} and permission in {"safe_write", "risky_write", "mcp_write"}:

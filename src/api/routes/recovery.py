@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import queue
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from src.api.models import (
     GitCommitRequest,
@@ -27,6 +28,15 @@ from src.api.run_state import (
 )
 from src.api.services.checkpoint_service import create_checkpoint, list_checkpoints, restore_checkpoint
 from src.api.services.git_sandbox_service import commit_branch, discard_branch, git_branch_status, prepare_git_branch
+from src.api.services.failure_recovery_loop_service import (
+    execute_recovery_agent_task_async,
+    execute_recovery_plan_async,
+    get_recovery_loop_state,
+    get_recovery_plan,
+    plan_latest_failure_recovery,
+    prepare_recovery_agent_task,
+    stop_recovery_loop,
+)
 from src.api.services.observability_service import build_run_observability
 from src.api.services.recovery_action_service import execute_recovery_action
 from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
@@ -83,6 +93,100 @@ async def run_recovery_action(thread_id: str, action_id: str, request: RecoveryA
             detail={"action_id": action_id, "target": target, "target_path": request.target_path},
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- Failure Recovery Loop ---
+
+@router.get("/api/runs/{thread_id}/recovery-loop")
+async def get_run_recovery_loop(thread_id: str):
+    return get_recovery_loop_state(thread_id, workspace_for_thread(thread_id))
+
+
+@router.post("/api/runs/{thread_id}/recovery-loop/plan")
+async def plan_run_recovery_loop(
+    thread_id: str,
+    request: dict[str, Any] = Body(default_factory=dict),
+):
+    workspace = workspace_for_thread(thread_id)
+    try:
+        return plan_latest_failure_recovery(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            event_id=request.get("event_id") if isinstance(request, dict) else None,
+            tool_result=request.get("tool_result") if isinstance(request, dict) else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/api/runs/{thread_id}/recovery-loop/execute")
+async def execute_run_recovery_loop(
+    thread_id: str,
+    request: dict[str, Any] = Body(default_factory=dict),
+):
+    workspace = workspace_for_thread(thread_id)
+    try:
+        return await execute_recovery_plan_async(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            plan_id=request.get("plan_id") if isinstance(request, dict) else None,
+            auto_execute=bool(request.get("auto_execute", True)) if isinstance(request, dict) else True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/api/runs/{thread_id}/recovery-loop/stop")
+async def stop_run_recovery_loop(
+    thread_id: str,
+    request: dict[str, Any] = Body(default_factory=dict),
+):
+    workspace = workspace_for_thread(thread_id)
+    reason = request.get("reason") if isinstance(request, dict) else None
+    return stop_recovery_loop(thread_id, workspace, reason=str(reason or "用户停止恢复流程。"))
+
+
+@router.post("/api/runs/{thread_id}/recovery-loop/agent-task/prepare")
+async def prepare_run_recovery_agent_task(
+    thread_id: str,
+    request: dict[str, Any] = Body(default_factory=dict),
+):
+    workspace = workspace_for_thread(thread_id)
+    try:
+        return prepare_recovery_agent_task(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            task_id=request.get("task_id") if isinstance(request, dict) else None,
+            plan_id=request.get("plan_id") if isinstance(request, dict) else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/api/runs/{thread_id}/recovery-loop/agent-task/execute")
+async def execute_run_recovery_agent_task(
+    thread_id: str,
+    request: dict[str, Any] = Body(default_factory=dict),
+):
+    workspace = workspace_for_thread(thread_id)
+    try:
+        return await execute_recovery_agent_task_async(
+            thread_id=thread_id,
+            workspace_dir=workspace,
+            task_id=request.get("task_id") if isinstance(request, dict) else None,
+            plan_id=request.get("plan_id") if isinstance(request, dict) else None,
+            auto_validate=bool(request.get("auto_validate", True)) if isinstance(request, dict) else True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/runs/{thread_id}/failures/{failure_id}/recovery-plan")
+async def get_run_failure_recovery_plan(thread_id: str, failure_id: str):
+    plan = get_recovery_plan(thread_id, failure_id, workspace_for_thread(thread_id))
+    if not plan:
+        raise HTTPException(status_code=404, detail="未找到该失败对应的恢复计划。")
+    return plan
 
 
 # --- Remediation ---
