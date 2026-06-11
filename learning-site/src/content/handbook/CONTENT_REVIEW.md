@@ -32,9 +32,9 @@
 | 10 Go Sidecar | 已升级 | 补充 Go sidecar 边界、成熟度分层、性能取舍、跨语言一致性和面试表达 |
 | 11 MCP 与 Skills | 已升级 | 补充 MCP/Skills 区别、成熟工具对比、GitHub Skills 风险、上下文和权限治理 |
 | 12 前端可观测 | 已校准 | 校准 React + Zustand 路径，明确前端是事件消费层 |
-| 13 测试与质量 | 可直接学习 | 内容方向正确，重点读 contract test 和真实任务 smoke test |
+| 13 测试与质量 | 已升级 | 补充 benchmark、context window、ablation、CI 失败排查和质量体系面试表达 |
 | 14 启动与配置 | 已校准 | 修正 Go 启动命令，从旧 `cmd/server` 改为脚本和 `cmd/nanocursor-*` |
-| 15 项目复盘 | 已校准 | 补充失败恢复、组件价值评估，修正 Go eventstore 表述 |
+| 15 项目复盘 | 已升级 | 补充组件价值证明、最终项目定位、收尾优先级和面试复盘模板 |
 
 ## 当前最建议的学习顺序
 
@@ -49,6 +49,7 @@
 7. 做 `exercises/02-trace-one-real-run.md`，用问候、只读分析、代码交付三类任务验证链路。
 8. 做 `exercises/03-memory-tool-governance-lab.md`，验证记忆选择、规则记忆、shell 分类和 approval。
 9. 面试前读 `15-project-retrospective.md`、`interview/01-project-pitch.md`、`interview/03-agent-loop-deep-dive.md` 和 `interview/04-context-and-memory.md`。
+10. 临近面试时集中刷 `interview/09-four-day-final-drill.md`，把尖锐追问、源码定位和口述稿练熟。
 
 ## 还需要人工深读的地方
 
@@ -82,8 +83,8 @@
 下一轮建议继续升级：
 
 1. `chapters/12-frontend-observability.md`：可适当压缩，不要让前端材料喧宾夺主。
-2. `chapters/13-testing-and-quality.md`：补充 benchmark、ablation、contract test 和 CI 失败排查。
-3. `chapters/15-project-retrospective.md`：最终收束项目价值、边界和简历讲法。
+2. `maps/backend-code-map.md`：后续如代码继续调整，需要校准最新服务入口。
+3. `interview/01-project-pitch.md`：最后可按简历版本再微调项目讲述。
 
 ## 2026-06-11 第二轮内容升级记录
 
@@ -137,3 +138,38 @@
 |---|---|
 | `chapters/10-go-sidecar.md` | 把 Go 从“语言占比”讲成“确定性系统边界”，补充性能取舍和 sidecar 成熟度分层 |
 | `chapters/11-mcp-and-skills.md` | 把 MCP/Skills 从“功能菜单”讲成“工具协议 + 行为规范 + 安全治理” |
+
+## 2026-06-11 第五轮内容升级记录
+
+本轮完成测试、Benchmark、消融实验和项目复盘的收束。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `exercises/04-run-benchmark-and-ablation.md` | 通过真实任务 benchmark、上下文窗口 benchmark 和组件消融实验验证系统模块价值 |
+| `interview/08-testing-benchmark-retrospective.md` | 准备测试体系、benchmark、消融实验、CI 排查和项目复盘相关追问 |
+
+升级章节：
+
+| 章节 | 升级重点 |
+|---|---|
+| `chapters/13-testing-and-quality.md` | 从测试清单升级为“正确性测试 + 有效性 benchmark + 组件消融”的质量体系 |
+| `chapters/15-project-retrospective.md` | 把项目复盘收束为最终定位、组件价值证明、主线讲法和诚实边界 |
+
+## 2026-06-11 第六轮内容升级记录
+
+本轮补充面试前四天冲刺材料，重点解决“会看文档但现场说不出来”的问题。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `interview/09-four-day-final-drill.md` | 面试前 4 天复习节奏、1/3/8 分钟口述稿、尖锐追问攻防、源码定位速查、系统设计延伸题 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `README.md` | 把四天冲刺文档加入最终面试学习顺序 |
+| `CONTENT_REVIEW.md` | 补充第六轮升级记录和临场复习建议 |

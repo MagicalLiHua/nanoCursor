@@ -17,8 +17,10 @@
 9. 做 `exercises/01-read-the-request-lifecycle.md`，验证自己是否真的看懂。
 10. 做 `exercises/02-trace-one-real-run.md`，用三个真实任务追踪 run、事件、上下文和工具调用。
 11. 做 `exercises/03-memory-tool-governance-lab.md`，把记忆选择、工具权限和失败恢复串起来验证。
-12. 准备面试时先看 `interview/01-project-pitch.md`，再看 `interview/03-agent-loop-deep-dive.md`、`interview/04-context-and-memory.md`、`interview/05-tools-recovery-and-observability.md`、`interview/06-go-mcp-and-project-boundary.md`。
-13. 最后刷 `interview/07-interview-question-bank.md`，按模块快速过一遍高频追问。
+12. 做 `exercises/04-run-benchmark-and-ablation.md`，学会用 benchmark 和消融实验证明组件价值。
+13. 准备面试时先看 `interview/01-project-pitch.md`，再看 `interview/03-agent-loop-deep-dive.md`、`interview/04-context-and-memory.md`、`interview/05-tools-recovery-and-observability.md`、`interview/06-go-mcp-and-project-boundary.md`、`interview/08-testing-benchmark-retrospective.md`。
+14. 面试前 4 天重点刷 `interview/09-four-day-final-drill.md`，练尖锐追问、源码定位和 1/3/8 分钟口述。
+15. 最后刷 `interview/07-interview-question-bank.md`，按模块快速过一遍高频追问。
 
 ## 学习闭环
 
@@ -45,6 +47,8 @@
 - 上下文管理深度章节
 - 工具治理深度章节
 - MCP/Skills 深度章节
+- 测试、Benchmark、消融实验与项目复盘深度章节
+- 面试前四天冲刺：尖锐追问、源码定位、口述训练
 - React 学习站：导航、搜索、大纲、阅读进度、Markdown 渲染
 - 本轮校订：压缩低密度列表，校准 Go sidecar 启动命令、Agent Loop、上下文、失败恢复和学习站阅读体验
 

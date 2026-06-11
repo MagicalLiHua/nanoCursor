@@ -253,3 +253,147 @@ tests/test_tool_approval_flow.py      # 工具→审批→执行→拒绝 完整
 2. **读一个 contract test**：打开 `tests/contracts/test_filetools_contract.py`，找出至少 3 个测试用例，说明每个用例验证了什么"Python 和 Go 行为一致"的场景。
 3. **写一个简单的服务层测试**：参考 `tests/test_intent_router.py` 的风格，为 `classify_user_intent` 写一个测试用例——输入"帮我写一个排序算法"，断言返回的 route 不是 `direct_answer`。
 4. **跑一次真实任务 smoke test**：在真实工作区中运行 `scripts/run_real_task_smoke.py`（或 `tests/test_real_task_smoke.py`），观察它如何验证 Agent 的最终交付物。
+
+## 11. Benchmark 不是演示按钮，而是质量证据
+
+项目后期已经有三类 benchmark，不要把它们混在一起讲。
+
+| 类型 | 入口 | 证明什么 |
+|---|---|---|
+| 固定交付 benchmark | `src/api/services/benchmark_service.py` 的 `BENCHMARKS` | 系统能生成任务、文件、diff、测试和报告 |
+| 真实任务 benchmark | `REAL_TASK_BENCHMARKS` | intent router、Agent 创建、工具策略是否符合预期 |
+| 上下文窗口 benchmark | `run_context_window_pressure_benchmark` | context ledger、压缩策略、锚点保护是否有效 |
+
+对应 API：
+
+```text
+GET  /api/benchmarks
+POST /api/benchmarks/run
+GET  /api/benchmarks/real-tasks
+POST /api/benchmarks/real-tasks/run
+GET  /api/benchmarks/context-window
+POST /api/benchmarks/context-window/run
+```
+
+对应测试：
+
+```text
+tests/test_benchmark_routes.py
+```
+
+面试时可以这样解释：
+
+> 我没有只靠手动点前端验证项目，而是做了确定性 benchmark。真实任务 benchmark 验证路由、Agent 创建和工具权限是否符合预期；上下文窗口 benchmark 构造 token 压力，验证压缩能否降低 token，同时保护用户请求、当前计划和工具策略这些 P0 锚点。
+
+## 12. 消融实验：证明一个组件是否真的有用
+
+如果一个项目说“我有 Agent Loop、上下文、记忆、Go sidecar”，面试官可能追问：这些模块真的有必要吗？
+
+消融实验就是为了回答这个问题。
+
+当前消融服务在：
+
+```text
+src/api/services/ablation_config_service.py
+src/api/services/ablation_benchmark_service.py
+src/api/routes/evals.py
+tests/test_ablation_benchmark_service.py
+```
+
+核心思想：
+
+```text
+baseline
+  -> disable_agent_loop
+  -> disable_context_pack
+  -> disable_project_index
+  -> disable_failure_recovery
+  -> disable_go_sidecars
+  -> 计算组件 lift 和 verdict
+```
+
+组件列表来自 `COMPONENTS`：
+
+| 组件 | 主要观察指标 |
+|---|---|
+| `agent_loop` | task_success_rate、agent_noise_score、avg_turn_count |
+| `context_pack` | context_hit_rate、irrelevant_file_read_count、avg_tool_calls |
+| `project_index` | context_hit_rate、avg_tool_calls |
+| `memory_selection` | memory_precision、task_success_rate |
+| `skills` | task_success_rate、avg_turn_count |
+| `mcp_tools` | tool_execution_rate、fallback_success_rate |
+| `go_sidecars` | avg_duration_ms、tool_execution_rate、event_completeness |
+| `failure_recovery` | failure_recovery_rate、retry_count、task_success_rate |
+
+对应 API：
+
+```text
+GET  /api/evals/ablation/components
+POST /api/evals/ablation/matrix
+POST /api/evals/ablation/report
+POST /api/evals/ablation/suite/run
+GET  /api/evals/ablation/suites
+POST /api/evals/ablation/suites
+GET  /api/evals/ablation/suites/{suite_id}
+POST /api/evals/ablation/suites/{suite_id}/run
+GET  /api/evals/ablation/suites/{suite_id}/report
+GET  /api/evals/ablation/suites/{suite_id}/artifacts
+```
+
+消融结果不应该被夸大。它能证明的是：
+
+- 在当前 eval 集里，关闭某个模块会不会明显降分。
+- 哪些组件是 `necessary`、`useful`、`neutral`、`negative`。
+- 哪些组件目前只是管线可见，但还没有真实 runtime hook。
+
+它不能证明：
+
+- 模块在所有真实项目里都必然有效。
+- 一次 benchmark 分数就代表商业产品质量。
+- 组件越多越好。
+
+## 13. CI 失败时怎么排查
+
+GitHub 上测试失败时，不要一上来就改业务代码。先按这个顺序：
+
+1. **确认失败类别**：lint、unit test、contract test、frontend build、Go test、real task benchmark。
+2. **找最小失败文件**：比如 `tests/test_benchmark_routes.py::test_context_window_benchmark_routes`。
+3. **确认环境差异**：CI 没有本地 API key、没有 Go sidecar、路径不同、端口不同、Node/Python 版本不同。
+4. **确认是否写入真实工作区**：测试应该使用 `tmp_path`，不要污染用户目录。
+5. **确认是否依赖服务启动顺序**：Go sidecar 不应成为默认测试硬依赖。
+6. **确认断言是否过强**：LLM 相关测试要避免断言完整自然语言。
+
+推荐命令：
+
+```bash
+pytest tests/test_benchmark_routes.py -q
+pytest tests/test_ablation_benchmark_service.py -q
+pytest tests/contracts/test_filetools_contract.py -q
+ruff check .
+python learning-site/src/content/handbook/scripts/check_learning_package.py
+```
+
+## 14. 面试表达：如何讲“质量体系”
+
+### 30 秒回答
+
+nanoCursor 的质量体系不是只有单元测试。它有单元测试、服务层测试、API/SSE 集成测试、Python/Go contract test、真实任务 benchmark、上下文窗口 benchmark 和组件消融实验。这样可以分别证明：单个模块正确、跨语言行为一致、API 能跑通、上下文压缩有效、组件不是随便堆出来的。
+
+### 深入回答
+
+我把测试分成“正确性”和“有效性”两类。正确性靠 pytest、contract test 和 API smoke；有效性靠 benchmark 和 ablation。比如上下文压缩不是只测函数返回，而是构造超长 ContextLedger，验证压缩前是 emergency，压缩后 token 降低，同时 P0 锚点保留率是 1.0。消融实验则会关闭 context_pack、failure_recovery、go_sidecars 等模块，看 baseline 和 disabled variant 的分数差。
+
+### 诚实边界
+
+当前 benchmark 还偏确定性和本地化，真实复杂项目样本不够多。它能证明工程管线和核心机制有效，但还不能证明它达到商业 AI 编程工具的泛化能力。
+
+## 15. 本章自测增强
+
+1. `BENCHMARKS`、`REAL_TASK_BENCHMARKS`、`CONTEXT_WINDOW_PRESSURE_CASE` 分别证明什么？
+2. 为什么真实任务 benchmark 里要检查 `forbidden_agents`？
+3. 上下文窗口 benchmark 为什么要检查 `anchor_preservation_rate`？
+4. 消融实验里的 baseline 和 disable variant 分别是什么？
+5. `build_component_necessity_report` 如何给组件打 `necessary` / `neutral`？
+6. 为什么 Go sidecar benchmark 不能简单讲“Go 一定更快”？
+7. CI 中 Go sidecar 不可用时，测试应该 fail 还是 fallback/skip？为什么？
+8. 如果一个组件消融后分数没有下降，你会怎么判断它是否应该保留？
