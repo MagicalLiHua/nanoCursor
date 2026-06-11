@@ -14,20 +14,27 @@
 
 .codex-inspector {
   display: grid;
+  height: 100%;
   min-height: 0;
+  max-height: 100%;
   padding: 0;
+  overflow: hidden;
 }
 
 .codex-inspector-card {
   display: grid;
   align-content: start;
   gap: 14px;
+  height: 100%;
   min-height: 0;
+  max-height: 100%;
   padding: 18px;
   border: 1px solid rgba(230, 232, 235, 0.96);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 14px 34px rgba(42, 55, 71, 0.08);
+  overflow-y: auto;
+  scrollbar-color: rgba(152, 161, 173, 0.45) transparent;
 }
 
 .codex-inspector-section {
@@ -61,6 +68,71 @@
 
 .codex-section-head svg {
   color: #8f98a3;
+}
+
+.codex-inspector-section.collapsible {
+  gap: 8px;
+}
+
+.codex-section-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0;
+  color: #202329;
+  background: transparent;
+  text-align: left;
+}
+
+.codex-section-toggle span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.codex-section-toggle strong,
+.codex-section-toggle small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-section-toggle strong {
+  color: #8b929d;
+  font-size: 15px;
+  font-weight: 760;
+}
+
+.codex-section-toggle small {
+  color: #8f969f;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.codex-section-toggle svg {
+  color: #8f98a3;
+  transition: transform 140ms ease;
+}
+
+.codex-inspector-section.open .codex-section-toggle svg {
+  transform: rotate(180deg);
+}
+
+.codex-section-toggle:focus-visible {
+  outline: 2px solid rgba(47, 111, 221, 0.24);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.codex-collapsible-body {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
 }
 
 .codex-progress-list {

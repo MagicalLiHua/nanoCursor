@@ -262,7 +262,126 @@ DAG 强调预先定义节点和边，Agent Loop 强调运行时根据状态做�
 6. 如果 Loop 达到 `max_steps` 还没完成，系统会怎么做？
 7. 临时 Agent 的最大数量、TTL 和状态转换分别是什么？
 
-## 13. 动手练习
+## 13. 深度学习：把 Agent Loop 当成运行时合约
+
+如果只说“我做了一个 Agent Loop”，面试官很容易把它理解成一个普通的 `while` 循环。真正值得讲的是：nanoCursor 的 Loop 不是随意循环，而是一组运行时合约。
+
+这组合约可以拆成五层：
+
+| 层级 | 解决的问题 | 对应实现 |
+|---|---|---|
+| 输入合约 | 用户这句话到底要不要进入开发流程 | `intent_router.py`、`conversation_run_service.py` |
+| 状态合约 | 当前 run 到了哪一步，谁在做事，有没有待审批 | `AgentLoopState` |
+| 动作合约 | 下一步动作必须被结构化描述 | `LeadAction`、`AgentLoopStep` |
+| 策略合约 | 动作执行前必须被权限、风险和上下文检查 | `check_loop_action`、tool policy |
+| 证据合约 | 每一步都要留下事件、任务、工具证据或失败记录 | EventStore、task board、artifact |
+
+这也是它和“写一个大函数顺序调用模型”的区别。顺序调用模型的问题是：失败后很难知道到底哪里错了，也很难在前端展示系统正在干什么。Agent Loop 的核心价值不是“更玄学”，而是把模型决策拆成可记录、可检查、可恢复的小步。
+
+## 14. 真实链路：一句话怎么进入 Loop
+
+一条用户消息大致会经过下面路径：
+
+```text
+前端发送消息
+  -> POST /api/conversations/{conversation_id}/runs
+  -> start_conversation_run
+  -> classify_user_intent_async
+  -> compose_runtime_team_async
+  -> lead_only_execution_plan 或 build_execution_plan_async
+  -> start_standard_run
+  -> init_agent_loop_state
+  -> workflow_thread_service 后台执行
+  -> Agent Loop 观察/决策/执行/记录
+  -> SSE 推送到前端
+```
+
+这里最容易混淆的是 `execution_plan` 和 `AgentLoopState`：
+
+- `execution_plan` 是边界：告诉系统本轮有哪些阶段、验收标准、风险和工具约束。
+- `AgentLoopState` 是账本：记录当前实际执行到了哪里，每一步发生了什么。
+
+所以 nanoCursor 后来避免把系统做回 DAG。Plan 可以约束方向，但不应该把每一步写死。比如测试失败后，下一步可能是读取错误、修代码、修测试、请求审批，也可能直接终止并解释风险。这个判断必须看运行时状态。
+
+## 15. 三类任务对比
+
+建议你用下面三类任务理解 Loop 的分叉。
+
+| 用户输入 | 期望路由 | Loop 行为 | 不应该出现什么 |
+|---|---|---|---|
+| `哈喽` | `lead_direct_reply` | Lead answer -> finish | Coder、Tester、完整交付报告 |
+| `帮我看看这个目录下有哪些文件` | read only | Lead 读取工作区/文件索引 -> answer | 写文件、跑安装命令 |
+| `帮我写常见排序算法并比较性能` | code delivery | 计划 -> 写文件 -> 运行验证 -> 交付总结 | 无审批的高风险 shell、无限重试 |
+
+这个表面上是交互体验，背后其实是系统成熟度。成熟 AI 编程工具会让用户觉得“它知道什么时候该认真干活，什么时候只是回答我”。这件事不能只靠前端隐藏任务卡，必须在后端意图路由和 Loop 入口就做对。
+
+## 16. 代码阅读任务
+
+你可以按下面方式读一遍源码，不要一上来就读 `engine.py` 这种大文件。
+
+1. 打开 `src/api/services/conversation_run_service.py`，找到 `start_conversation_run`，确认意图判断发生在 execution plan 之前。
+2. 打开 `src/api/services/run_start_service.py`，找到 run 如何生成 `thread_id`、如何绑定 workspace、如何创建 EventStore session。
+3. 打开 `src/api/services/agent_loop_state_service.py`，看 `AgentLoopState`、`AgentLoopStep`、`append_loop_step`。
+4. 打开 `src/api/services/agent_loop_controller_service.py`，看 `run_loop_controller_step` 和 `propose_next_loop_action`。
+5. 打开 `src/api/services/workflow_thread_service.py`，确认长任务为什么不阻塞 HTTP 请求。
+6. 打开前端聊天和右侧进度组件，观察后端事件如何被渲染成用户能看懂的 Agent 动态。
+
+读完后你应该能画出这张简化图：
+
+```text
+Intent Decision
+  -> Runtime Team
+  -> Execution Plan
+  -> AgentLoopState
+  -> Loop Step
+  -> Tool / Answer / Approval / Finish
+  -> EventStore + SSE
+```
+
+## 17. 面试深挖回答模板
+
+### 30 秒回答
+
+nanoCursor 的核心执行模型是 Lead 驱动的 Agent Loop。它不是固定 DAG，而是让 Lead 根据当前 run 的状态持续观察、决策和执行。为了避免 Loop 失控，我把每一步动作结构化，并加入 dry-run 校验、工具权限、审批、最大步数、EventStore 和任务板完成条件。这样既保留了 Agent 的动态性，也能让运行过程可观测、可恢复。
+
+### 深入回答
+
+我早期尝试过固定流程，但发现 AI 编程任务里的分支太多：简单问候不该进入开发流程，读文件任务不该写代码，测试失败后也不一定直接进入 Reviewer。后来我把 execution plan 定位成边界和验收标准，把实际执行交给 Agent Loop。Loop 每一步会先观察当前任务、上下文、失败、审批和工具状态，再提出结构化动作，动作通过策略检查后才能提交到状态账本，并通过 SSE 展示给前端。
+
+这个设计的重点不是“循环更智能”，而是把模型行为变成可审计的小步。出问题时，我能知道是意图路由错了、工具策略拦截了、上下文没选中关键文件，还是某个 Agent 的动作不合理。
+
+### 诚实边界
+
+当前 Loop 决策还不是完全由模型自主规划，里面仍有一些规则和策略函数。这样做是为了稳定性和可测试性。后续更成熟的方向是把 Lead 的决策升级成“模型判断 + 结构化 schema + deterministic guard + 事后评估”的组合，而不是完全硬编码，也不是完全相信模型。
+
+## 18. 容易被问倒的问题
+
+### Q1：你说不用 DAG，那是不是失去了可控性？
+
+不是。固定 DAG 是一种控制方式，但不是唯一方式。nanoCursor 用运行时合约控制：动作结构化、每步校验、工具分级、审批、最大步数、事件持久化和任务完成条件。它放弃的是固定路径，不是放弃控制。
+
+### Q2：为什么不是让模型每一步都自由决定？
+
+因为本地代码修改涉及文件写入、shell、依赖安装、git 等高风险操作。模型可以提出动作，但动作必须经过策略层检查。成熟系统一般都不会让模型直接裸执行工具。
+
+### Q3：Loop 怎么避免陷入无限修复？
+
+主要靠四类限制：最大步数、失败分类、恢复策略、终止条件。比如命令失败后可以生成恢复任务，但恢复任务也要受到次数和风险约束；如果连续失败或触发高风险，就应该请求用户确认或停止，而不是一直修。
+
+### Q4：多 Agent 是 Loop 的核心吗？
+
+不是。Loop 的核心是状态驱动决策，多 Agent 只是其中一种动作。默认只有 Lead，只有任务需要分工时才创建临时 Agent。这样系统不会为了展示多 Agent 而多 Agent。
+
+## 19. 学完本章你应该能做到
+
+读完这一章后，至少要能做到四件事：
+
+1. 看着一次 run 的事件流，说出它为什么走直接回答或代码交付。
+2. 指出 Agent Loop 状态保存在哪、每一步动作保存在哪。
+3. 解释为什么 execution plan 不是 DAG，也不是摆设。
+4. 面对“为什么不用 LangGraph”这个问题，能从交互式编程任务的不确定性讲到运行时合约。
+
+## 20. 动手练习
 
 1. **跟踪一次完整的 Agent Loop**：打开 `src/api/services/conversation_run_service.py`，从 `start_conversation_run` 开始，追踪到 `start_workflow_thread`，画出从 API 请求到 Agent Loop 启动的调用链。
 2. **读 Loop State 的持久化代码**：打开 `src/api/services/agent_loop_state_service.py`，找到 `append_loop_step` 函数，理解每一步动作如何被记录。然后看 `AgentLoopState` 模型，列出所有字段及其含义。

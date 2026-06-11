@@ -1513,6 +1513,25 @@ button.project-mini-item:hover {
   background: transparent;
 }
 
+[data-theme="dark"] .codex-section-toggle,
+[data-theme="dark"] .codex-section-toggle strong,
+[data-theme="dark"] .codex-info-row,
+[data-theme="dark"] .codex-info-row svg,
+[data-theme="dark"] .codex-info-row span {
+  color: var(--text);
+}
+
+[data-theme="dark"] .codex-section-toggle small,
+[data-theme="dark"] .codex-section-toggle svg,
+[data-theme="dark"] .codex-info-row strong {
+  color: var(--muted);
+}
+
+[data-theme="dark"] .context-detail-toggle {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.04);
+}
+
 [data-theme="dark"] .settings-nav,
 [data-theme="dark"] .settings-field,
 [data-theme="dark"] .settings-info-item,

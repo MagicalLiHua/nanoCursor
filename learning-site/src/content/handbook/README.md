@@ -11,10 +11,14 @@
 3. 阅读 `chapters/01-project-overview.md`，理解项目定位。
 4. 阅读 `chapters/02-request-lifecycle.md`，追踪一次真实请求。
 5. 重点吃透 `03 Agent Loop`、`05 上下文管理`、`07 工具治理`、`11 MCP/Skills`。
-6. 读 `CONTENT_REVIEW.md`，确认每章当前状态和推荐学习顺序。
-7. 对照 `maps/backend-code-map.md` 找后端入口。
-8. 做 `exercises/01-read-the-request-lifecycle.md`，验证自己是否真的看懂。
-9. 准备面试时再看 `interview/01-project-pitch.md`。
+6. 读 `LEARNING_CONTENT_UPGRADE_PLAN.md`，确认下一轮要如何把资料升级成“能吃透项目”的课程化学习包。
+7. 读 `CONTENT_REVIEW.md`，确认每章当前状态和推荐学习顺序。
+8. 对照 `maps/backend-code-map.md` 找后端入口。
+9. 做 `exercises/01-read-the-request-lifecycle.md`，验证自己是否真的看懂。
+10. 做 `exercises/02-trace-one-real-run.md`，用三个真实任务追踪 run、事件、上下文和工具调用。
+11. 做 `exercises/03-memory-tool-governance-lab.md`，把记忆选择、工具权限和失败恢复串起来验证。
+12. 准备面试时先看 `interview/01-project-pitch.md`，再看 `interview/03-agent-loop-deep-dive.md`、`interview/04-context-and-memory.md`、`interview/05-tools-recovery-and-observability.md`、`interview/06-go-mcp-and-project-boundary.md`。
+13. 最后刷 `interview/07-interview-question-bank.md`，按模块快速过一遍高频追问。
 
 ## 学习闭环
 
@@ -50,6 +54,7 @@
 learning-site/src/content/handbook/
   index.html                      # 学习门户
   LEARNING_PACKAGE_PLAN.md         # 学习包建设计划
+  LEARNING_CONTENT_UPGRADE_PLAN.md # 高质量内容和面试资料升级计划
   CONTENT_REVIEW.md                # 学习资料审校记录
   README.md                        # 当前目录说明
   chapters/                        # 深度章节

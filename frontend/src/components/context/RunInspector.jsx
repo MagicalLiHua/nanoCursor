@@ -1,6 +1,7 @@
 import React from "react";
 import {
   AlertTriangle,
+  ChevronDown,
   CheckCircle2,
   Circle,
   Clock3,
@@ -115,6 +116,28 @@ function Section({ title, action, children }) {
   );
 }
 
+function CollapsibleSection({ title, summary, defaultOpen = false, children }) {
+  const [open, setOpen] = React.useState(defaultOpen);
+
+  return (
+    <section className={`codex-inspector-section collapsible ${open ? "open" : "collapsed"}`}>
+      <button
+        type="button"
+        className="codex-section-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span>
+          <strong>{title}</strong>
+          {summary && <small>{summary}</small>}
+        </span>
+        <ChevronDown size={16} />
+      </button>
+      {open && <div className="codex-collapsible-body">{children}</div>}
+    </section>
+  );
+}
+
 function InfoRow({ icon: Icon, label, value, muted = false, action }) {
   return (
     <div className={`codex-info-row ${muted ? "muted" : ""}`}>
@@ -188,14 +211,6 @@ function Environment({ state }) {
   const insertions = snapshot ? Number(changes.insertions ?? 0) : Number(state.metrics?.insertions ?? 0);
   const deletions = snapshot ? Number(changes.deletions ?? 0) : Number(state.metrics?.deletions ?? 0);
   const branch = workspace.is_git_repo ? workspace.git_branch || "unknown" : "非 Git 工作区";
-  const indexer = state.runtimeStatus?.indexer || {};
-  const filetools = state.runtimeStatus?.filetools || {};
-  const executor = state.runtimeStatus?.executor || {};
-  const mcpGateway = state.runtimeStatus?.mcpGateway || {};
-  const indexerMuted = !indexer.healthy || indexer.backend !== "go";
-  const filetoolsMuted = !filetools.healthy || filetools.backend !== "go";
-  const executorMuted = !executor.healthy || executor.backend !== "go";
-  const mcpGatewayMuted = !mcpGateway.healthy || mcpGateway.backend !== "go";
 
   return (
     <Section title="环境信息" action={<Settings2 size={16} />}>
@@ -212,6 +227,25 @@ function Environment({ state }) {
       />
       <InfoRow icon={HardDrive} label="本地" value={shortPath(workspace.path || state.workspaceDir) || "未选择目录"} />
       <InfoRow icon={GitBranch} label={branch} value={workspace.dirty ? `${filesChanged} 个文件变更` : "干净"} />
+    </Section>
+  );
+}
+
+function RuntimeServices({ state }) {
+  const indexer = state.runtimeStatus?.indexer || {};
+  const filetools = state.runtimeStatus?.filetools || {};
+  const executor = state.runtimeStatus?.executor || {};
+  const mcpGateway = state.runtimeStatus?.mcpGateway || {};
+  const indexerMuted = !indexer.healthy || indexer.backend !== "go";
+  const filetoolsMuted = !filetools.healthy || filetools.backend !== "go";
+  const executorMuted = !executor.healthy || executor.backend !== "go";
+  const mcpGatewayMuted = !mcpGateway.healthy || mcpGateway.backend !== "go";
+  const connected = [indexer, filetools, executor, mcpGateway].filter(
+    (item) => item?.backend === "go" && item?.healthy,
+  ).length;
+
+  return (
+    <CollapsibleSection title="Go 微服务" summary={`${connected} / 4 已连接`}>
       <InfoRow
         icon={Search}
         label="项目索引"
@@ -236,7 +270,7 @@ function Environment({ state }) {
         value={backendStatusLabel(mcpGateway)}
         muted={mcpGatewayMuted}
       />
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -266,6 +300,7 @@ export default function RunInspector({ state }) {
           <ProgressList state={state} />
         </Section>
         <Environment state={state} />
+        <RuntimeServices state={state} />
         <ContextWindowPanel state={state} />
         <QualityInfo state={state} />
       </div>

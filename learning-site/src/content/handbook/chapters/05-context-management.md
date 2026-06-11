@@ -382,3 +382,166 @@ ContextPack 是模型输入的结构化内容，回答“本轮应该看什么�
 3. **追踪一次上下文选择**：打开 `src/api/services/context_service.py`（或上下文选择相关函数），从 `build_context_pack` 开始，追踪项目索引、文件大纲、记忆和 Skills 分别从哪些来源进入 ContextPack。
 4. **模拟上下文裁剪**：找一个比较复杂的项目目录，手动列一份"如果 token 预算只有 8000，应该选哪些文件"的清单，然后和 `context_budget_service.py` 的实际裁剪逻辑对比。
 5. **跑一次上下文压缩 benchmark**：启动后端后调用 `/api/benchmarks/context-window/run`，观察 `variants` 中无压缩、deterministic、summary、LLM summary 和 fallback 的差异。
+
+## 16. 深度学习：上下文管理是 Agent 智能的地基
+
+多 Agent 项目最容易被误解的一点是：好像 Agent 数量越多，系统越智能。实际上，如果上下文错了，多个 Agent 只是并行犯错。
+
+一个 AI 编程工具真正要解决的是：
+
+```text
+本轮任务需要哪些事实？
+哪些文件最相关？
+哪些历史已经过时？
+哪些失败必须保留？
+哪些内容可以压缩？
+模型没看到什么，系统能不能解释？
+```
+
+所以 nanoCursor 的上下文管理应该被理解成一个“选择系统”，而不是一个“prompt 模板”。
+
+## 17. 三个对象的区别
+
+学习时一定要区分三个概念：
+
+| 概念 | 回答的问题 | 面向谁 |
+|---|---|---|
+| ContextPack | 本轮给模型看什么 | LLM prompt builder |
+| ContextBudget | 每类内容最多占多少 | 裁剪和策略 |
+| ContextLedger | 实际占用了多少窗口，是否要压缩 | 前端、审计、压缩策略 |
+
+一个常见误区是把它们都叫“上下文”。更准确地说：
+
+- `ContextPack` 是内容包。
+- `ContextBudget` 是预算表。
+- `ContextLedger` 是账本。
+
+它们组合起来，才能做到“选择、裁剪、展示、压缩、复盘”。
+
+## 18. 上下文选择应该如何思考
+
+一次代码任务里，上下文优先级通常是这样：
+
+| 优先级 | 内容 | 为什么 |
+|---|---|---|
+| P0 | 当前用户请求、当前计划、工具策略 | 丢了就会跑偏或越权 |
+| P1 | 当前任务相关文件、最近失败、正在修改的 diff | 直接影响本轮执行 |
+| P2 | 文件 outline、项目入口、测试入口、配置 | 帮助模型理解结构 |
+| P3 | 历史对话摘要、运行摘要、用户偏好 | 提供连续性 |
+| P4 | 远期记忆、低相关 skills、旧工具输出 | 有用但容易污染 |
+
+如果 token 不够，应该从 P4 往上裁剪，而不是随意截断字符串。随意截断最危险，因为它可能把错误堆栈、JSON、代码块或工具策略截坏。
+
+## 19. 真实任务中的上下文流
+
+以“帮我修复 README 中的启动命令”为例，理想上下文流是：
+
+```text
+用户请求
+  -> intent: docs/edit/safe_write
+  -> project index 找 README、pyproject、src/api/server.py
+  -> file outline 或 snippets 提供相关片段
+  -> tool policy 注入：允许安全写，风险命令需审批
+  -> selected_files 记录为什么选 README
+  -> omitted 记录被跳过的无关文件
+  -> LLM 生成编辑动作
+  -> 工具执行并写 evidence
+  -> execution_summary 更新本轮结果
+```
+
+如果模型改了无关文件，优先检查：
+
+1. Project Index 是否把入口和配置识别对了。
+2. selected_files 是否缺少目标文件。
+3. prompt 中是否有旧 conversation_summary 干扰。
+4. tool_policy 是否没有限制写入范围。
+5. Coder 是否拿到了 Reviewer 或 Tester 才需要的上下文。
+
+## 20. 不同 Agent 需要不同上下文
+
+后续如果继续强化多 Agent，不能所有 Agent 都拿同一份 ContextPack。
+
+| Agent | 更需要什么 | 不需要太多什么 |
+|---|---|---|
+| Lead | 用户目标、计划、任务板、风险、摘要 | 大量源码全文 |
+| Planner | 项目结构、入口、约束、验收标准 | 具体实现细节 |
+| Coder | 相关文件片段、outline、工具策略、最近失败 | 长篇历史讨论 |
+| Tester | 测试入口、命令、失败日志、变更文件 | 无关文档 |
+| Reviewer | diff、风险、验收标准、失败恢复记录 | 低相关源码全文 |
+
+这可以作为项目后续扩展方向：基于同一个 ContextLedger，为不同 Agent 生成不同视图。
+
+## 21. 上下文压缩的正确心智
+
+压缩不是“把历史变短”，而是“把低层信息替换成高层摘要”。好的压缩要满足：
+
+1. 当前用户请求不能丢。
+2. 当前计划不能丢。
+3. 工具策略不能丢。
+4. 最近失败和恢复动作不能被错误概括。
+5. 被压缩内容要能追溯来源。
+6. LLM 摘要失败时必须有 deterministic fallback。
+
+比如原始历史是：
+
+```text
+Coder 读了 README。
+Coder 发现启动命令仍写 api_server:app。
+Coder 修改 README。
+Tester 运行检查失败，因为 pyproject 里 console script 过期。
+Coder 修 pyproject。
+Tester 通过。
+```
+
+压缩后不应该变成：
+
+```text
+之前修了一些文档。
+```
+
+更好的摘要是：
+
+```text
+上一轮将 README 的后端启动命令从兼容入口改为 src.api.server:app，并同步清理 pyproject 中过期 console script；验证通过。后续不要再把 api_server.py 当作主入口介绍。
+```
+
+## 22. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 的上下文管理不是简单拼 prompt，而是把任务、会话摘要、项目索引、文件 outline、最近变更、失败记录、记忆、Skills 和工具策略组织成 ContextPack，再用 ContextBudget 和 ContextLedger 控制窗口占用。这样系统不仅知道给模型看什么，也知道哪些内容被裁剪、什么时候需要压缩。
+
+### 深入回答
+
+我认为多 Agent 能不能有效，首先取决于上下文。项目里我把上下文拆成结构化字段，而不是拼一个长字符串。每个字段可以被评分、裁剪、展示和测试断言。长会话时，ContextLedger 会估算各 section 的 token 占用，并在压力过高时触发 deterministic 或 summary compaction，同时保留当前请求、当前计划和工具策略这些 P0 锚点。
+
+### 当前边界
+
+目前 token 估算仍然是近似值，文件相关性选择也还可以继续优化。后续更重要的是做 context hit rate：看最终被修改或读取的文件，是否在一开始就被选入 ContextPack。如果命中率低，说明项目索引、选择器或记忆召回还有问题。
+
+## 23. 面试追问准备
+
+### Q1：为什么不直接用超长上下文模型？
+
+超长上下文不是无限上下文。即使模型支持几十万 token，成本、速度和注意力分散仍然存在。编程任务更需要高命中率上下文，而不是把项目全部塞进去。
+
+### Q2：上下文压缩会不会丢信息？
+
+会有风险，所以系统要保护 P0 锚点，记录被压缩 section 的来源，并提供 deterministic fallback。压缩不是无损的，但比让上下文溢出或把旧历史全部塞进去更可控。
+
+### Q3：怎么证明上下文模块有价值？
+
+可以通过 benchmark 和消融实验：比较无压缩、deterministic 压缩、summary 压缩在 token 占用、锚点保留、任务成功率上的差异；还可以统计 context hit rate 和 context miss audit。
+
+### Q4：记忆和上下文有什么区别？
+
+记忆是长期可召回的信息，比如用户偏好、项目事实和历史决策；上下文是本轮注入给模型的信息。记忆必须经过选择才能进入 ContextPack，不能全部塞进去。
+
+## 24. 学完本章你应该能做到
+
+1. 解释 ContextPack、ContextBudget、ContextLedger 三者区别。
+2. 指出上下文选择相关源码入口。
+3. 判断一个任务应该优先注入哪些文件和失败信息。
+4. 解释为什么工具策略是 P0 上下文。
+5. 跑一次 context-window benchmark，并读懂每个 variant。
+6. 设计一个 context miss audit：模型后来读取但一开始没选中的文件，应该如何记录和分析。

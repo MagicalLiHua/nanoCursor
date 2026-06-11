@@ -279,9 +279,143 @@ nanoCursor 用白名单安全前缀和黑名单风险模式结合。测试、lin
 6. 如果用户拒绝了一个 approval request，系统会记录什么？工具调用会被标记为"已完成"吗？
 7. MCP 工具的权限是怎么分类的？为什么只读 MCP 失败可以 fallback，写 MCP 失败不能自动替代？
 
-## 13. 动手练习
+## 14. 动手练习
 
 1. **读 ToolPolicyRuntime 的完整检查链**：打开 `src/runtime/tool_policy_runtime.py`，找到 `check` 方法，列出它按顺序执行的 6 个检查步骤。
 2. **手写一个 shell 分类测试**：自己写 10 个 shell 命令（包括安全的和危险的），用 `classify_shell_command` 测试它们，记录哪些被正确分类、哪些被误判，思考如何在不过度复杂的情况下改进。
 3. **追踪一次文件写入的完整路径**：从 Agent 决定 `write_file` 开始，追踪到 `ToolPolicyRuntime.check` → `file_ops.write_file` → 备份 → evidence 生成。用代码路径画出每一步在哪个文件。
 4. **检查 approval token 的实现**：打开 `src/api/services/approval_service.py` 和相关测试 `tests/test_approval_token.py`，理解 approval token 如何生成、校验和过期。
+
+## 15. 深度学习：工具治理是 Agent 从聊天变成工具的分界线
+
+Agent 系统的成熟度，不是看它能不能说“我会帮你修改”，而是看它真的要修改时有没有边界。
+
+一个本地编程 Agent 至少会碰到这些高风险能力：
+
+```text
+读文件
+写文件
+删除/移动/回滚文件
+执行 shell
+安装依赖
+操作 Git
+调用 MCP 外部工具
+写记忆
+恢复失败
+```
+
+如果这些能力都直接暴露给模型，系统就只是一个“会执行命令的聊天机器人”。nanoCursor 的工具治理要解决的是：**模型可以提出动作，但系统决定动作能不能执行、要不要审批、如何留下证据**。
+
+## 16. 工具调用的五段式
+
+一次工具调用最好按五段理解：
+
+```text
+1. propose：模型或 Lead 提出动作
+2. classify：系统判断权限级别和风险
+3. decide：允许、拒绝、等待审批、要求修复
+4. execute：真正执行文件、shell、MCP 或恢复动作
+5. record：记录事件、evidence、diff、approval、失败分类
+```
+
+不要把工具治理理解成一个简单 if 判断。它是一条执行管线。
+
+| 阶段 | 典型代码 | 失败时应该怎样 |
+|---|---|---|
+| propose | Agent Loop / runtime executor | 动作 schema 不合法就要求修复 |
+| classify | `classify_tool_permission` / `classify_shell_command` | 无法证明安全则按高风险 |
+| decide | `ToolPolicyRuntime.check` / `check_action` | 拒绝或进入 approval |
+| execute | `file_ops` / `command_runner` / MCP client | 捕获输出和错误 |
+| record | EventStore / audit log / recovery evidence | 后续恢复和前端展示依赖这里 |
+
+## 17. 为什么 shell 特别危险
+
+shell 的危险不在单个命令，而在组合能力：
+
+- `pytest` 可能是安全的，但 `pytest && rm -rf tmp` 不安全。
+- `python script.py` 可能安全，但脚本内部可能做网络或删除。
+- `npm install` 看起来常见，但会改 lockfile、执行 postinstall、访问网络。
+- `curl | sh` 是典型高风险模式。
+
+所以系统宁可保守：
+
+```text
+能证明安全 -> shell_safe
+不能证明安全 -> shell_risky
+```
+
+这不是为了“拦用户”，而是为了让用户知道系统准备做什么。
+
+## 18. 文件写入为什么也分风险
+
+很多人会以为“只要在 workspace 内写文件就安全”。其实不是。
+
+| 场景 | 风险 |
+|---|---|
+| 写 `.env` | 泄露或覆盖密钥 |
+| 改 `pyproject.toml` / `package.json` | 影响安装、启动、测试 |
+| 改 CI 配置 | 影响 GitHub Actions |
+| 大文件整写 | 模型可能覆盖用户代码 |
+| 删除/移动文件 | 破坏项目结构 |
+| 回滚快照 | 覆盖用户最新改动 |
+
+所以 `safe_write` 和 `risky_write` 的边界不是“能不能写”，而是“这个写入会不会改变项目的安全、依赖、入口或大量内容”。
+
+## 19. 失败恢复和工具治理的关系
+
+失败恢复经常被误解成“失败了就让 Agent 再试”。成熟做法不是这样。
+
+失败恢复应该先分类：
+
+| 失败 | 可能原因 | 合理恢复 |
+|---|---|---|
+| `FileNotFoundError` | 路径错、工作区错、文件未创建 | 列目录、查索引、重新定位 |
+| `Permission denied` | 权限不足或策略阻断 | 请求审批或改用只读方案 |
+| `ModuleNotFoundError` | 缺依赖 | 先检查 pyproject/requirements，再请求安装审批 |
+| `SyntaxError` | 生成代码错误 | 读错误位置，小范围修复 |
+| 测试断言失败 | 实现或测试预期错 | 分析失败用例，决定修实现还是修测试 |
+| approval denied | 用户拒绝高风险动作 | 停止或提供低风险替代方案 |
+
+恢复动作仍然必须经过同一套工具策略。否则“自动恢复”会绕过安全系统，变成更危险的后门。
+
+## 20. 工具治理的面试表达模板
+
+### 30 秒回答
+
+nanoCursor 的工具治理核心是把模型决策和真实执行分开。模型可以提出读文件、写文件、跑命令或调用 MCP 的动作，但动作先进入统一策略层，按 read_only、safe_write、risky_write、shell_safe、shell_risky、mcp_write 等级分类，高风险动作进入 approval，并且每次执行都记录 evidence、事件和 diff，方便恢复和审计。
+
+### 深入回答
+
+我把工具调用看成 propose、classify、decide、execute、record 五段。比如 shell 命令会先用规则分类，复合命令、安装依赖、网络请求、Git 写操作都会被判为 shell_risky；文件写入会检查敏感文件、大范围写入和路径安全；MCP 写操作会按外部副作用处理。失败恢复也不会绕过这些策略，只能在同样权限边界内重新规划。
+
+### 当前边界
+
+当前 shell 分类主要基于 `shlex`、安全前缀和风险模式，还不是完整 shell AST。它是保守可用的实现，但未来可以接入更严格的 parser，或者把 Go executor 的结构化命令执行能力继续做深。
+
+## 21. 容易被追问的问题
+
+### Q1：为什么不直接禁止所有高风险工具？
+
+因为真实开发任务有时确实需要安装依赖、恢复快照或调用外部服务。直接禁止会让工具不可用，直接允许又太危险。approval 是折中：系统解释风险，用户做最终决定。
+
+### Q2：approval 只是前端弹窗吗？
+
+不是。前端只是展示层。后端必须记录 approval request、绑定具体操作、校验 token、处理过期和拒绝。否则用户点一次批准可能被错误复用到别的命令。
+
+### Q3：工具失败后为什么不能直接重试？
+
+盲目重试会放大错误。比如路径错了，重试同一个路径没有意义；缺依赖时，直接执行安装可能越权；测试失败时，可能是测试预期错，不一定是实现错。所以要先分类，再规划恢复。
+
+### Q4：如何证明工具治理有价值？
+
+可以通过三类测试证明：权限分类单元测试、approval 流程测试、真实任务 smoke test。还可以做消融实验：关闭审批或路径防护后，高风险动作是否被错误执行。
+
+## 22. 本章自测增强
+
+1. 为什么工具治理比“多加几个 Agent”更重要？
+2. `safe_write` 在什么情况下会升级成 `risky_write`？
+3. 为什么 `npm test` 可能安全，但 `npm install` 应该高风险？
+4. 失败恢复为什么不能绕过 approval？
+5. approval token 应该绑定哪些信息？
+6. 如果工具 stdout 很长，应该进入最终回复还是 evidence？为什么？
+7. 如果未来接入第三方 MCP，如何判断它的写工具是否可信？

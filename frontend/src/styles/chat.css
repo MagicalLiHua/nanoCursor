@@ -952,3 +952,140 @@
   color: var(--muted-2);
   white-space: nowrap;
 }
+
+/* ===== Dark Chat Readability ===== */
+
+[data-theme="dark"] .chat-panel > .panel-header {
+  color: var(--text);
+}
+
+[data-theme="dark"] .chat-title-block .panel-subtitle,
+[data-theme="dark"] .message-head,
+[data-theme="dark"] .message-time {
+  color: var(--muted-2);
+}
+
+[data-theme="dark"] .message-author,
+[data-theme="dark"] .message-text,
+[data-theme="dark"] .message:not(.user) .message-text,
+[data-theme="dark"] .message:not(.user) .message-text p,
+[data-theme="dark"] .message:not(.user) .message-text li,
+[data-theme="dark"] .message:not(.user) .message-text td {
+  color: var(--text);
+}
+
+[data-theme="dark"] .message:not(.user) .message-text h1,
+[data-theme="dark"] .message:not(.user) .message-text h2,
+[data-theme="dark"] .message:not(.user) .message-text h3,
+[data-theme="dark"] .message:not(.user) .message-text h4,
+[data-theme="dark"] .message:not(.user) .message-text h5,
+[data-theme="dark"] .message:not(.user) .message-text strong {
+  color: #ffffff;
+}
+
+[data-theme="dark"] .message:not(.user) .message-text th {
+  color: var(--muted);
+}
+
+[data-theme="dark"] .message:not(.user) .message-text table {
+  color: var(--text);
+}
+
+[data-theme="dark"] .message:not(.user) .message-text th,
+[data-theme="dark"] .message:not(.user) .message-text td {
+  border-bottom-color: rgba(85, 95, 110, 0.72);
+}
+
+[data-theme="dark"] .message:not(.user) .message-text code {
+  border-color: rgba(85, 95, 110, 0.72);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7fafc;
+}
+
+[data-theme="dark"] .message:not(.user) .message-text pre {
+  border-color: rgba(85, 95, 110, 0.72);
+  background: #101318;
+}
+
+[data-theme="dark"] .message.user .bubble {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #eef2f7;
+  color: #111827;
+}
+
+[data-theme="dark"] .message.user .message-text {
+  color: #111827;
+}
+
+[data-theme="dark"] .agent-work-message .bubble {
+  border-color: rgba(85, 95, 110, 0.42);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+[data-theme="dark"] .agent-work-message .agent-activity-item,
+[data-theme="dark"] .message-activity-line .agent-activity-item {
+  border-color: rgba(85, 95, 110, 0.48);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+[data-theme="dark"] .agent-activity-agent {
+  color: var(--text);
+}
+
+[data-theme="dark"] .agent-activity-text,
+[data-theme="dark"] .agent-activity-time {
+  color: var(--muted);
+}
+
+[data-theme="dark"] .prompt-box {
+  border-color: rgba(85, 95, 110, 0.78);
+  background: rgba(34, 38, 45, 0.96);
+}
+
+[data-theme="dark"] .prompt-input {
+  background: rgba(41, 46, 55, 0.88);
+  color: var(--text);
+}
+
+[data-theme="dark"] .composer-mode {
+  border-color: rgba(85, 95, 110, 0.62);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+[data-theme="dark"] .composer-mode.active {
+  border-color: rgba(238, 242, 247, 0.18);
+  background: #eef2f7;
+  color: #111827;
+}
+
+[data-theme="dark"] .composer-hint {
+  color: var(--muted-2);
+}
+
+[data-theme="dark"] .welcome-screen h1,
+[data-theme="dark"] .welcome-input-icon {
+  color: var(--text);
+}
+
+[data-theme="dark"] .welcome-input-form {
+  border-color: rgba(85, 95, 110, 0.78);
+  background: rgba(34, 38, 45, 0.96);
+}
+
+[data-theme="dark"] .welcome-input {
+  color: var(--text);
+}
+
+[data-theme="dark"] .welcome-suggestions button {
+  border-color: rgba(85, 95, 110, 0.62);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+}
+
+[data-theme="dark"] .welcome-suggestions button:hover {
+  border-color: rgba(118, 167, 255, 0.35);
+  background: rgba(118, 167, 255, 0.12);
+  color: var(--text);
+}

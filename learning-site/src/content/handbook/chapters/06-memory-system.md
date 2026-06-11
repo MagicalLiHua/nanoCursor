@@ -482,3 +482,146 @@ def extract_run_memory(workspace_dir: str, run_id: str) -> dict[str, Any]:
 2. **触发新鲜度刷新**：修改一个文件（如 README.md），然后调用 `refresh_memory_freshness`（或通过 API），观察与该文件关联的记忆是否被标记为 stale。
 3. **追踪一次记忆选择**：在运行任务时，找到 `.nanocursor/memory/selections/` 下的审计文件，阅读 `selected` 和 `omitted` 列表。理解为什么某些记忆被选中、某些被排除。
 4. **阅读 FailureLearner 的错误签名提取**：打开 `src/agent/learner.py`，找到 `extract_error_signature` 函数。自己构造 5 条不同的 Python/Shell 错误信息，测试签名提取是否准确。
+
+## 14. 深度学习：记忆是被治理的长期上下文
+
+记忆机制最容易被讲浅：好像只是“把聊天记录保存下来”。在 nanoCursor 里，更准确的理解是：**记忆是经过提取、分层、打分、审计和淘汰的长期上下文**。
+
+这句话里有五个关键词：
+
+| 关键词 | 含义 | 为什么重要 |
+|---|---|---|
+| 提取 | 从聊天、运行、失败、规则文件里抽出值得保留的信息 | 不是所有历史都值得记住 |
+| 分层 | global / workspace / conversation / run / file / rule | 不同范围的信息不能混用 |
+| 打分 | 根据关键词、scope、source、freshness、importance 选择 | 避免无关记忆污染 prompt |
+| 审计 | 记录 selected 和 omitted | 出错后能解释模型看到了什么 |
+| 淘汰 | stale、expires_at、file_fingerprint | 防止旧项目事实长期误导 |
+
+所以，记忆不是上下文的替代品，而是上下文的候选来源。只有通过 `select_memories` 的记忆，才会进入本轮 `ContextPack`。
+
+## 15. 记忆和上下文的关系
+
+你可以这样理解两者关系：
+
+```text
+MemoryRecord 存长期信息
+  -> select_memories 按任务筛选
+  -> selected_memories 进入 ContextPack
+  -> ContextBudget 控制 token 占用
+  -> ContextLedger 记录本轮窗口使用
+```
+
+因此，记忆系统本身不直接让模型变聪明。真正让系统更稳的是这条链路：
+
+1. 记忆知道自己来自哪里。
+2. 记忆知道自己适用于什么范围。
+3. 记忆被选择时有理由。
+4. 记忆没被选择时也有 omitted 原因。
+5. 文件变了，相关记忆会降级。
+
+这也是它和普通聊天历史的根本区别。
+
+## 16. 四类最值得记住的信息
+
+一个 AI 编程工作台不是所有东西都要记。更值得保留的是这四类。
+
+| 类型 | 示例 | 推荐 scope | 风险 |
+|---|---|---|---|
+| 项目事实 | “后端入口是 `src.api.server:app`” | workspace / rule | 项目重构后过时 |
+| 用户偏好 | “用户偏好中文回复，提交前先跑检查” | global / workspace | 过度泛化到其他项目 |
+| 失败模式 | “`npm install` 需要审批，不能自动执行” | workspace / run | 旧失败污染新任务 |
+| 成功工作流 | “改 README 后需要同步 pyproject 和 README 启动命令” | workspace | 过细会变成噪声 |
+
+不适合自动记忆的信息：
+
+- API Key、token、密码、隐私信息。
+- 没有证据的猜测。
+- 一次性的临时目标。
+- 已经被用户否定的方案。
+- 工具 stdout 的完整原文。
+
+## 17. 记忆生命周期
+
+一条记忆不应该“创建后永远有效”。它有生命周期：
+
+```text
+create
+  -> active
+  -> selected / omitted
+  -> mark used
+  -> file changed 或 expires_at 到期
+  -> stale / expired
+  -> disabled / deleted
+```
+
+学习源码时重点看：
+
+| 阶段 | 入口 | 你要确认什么 |
+|---|---|---|
+| 创建 | `create_memory_record` | scope 绑定、安全检查、evidence_refs |
+| 列表 | `list_memory_records` | workspace_id 隔离、状态过滤 |
+| 选择 | `select_memories` | 候选、过滤、打分、预算、审计 |
+| 使用 | `mark_memory_used` | use_count 和 last_used_at |
+| 新鲜度 | `refresh_memory_freshness` | file_fingerprint 如何标 stale |
+| 自动学习 | `FailureLearner` / `ExperienceLearner` | 失败和成功 episode 如何进入记忆 |
+
+## 18. 记忆系统的设计取舍
+
+### 为什么不用向量数据库
+
+当前项目的记忆量还没大到必须引入向量数据库。JSON 文件加确定性打分更容易审计，也更适合个人项目。面试时可以这样讲：
+
+> 我不是不知道向量检索，而是这个阶段更重视可解释性。记忆选择器会记录关键词、scope、source 和 omitted 原因，这比直接返回一个相似度分数更容易调试。
+
+### 为什么要有 rule scope
+
+AGENTS.md、CLAUDE.md、`.cursor/rules` 本质上是项目规则。把它们放进同一套 MemoryRecord 流程，可以统一打分、预算和审计，而不是在 prompt builder 里硬拼一段规则。
+
+### 为什么 failure memory 要谨慎
+
+失败记忆很有价值，但也最容易污染。比如某次 `pytest` 失败可能只是临时代码没写完，不代表以后不能跑 pytest。因此 failure memory 要结合 error signature、importance、source_ref 和 freshness，而不是一失败就永久高优先级注入。
+
+### 为什么自动记忆要 evidence
+
+模型生成的“项目事实”可能是猜的。没有 evidence_refs 的自动项目事实不应该进入长期记忆，否则会把幻觉固化成系统认知。
+
+## 19. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 的记忆不是保存完整聊天记录，而是把长期有价值的信息抽成 MemoryRecord，并按 scope、source、confidence、importance、freshness 管理。每次任务只通过 select_memories 选择相关记忆进入 ContextPack，同时记录 selected 和 omitted，保证记忆可解释、可淘汰、不会无差别污染上下文。
+
+### 深入回答
+
+我把记忆看成长期上下文候选池。它包含用户偏好、项目规则、运行摘要、失败模式和成功工作流。选择时会结合当前 prompt、active task、selected files、conversation_id 和 run_id 进行打分，并受 token budget 限制。文件绑定记忆会带 file_fingerprint，文件变化后自动变 stale。这样既能利用历史经验，又能避免旧信息长期误导模型。
+
+### 诚实边界
+
+当前记忆选择主要是确定性打分，还没有做语义向量召回。这个选择是阶段性的：它更容易解释和测试，但复杂语义召回能力有限。后续如果记忆规模扩大，可以在保留 scope 和审计机制的前提下引入向量检索。
+
+## 20. 容易被追问的问题
+
+### Q1：记忆会不会让模型越来越乱？
+
+会，所以记忆必须经过治理。nanoCursor 不是把所有历史都注入，而是根据 scope、状态、新鲜度、关键词、文件匹配和预算筛选，并记录 omitted。长期看还需要定期淘汰低置信、低使用、过期的记忆。
+
+### Q2：用户偏好和项目事实怎么隔离？
+
+靠 scope 和 workspace_id。global 记忆适合用户级偏好，workspace 记忆只在当前项目使用，conversation 记忆只在当前会话使用，file 记忆只在相关文件被选中时考虑。
+
+### Q3：如果记忆错了怎么办？
+
+首先记忆不是原始事实，而是带 confidence 和 source 的候选信息。可以通过 update/delete 禁用错误记忆；文件相关记忆可以被 fingerprint 标 stale；自动事实必须有 evidence_refs，降低凭空错误的概率。
+
+### Q4：记忆机制和 RAG 有什么区别？
+
+RAG 更强调从外部知识库检索内容；这里的记忆更强调项目内的长期经验和运行事实。它可以未来接入向量检索，但核心仍是 scope、provenance、freshness 和 audit。
+
+## 21. 本章自测增强
+
+1. 为什么说记忆是上下文候选来源，而不是直接 prompt？
+2. `rule_file` 为什么比 `system_summary` 更可信？
+3. `file_fingerprint` 为什么要同时包含相对路径和文件内容？
+4. failure memory 为什么不能一创建就永久高优先级？
+5. 如果一个旧 workspace 记忆污染了新任务，你会从哪些字段排查？
+6. 如果未来引入向量数据库，哪些治理字段仍然必须保留？

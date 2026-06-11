@@ -341,3 +341,132 @@ daemon 线程在主进程退出时会被强制终止，不管是否完成。如�
 2. **测试 fallback 行为**：在 Go executor 未启动的情况下，运行一个命令。在日志/事件流中找到 `command_backend_fallback` 事件，确认从哪个后端 fallback 到哪个后端。
 3. **观察线程行为**：在项目运行时，用 `ps -M <pid>` 或 Activity Monitor 观察 Python 进程的线程数。启动一个新 run，看线程数变化。
 4. **阅读 executor 路由配置**：修改 `.env` 中的 `NANOCURSOR_EXECUTOR_ROUTING_MODE`（auto → always → never），观察同一命令在不同模式下的后端选择结果。
+
+## 16. 深度学习：async 不是写了 async def 就对了
+
+FastAPI 项目里最常见的误区是：函数写成 `async def`，就以为系统是异步的。实际上，只要在 async 函数里做阻塞操作，事件循环仍然会卡住。
+
+需要特别警惕的阻塞操作：
+
+| 操作 | 为什么会阻塞 |
+|---|---|
+| `subprocess.run` | 等子进程结束前当前线程不返回 |
+| 大文件读写 | 文件 IO 是同步系统调用 |
+| 同步 gRPC/HTTP client | 网络等待期间占住线程 |
+| 长时间 LLM 流处理 | 如果实现不当会阻塞事件分发 |
+| CPU 密集解析 | 大量 AST、diff、索引计算会占 CPU |
+
+判断一个操作该怎么放，可以用下面规则：
+
+```text
+短小、可控、同步成本低 -> 可以同步
+长时间 IO 或 subprocess -> asyncio.to_thread / 独立线程 / Go sidecar
+需要持续后台运行 -> workflow thread
+需要更强进程隔离 -> Go sidecar / subprocess manager
+```
+
+## 17. nanoCursor 的异步分层
+
+当前系统可以按层理解：
+
+| 层 | 执行模型 | 作用 |
+|---|---|---|
+| API handler | asyncio | 快速接收请求、返回 thread_id |
+| Agent Run | threading.Thread | 长任务后台执行 |
+| LLM 调用 | async / streaming | 网络 IO，不应阻塞其他请求 |
+| 命令执行 | to_thread + subprocess / Go executor | 阻塞命令隔离出去 |
+| 文件工具 | 同步小操作 + Go filetools fallback | 简化实现，关键路径可 sidecar |
+| SSE | StreamingResponse | 持续推送事件和 heartbeat |
+| Go sidecar | 独立进程 | 高风险/高耗时能力隔离 |
+
+这套分层不是“越异步越好”，而是让不同任务放在合适的执行边界里。
+
+## 18. 为什么 Run 用线程而不是纯 asyncio
+
+从工程角度看，一个 Agent Run 不是单一网络 IO，而是混合负载：
+
+- LLM streaming。
+- 文件读写。
+- shell 命令。
+- EventStore 写入。
+- 工具策略和恢复判断。
+- 可能的 Go sidecar 调用。
+
+全部写成纯 asyncio 会让每个工具、每个客户端、每个文件操作都要异步化，复杂度很高。当前用“API 协程 + run 线程 + 命令 to_thread”的组合，心智模型更简单：
+
+```text
+API 不等 run 完成。
+run 在线程里推进。
+事件持续写入 EventStore。
+前端通过 SSE 观察。
+```
+
+代价是：线程取消不如协程优雅，线程数也需要限制。所以系统要有 `MAX_CONCURRENT_RUNS`、取消标志和终态持久化。
+
+## 19. Go sidecar 在异步边界里的价值
+
+Go sidecar 不是为了“简历上有 Go”，更合理的价值是把适合进程隔离的能力移出 Python 主事件循环。
+
+| Go 服务 | 适合原因 | 注意点 |
+|---|---|---|
+| indexer | 文件扫描、索引构建适合高性能 IO | 小项目可能收益不明显 |
+| filetools | 文件读写、备份、回滚可以做成稳定服务 | 跨进程调用有固定开销 |
+| executor | 命令执行、超时、进程组管理更适合 Go | 不应全量替换简单命令 |
+| MCP gateway | 外部工具连接、协议桥接适合独立边界 | 权限和审计仍由主系统治理 |
+
+关键不是“Go 一定更快”，而是“把高风险或阻塞能力放到更合适的边界里”。简单 `pwd`、`ls`、小文件读取走 Go 反而可能更慢，因为 RPC 开销超过执行收益。
+
+## 20. 异步正确性的排查方法
+
+如果前端感觉卡住或 SSE 不刷新，可以按这个顺序排查：
+
+1. 后端 API 是否还能响应 `/health`。
+2. SSE 是否还有 heartbeat。
+3. EventStore 是否还在追加事件。
+4. run 线程是否还活着。
+5. 是否有同步 subprocess 卡住。
+6. 是否有 Go sidecar 请求超时没 fallback。
+7. 是否前端 store 没消费新事件。
+
+这个顺序很重要。不要一上来改前端 UI。先判断是事件没产生、事件没推送，还是事件推到了但前端没渲染。
+
+## 21. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 的异步边界是 API 协程负责快速返回，Agent Run 在线程里后台执行，阻塞命令通过 `asyncio.to_thread` 或 Go executor 隔离，运行过程通过 EventStore 和 SSE 推给前端。这样避免长时间代码任务阻塞 FastAPI 事件循环。
+
+### 深入回答
+
+我没有简单把所有函数都写成 async，而是区分不同负载。HTTP 请求和 SSE 适合 asyncio；Agent Loop 是长任务，放到独立线程；subprocess 是阻塞的，所以异步入口用 `asyncio.to_thread` 包装；命令执行可以按策略分流到 Go executor，再 fallback 到 Python subprocess。这样系统即使在跑测试或等待 LLM 时，健康检查、状态查询和 SSE heartbeat 仍能正常响应。
+
+### 当前边界
+
+当前 run 线程取消还不够细粒度，更多依赖状态标志和终态持久化；线程池大小也主要用 Python 默认值。后续如果要做更强的调度，可以引入统一任务调度器或把长任务拆成更细的可取消 step。
+
+## 22. 容易被追问的问题
+
+### Q1：为什么不全用 asyncio？
+
+全 async 需要所有依赖都异步化，包括文件工具、subprocess、gRPC、LLM SDK 和部分 legacy 逻辑。对本地单用户工具来说，线程隔离更简单可靠。关键是不要在事件循环里直接跑阻塞操作。
+
+### Q2：为什么不是 Celery？
+
+Celery 适合分布式任务队列，但需要 Redis/RabbitMQ。nanoCursor 是本地单用户工具，引入 Celery 会大幅增加部署复杂度。当前线程 + EventStore 已经能覆盖需求。
+
+### Q3：Go executor 为什么不能全量替换 Python subprocess？
+
+因为跨进程/RPC 有固定开销。简单命令走 Python 更快，复杂长命令、测试、构建、超时控制更适合 Go executor。成熟路线是智能分流，不是全量替换。
+
+### Q4：如何证明异步边界做对了？
+
+可以做 smoke test：长任务运行中，`/health`、事件查询、SSE heartbeat、前端状态刷新仍然正常。也可以写 benchmark 比较 Go executor 和 Python subprocess 在简单命令、测试命令、超时命令上的差异。
+
+## 23. 本章自测增强
+
+1. `async def` 里调用 `subprocess.run` 为什么仍然会阻塞？
+2. Agent Run 放线程的好处和代价分别是什么？
+3. `asyncio.to_thread` 适合包装哪些操作？
+4. Go executor 为什么适合复杂命令，不适合所有命令？
+5. SSE 不刷新时，如何区分后端没事件、SSE 断开、前端没消费？
+6. 如果未来做多用户 SaaS，当前异步模型哪些地方必须升级？

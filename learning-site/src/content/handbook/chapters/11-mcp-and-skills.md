@@ -298,3 +298,155 @@ MCP stdio 和外部进程生命周期更适合放到 Go 里：进程启动、超
 2. **读 MCP 权限分类代码**：打开 `src/runtime/action_policy.py`，找到 `classify_mcp_permission` 函数。手写 5 个 MCP 工具名（包含读和写语义的），测试它们被分类到 `mcp_read`、`mcp_write` 还是 `external_risky`。
 3. **导入一个 Skill 并检查安全扫描结果**：从 GitHub 克隆一个 `.cursor/rules` 文件或 SUPERPOWERS Skill，导入到 nanoCursor。观察 `scan_skill_content` 的扫描结果——哪些模式被命中？哪些权限被允许/阻止？
 4. **追踪 Routing Decision 的完整链路**：打开 `src/api/services/routing_decision_service.py`，从 `build_routing_decision` 开始，追踪 Intent、Skills、MCP plan 和 tool_policy 如何合并成最终的 routing decision 对象。用 JSON 格式手写出这个对象的完整结构。
+
+## 15. 深度学习：MCP 是工具协议，Skills 是行为规范
+
+MCP 和 Skills 很容易被混在一起讲。面试时一定要先分清：
+
+| 维度 | MCP | Skills |
+|---|---|---|
+| 本质 | 外部工具调用协议 | 任务规范/领域知识 |
+| 回答的问题 | Agent 能调用什么 | Agent 遇到任务该怎么做 |
+| 典型内容 | tool name、input schema、server command | instructions、triggers、agent_roles、quality rules |
+| 风险 | 外部副作用、secret、网络、权限 | 恶意指令、绕过审批、污染 prompt |
+| 治理方式 | tool policy、approval、server health、fallback | 安全扫描、权限限制、选择注入、版本管理 |
+
+一句话：
+
+```text
+MCP 扩展手，Skills 扩展脑。
+```
+
+但这个说法只是帮助记忆，真正工程上它们都必须进入同一套上下文和工具治理。
+
+## 16. 成熟工具里的 MCP 原理和本项目是否一致
+
+大方向是一致的：
+
+1. 用户配置 server。
+2. 客户端启动或连接 server。
+3. 通过协议发现工具。
+4. 将工具 schema 暴露给模型。
+5. 模型选择工具并传参。
+6. 客户端执行工具并返回结果。
+7. 高风险工具需要用户确认或策略限制。
+
+nanoCursor 已经实现了这条主线，但成熟度还不等于商业工具：
+
+| 能力 | 当前状态 | 差距 |
+|---|---|---|
+| server 配置 | 已有 | secret 管理还简单 |
+| 工具发现 | 已有 cache/circuit/fallback | 长连接和复用还可增强 |
+| 工具调用 | 已有 Python runtime，可选 Go gateway | schema 类型转换还可增强 |
+| 权限治理 | 已接入 mcp_read/mcp_write | server 信任分级还可增强 |
+| 前端管理 | 有设置和预设 | 体验仍可继续打磨 |
+| 生态兼容 | 支持基本导入 | 与主流 Skills 包格式兼容还不完整 |
+
+面试时要承认边界：MCP/Skills 是“具备核心机制”，不是“生态成熟到能替代 Claude Code/Cursor”。
+
+## 17. 为什么 GitHub 开源 Skills 加载不简单
+
+用户之前问过“能不能加载 GitHub 开源 Skills”。理性回答是：能做，但难点不在下载文件，而在安全和规范化。
+
+开源 Skills 可能存在：
+
+- 文件结构不统一。
+- frontmatter 字段不一致。
+- 指令要求读取密钥或执行 shell。
+- 要求绕过 approval。
+- 包含与当前项目冲突的规则。
+- 版本更新后行为变化。
+- 不同工具对 Skill 的解释方式不同。
+
+所以正确流程应该是：
+
+```text
+导入
+  -> 解析 manifest/frontmatter
+  -> 静态安全扫描
+  -> 规范化字段
+  -> 显示风险和权限
+  -> 用户确认启用
+  -> 根据 intent 选择注入
+  -> 记录版本和来源
+```
+
+不是 `git clone` 后直接塞进 prompt。
+
+## 18. Skills 为什么不是普通 prompt 模板
+
+普通 prompt 模板通常只是文本片段。nanoCursor 的 Skill 至少应该带：
+
+| 字段 | 作用 |
+|---|---|
+| id/name/description | 识别和展示 |
+| triggers | 什么时候触发 |
+| agent_roles | 给 Lead、Coder、Reviewer 还是 Docs Agent |
+| requested_tool_permissions | Skill 希望使用什么工具 |
+| blocked_permissions | 安全扫描阻止什么 |
+| risk/safety_findings | 风险说明 |
+| scope/version/source | 生命周期和来源 |
+
+这让 Skill 可以被选择、审计和限制，而不是无条件污染每次 prompt。
+
+## 19. MCP/Skills 和上下文管理的关系
+
+MCP 工具 schema 和 Skill 指令都可能占上下文，所以不能无限注入。
+
+理想流程：
+
+```text
+Intent Router 判断任务
+  -> Routing Decision 选择 Skills 和 MCP plan
+  -> ContextPack 注入 selected_skills / mcp capabilities
+  -> ContextBudget 控制长度
+  -> ToolPolicyRuntime 控制实际调用权限
+```
+
+这说明 MCP/Skills 不是前端功能菜单，而是运行决策的一部分。
+
+## 20. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 里 MCP 和 Skills 分工不同。MCP 是工具协议，解决 Agent 能调用哪些外部能力；Skills 是任务规范，解决遇到某类任务应该按什么标准执行。项目里 MCP 会经过 server 配置、工具发现、权限分类和 approval；Skills 会经过导入、规范化、安全扫描、按 intent 选择，然后进入 ContextPack。
+
+### 深入回答
+
+我没有把 MCP/Skills 做成简单菜单。MCP 工具调用属于真实外部动作，所以必须进入工具治理，区分 mcp_read 和 mcp_write；只读失败可以 fallback，本地写或外部副作用不能自动替代。Skills 则更像可治理的 prompt 能力包，导入时会做静态扫描，识别删除文件、安装依赖、绕过审批等危险指令，并限制权限。两者最终都会进入 routing decision 和上下文预算。
+
+### 当前边界
+
+当前系统实现了核心机制，但生态兼容还不完整。比如 MCP 长连接复用、OAuth/secret 管理、Skill 包格式兼容、版本锁定、Skill 效果评分都还可以继续做。面试时不要把它夸成成熟插件市场。
+
+## 21. 容易被追问的问题
+
+### Q1：MCP 和普通函数调用有什么区别？
+
+MCP 是协议化的外部工具接入，有 server 生命周期、工具发现、schema、调用和错误处理。普通函数调用是本地代码内部能力，边界更短。
+
+### Q2：MCP 工具是不是都可信？
+
+不是。MCP server 可能来自第三方，工具可能读写外部系统。必须按工具语义和 server 信任级别分类，并对写操作进入 approval。
+
+### Q3：Skill 会不会 prompt injection？
+
+会有风险。外部 Skill 本质上是外部指令，所以需要安全扫描、权限限制、用户确认和选择性注入。不能无条件放进系统 prompt。
+
+### Q4：为什么写 MCP 失败不能自动 fallback？
+
+因为写 MCP 可能有外部副作用，比如创建 issue、提交 PR、修改远端数据。失败后自动替代执行可能造成重复或不一致，必须让用户确认。
+
+### Q5：Go MCP Gateway 的价值是什么？
+
+MCP stdio server 的进程生命周期、超时、取消、stderr 捕获和隔离更适合放到 Go sidecar。Python 继续负责 Agent 决策和策略。
+
+## 22. 本章自测增强
+
+1. 为什么说 MCP 扩展手，Skills 扩展脑？
+2. GitHub Skill 导入为什么不能直接信任？
+3. Skill 的 `requested_tool_permissions` 和 `blocked_permissions` 有什么区别？
+4. MCP tool schema 为什么不能无限塞进 prompt？
+5. 如果 MCP server 连续失败，系统应该如何降级？
+6. 如果一个 Skill 要求“忽略审批”，系统应该如何处理？
+7. 为什么 MCP/Skills 最终要进入 routing decision，而不是只放在设置页？

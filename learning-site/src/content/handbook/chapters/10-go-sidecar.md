@@ -287,3 +287,128 @@ Go 适合作为工程增强，不适合替代智能编排层。
 2. **手动触发 fallback**：在 Go filetools 没有启动的情况下启动项目，执行一次文件操作。在日志/事件流中找到 `go_filetools_fallback` 事件，确认 fallback 链路的每一步。
 3. **跑 contract test**：运行 `pytest tests/contracts/test_filetools_contract.py -v`，看每个测试用例验证了什么行为。如果某个用例失败，分析是 Python 行为变了还是 Go 行为变了。
 4. **追踪 feature flag 的判断逻辑**：打开 `src/runtime/runtime_feature_flags.py`，找到 `go_filetools_enabled()` 和 `go_filetools_fallback_enabled()` 函数，理解它们如何读取环境变量。然后修改 `.env` 中的对应配置，观察系统行为变化。
+
+## 14. 深度学习：Go 的价值在边界，不在“语言替换”
+
+面试里最容易被问的一句是：“你为什么要引入 Go？是不是为了简历硬凑？”
+
+这个问题要正面回答。nanoCursor 里的 Go 不应该被讲成“Python 不行，所以换 Go”，而应该讲成：**Python 负责智能编排，Go 负责确定性系统边界**。
+
+可以把系统分成两类逻辑：
+
+| 类型 | 更适合 Python | 更适合 Go |
+|---|---|---|
+| LLM prompt、Agent Loop、上下文选择 | 是 | 否 |
+| FastAPI 路由和业务粘合 | 是 | 可选 |
+| 文件扫描、目录过滤、备份回滚 | 可做 | 更适合 |
+| 命令执行、超时、取消、进程组 | 可做 | 更适合 |
+| MCP stdio 生命周期 | 可做 | 更适合 |
+| 策略、审批、事件归一化 | 是 | 不应该绕过 Python |
+
+这就是混合架构的合理性：不是微服务越多越好，而是边界清楚的模块才值得拆。
+
+## 15. 当前 Go 服务矩阵应该怎么记
+
+项目里出现了多个 Go 服务，但面试时不要把它们讲成“全部生产可用”。建议按成熟度分层。
+
+| 层级 | 服务 | 口径 |
+|---|---|---|
+| 默认增强层 | indexer、filetools | 已接入主链路，默认启用，失败 fallback |
+| 可选增强层 | executor、MCP gateway | 适合复杂命令和 MCP stdio，但默认可关闭 |
+| 实验候选层 | eventstore、policy、taskboard、cron | 用于验证边界，不是主链路依赖 |
+
+这样讲会更可信。你不是为了 Go 占比把所有东西强行拆服务，而是知道哪些模块值得用 Go，哪些模块暂时不值得。
+
+## 16. 为什么有些 Go 服务反而可能更慢
+
+这个问题很重要，也很真实。
+
+Go 服务不是魔法。一次跨语言调用有固定成本：
+
+```text
+Python 调用
+  -> gRPC 序列化
+  -> 进程间通信
+  -> Go 服务处理
+  -> 反序列化
+  -> Python 继续处理
+```
+
+所以：
+
+- `pwd`、`ls`、小文件读取这种微小操作，Go 可能比 Python 慢。
+- 大目录扫描、复杂索引、长命令、超时取消、备份回滚，Go 更有价值。
+- 频繁调用但每次都很小的操作，需要 cache、批处理或连接复用，否则收益不明显。
+
+面试时可以这样说：
+
+> 我后来意识到 Go sidecar 不是全量替换 Python，而是智能分流。简单命令继续走 Python，复杂测试/构建命令和需要进程管理的任务才走 Go executor。性能不是只看语言，而是看边界成本和任务粒度。
+
+## 17. Go sidecar 不能做什么
+
+为了避免被追问时被动，需要主动讲边界：
+
+| 不应该让 Go 做 | 原因 |
+|---|---|
+| 决定是否允许写文件 | 权限和审批属于统一策略层 |
+| 直接解释用户意图 | 依赖 LLM 和上下文，Python 更适合 |
+| 绕过 EventStore 自己写状态 | 会破坏系统事实来源 |
+| 无条件替换 Python fallback | 会让 sidecar 成为单点故障 |
+| 处理所有业务策略 | 会让系统分裂成两套规则 |
+
+Go sidecar 的正确定位是 backend，不是 policy owner。
+
+## 18. 跨语言一致性怎么保证
+
+Go + Python 最大风险不是“能不能跑”，而是行为慢慢不一致。
+
+因此要有三类保护：
+
+| 保护 | 作用 |
+|---|---|
+| proto contract | 明确请求/响应字段 |
+| Python adapter | 把 Go 返回统一成 Python 工具结果 |
+| contract test | 用同一组输入验证 Python 和 Go 行为一致 |
+
+比如 filetools 的 `.proto` 明确了 `ReadFile`、`EditFile`、`BackupFile`、`RollbackFile` 等 RPC；Python 的 `filetools_client.py` 负责把这些 RPC 接入 `file_ops.py`；contract test 保证 fallback 后语义不变。
+
+## 19. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 没有把后端全量换成 Go，而是采用 Python 主后端 + Go sidecar。Python 负责 Agent Loop、上下文、工具治理和事件流，Go 负责文件工具、项目索引、命令执行、MCP stdio 这类边界清楚、确定性强、需要进程管理或高性能 IO 的模块。Go sidecar 默认是增强层，有健康检查、feature flag、fallback 和 contract test。
+
+### 深入回答
+
+我一开始也考虑过是否要大规模 Go 化，但后来发现 Agent 系统的核心不在 HTTP 框架性能，而在上下文、工具、安全和恢复。Go 更适合做 sidecar，比如 filetools 可以处理文件读写、备份和回滚，executor 可以处理命令超时和取消，MCP gateway 可以管理 stdio server 生命周期。所有 sidecar 都不能绕过 Python 的工具策略，调用前仍经过 ToolPolicyRuntime，结果仍进入 EventStore。
+
+### 诚实边界
+
+不是所有 Go 服务都带来性能提升。小命令和小文件操作可能因为 RPC 开销反而更慢，所以项目里 executor 做了智能分流，filetools/indexer 默认启用但有 fallback，MCP gateway 和其他服务则是可选增强或实验层。
+
+## 20. 容易被追问的问题
+
+### Q1：为什么不全 Go 重写？
+
+因为 Agent Runtime 的核心是 LLM 生态、prompt、上下文和工具治理，Python 开发效率和生态更适合。Go 的优势在确定性系统边界，而不是替代整个智能层。
+
+### Q2：Go sidecar 挂了怎么办？
+
+不会影响主流程。系统有 feature flag、健康检查、fallback 和 cooldown。Go 不可用时回退 Python 实现，并记录事件。
+
+### Q3：Go 是否提升了性能？
+
+要分场景。项目扫描、文件工具、长命令、进程管理有价值；简单命令和小操作可能因为 RPC 开销不划算。所以不是全量替换，而是智能分流。
+
+### Q4：Go 会不会绕过 Python 安全策略？
+
+不会。Python 侧先做 tool policy、approval、路径安全和上下文约束，Go 只是执行 backend。执行结果仍回到 Python 事件和证据链。
+
+## 21. 本章自测增强
+
+1. 为什么 Go 在 nanoCursor 里是 sidecar，不是主后端？
+2. 哪些 Go 服务默认启用，哪些只是可选或实验？
+3. 为什么小命令走 Go 可能更慢？
+4. 跨语言 contract test 解决什么问题？
+5. 如果 Go filetools 和 Python file_ops 行为不一致，应该怎么定位？
+6. 为什么 Go sidecar 不应该持有最终工具审批权？

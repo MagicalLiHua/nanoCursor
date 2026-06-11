@@ -403,3 +403,167 @@ MAX_ACTIVE_AGENTS = 3 是一个工程取捨：太少（1个）等于没有并行
 1. 阅读 `suggest_ephemeral_agents` 的完整实现，尝试输入不同的 prompt，看系统会建议哪些 Agent。
 2. 跟踪一次并行 Agent 的执行流程：从 `should_run_parallel_briefing` 到 `build_parallel_merge_plan`。
 3. 在 EventStore 中找到 `ephemeral_agent_spawned`、`ephemeral_agent_completed`、`ephemeral_agent_archived` 三种事件，理解 Agent 生命周期。
+
+## 13. 深度学习：Agent 编排不是角色扮演
+
+很多多 Agent 项目容易陷入一个误区：先定义一堆角色，然后让它们轮流说话。这样在演示里很热闹，但真正做代码任务时会有三个问题：
+
+1. 简单任务被复杂化，用户只是问一句话也出现 Planner、Coder、Tester。
+2. 子 Agent 输出很多中间话术，最终用户反而看不清真实结果。
+3. 文件写入、测试、审批和恢复责任变得模糊，出了问题不知道谁负责。
+
+nanoCursor 后来的编排原则是：**Agent 是运行时资源，不是固定演员表**。
+
+这句话可以拆成三层：
+
+| 层级 | 含义 | 工程意义 |
+|---|---|---|
+| Lead 常驻 | 默认只有 Lead 接收用户请求 | 降低噪声，保留统一决策入口 |
+| 子 Agent 临时 | 只有复杂任务才创建 Planner/Coder/Tester/Reviewer | 不让临时分工污染长期会话 |
+| 结果归 Lead | 子 Agent 产出 evidence 和建议，Lead 负责合并和最终回复 | 保证用户看到的是一个清晰交付 |
+
+## 14. 成熟编排的关键：少、准、短、可回收
+
+判断一个 Agent 编排是否成熟，可以看四个指标。
+
+### 少
+
+能不用子 Agent 就不用。问候、概念解释、普通对比、只读小查询，都应该由 Lead 直接完成。
+
+### 准
+
+创建 Agent 时要能说清楚原因。比如“检测到需要写前端组件，所以创建 Frontend Action Agent”，而不是笼统创建一个“万能助手”。
+
+### 短
+
+临时 Agent 的目标必须短而具体。好的目标是：
+
+```text
+检查 README 与启动命令是否一致，输出风险和修改建议。
+```
+
+不好的目标是：
+
+```text
+帮我把项目做好。
+```
+
+### 可回收
+
+临时 Agent 完成后必须归档。否则前端会残留一堆“活跃 Agent”，用户会误以为它们仍在参与下一轮对话。
+
+## 15. Agent 创建决策应该怎么升级
+
+当前 `suggest_ephemeral_agents` 主要是规则和关键词。它的好处是稳定、便宜、容易测试；缺点是对复杂语义不够敏感。
+
+更成熟的路线不是直接把所有判断交给 LLM，而是：
+
+```text
+LLM 给出结构化建议
+  -> deterministic guard 校验
+  -> tool policy 收紧权限
+  -> run scope 限制工作范围
+  -> Lead 最终确认是否采用
+```
+
+结构化建议可以长这样：
+
+```json
+{
+  "need_agents": true,
+  "reason": "任务包含跨文件代码实现和验证",
+  "agents": [
+    {
+      "name": "Implementation Agent",
+      "role": "coder",
+      "goal": "实现排序算法源码和 benchmark",
+      "allowed_actions": ["read", "write_workspace_file", "run_safe_tests"],
+      "risk_level": "medium"
+    },
+    {
+      "name": "Verification Agent",
+      "role": "tester",
+      "goal": "运行测试并检查性能脚本是否可执行",
+      "allowed_actions": ["read", "run_safe_tests"],
+      "risk_level": "low"
+    }
+  ]
+}
+```
+
+然后 guard 做几件事：
+
+- 当前任务如果是 `lead_direct_reply`，直接拒绝创建子 Agent。
+- 当前任务如果是 read only，移除所有写动作。
+- 超过活跃 Agent 上限，裁剪低优先级 Agent。
+- 高风险工具进入审批。
+- 子 Agent 的 include/exclude scope 必须落在 workspace 内。
+
+这就是“模型负责建议，系统负责约束”。
+
+## 16. 子 Agent 输出应该长什么样
+
+为了避免前端变成日志海，子 Agent 输出要分成两类：
+
+| 输出类型 | 给谁看 | 例子 |
+|---|---|---|
+| activity | 给前端实时展示 | “正在读取 README 和 pyproject 配置” |
+| result | 给 Lead 合并 | Summary、Evidence、Risks、Recommended Next Actions |
+
+不要把工具 stdout、异常堆栈、文件路径碎片直接塞进最终用户回复。它们应该进入 evidence、事件或底部详情。最终聊天框只展示用户需要理解的结论。
+
+一个合格的子 Agent result：
+
+```json
+{
+  "summary": "README 的后端启动命令已经和 src.api.server 入口一致。",
+  "evidence": [
+    "README.md 中使用 python -m uvicorn src.api.server:app",
+    "src/api/server.py 暴露 create_app 生成的 app"
+  ],
+  "risks": [
+    "根目录 api_server.py 仍作为兼容入口存在，可能让新读者误解"
+  ],
+  "recommended_next_actions": [
+    "在 README 中明确 api_server.py 是兼容入口"
+  ]
+}
+```
+
+## 17. 读代码时重点看什么
+
+读 Agent 编排不要只看“创建 Agent 的函数”，要顺着生命周期看。
+
+| 阶段 | 重点文件 | 要确认的问题 |
+|---|---|---|
+| 建议 | `ephemeral_agent_service.py` | prompt 如何变成 Agent spec |
+| 限制 | `ephemeral_agent_service.py` | run intent 如何限制 task scope |
+| 创建 | `spawn_ephemeral_agent` | 活跃数量、ID、TTL 如何处理 |
+| 执行 | `parallel_agent_service.py` | 为什么并行只读，如何限流 |
+| 合并 | `build_parallel_merge_plan` | 多个结果如何被 Lead 消化 |
+| 归档 | `complete_ephemeral_agent` | 结果如何保存，状态如何结束 |
+| 清理 | `cleanup_expired_ephemeral_agents` | 过期 Agent 如何回收 |
+
+## 18. 面试表达模板
+
+### 30 秒回答
+
+nanoCursor 的多 Agent 不是固定四角色流程，而是 Lead 按需创建临时 Agent。简单任务由 Lead 直接回答；复杂代码任务才创建 Planner、Coder、Tester 或 Reviewer。子 Agent 有明确 goal、tool scope、risk level 和 TTL，完成后归档。这样避免了多 Agent 系统常见的噪声和角色堆叠。
+
+### 深入回答
+
+我把 Agent 编排做成 run scoped，而不是全局固定团队。这样每轮任务都能根据意图和复杂度决定是否需要分工。并行 Agent 目前主要做只读预分析，输出证据、风险和建议，再由 Lead 合并。文件修改仍然串行进入工具治理，这样可以降低并行写入冲突、回滚和审批复杂度。
+
+### 当前边界
+
+Agent 建议目前还偏规则化，复杂任务下的角色选择还可以更智能。后续我会把它升级成模型结构化建议加 deterministic guard 的形式，并用 benchmark 评估“创建 Agent 是否真的帮助任务完成”。
+
+## 19. 本章自测增强
+
+1. 为什么说 Agent 是运行时资源，而不是固定演员表？
+2. 临时 Agent 为什么不能再创建子 Agent？
+3. 为什么并行 Agent 先只读，不直接写文件？
+4. 子 Agent 的 activity 和 result 有什么区别？
+5. 如果前端显示一堆已完成的临时 Agent，最可能是哪一层没有归档或过滤？
+6. 如果用户只是问“Python 和 Java 谁更好”，为什么不应该创建 Coder？
+7. 如何把关键词规则升级成更成熟的 LLM 判断，而不牺牲安全性？

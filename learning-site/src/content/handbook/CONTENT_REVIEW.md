@@ -1,6 +1,6 @@
 # 学习资料审校记录
 
-最后更新：2026-06-09
+最后更新：2026-06-11
 
 这份记录用来回答一个很实际的问题：学习包里哪些内容可以直接学，哪些内容只是历史计划，哪些地方需要结合源码验证。
 
@@ -22,15 +22,15 @@
 |---|---|---|
 | 01 项目全景 | 可直接学习 | 重写为高密度入口，突出 Agent Loop、上下文、工具治理、失败恢复、Go sidecar |
 | 02 请求生命周期 | 可直接学习 | 重写为真实请求链路，校准前端 store action、run API、EventStore 和恢复路径 |
-| 03 Agent Loop | 可直接学习 | 内容方向正确，保留为核心深水区章节 |
-| 04 Agent 编排 | 可直接学习 | 内容较长但属于代码地图型章节，暂不压缩过度 |
-| 05 上下文管理 | 可直接学习 | 内容正确，保留预算、裁剪、ContextPack 细节 |
-| 06 记忆机制 | 可直接学习 | 内容正确，注意把 AGENTS.md / CLAUDE.md 理解为规则记忆，不是聊天历史 |
-| 07 工具治理 | 已校准 | 补充“失败恢复不能绕过权限”，压缩低密度目标说明 |
-| 08 EventStore 与 SSE | 已校准 | 修正 Go eventstore 状态：它是实验 sidecar，不是当前主链路依赖 |
-| 09 异步边界 | 可直接学习 | 内容方向正确，重点理解 `asyncio.to_thread` 和 Go executor 分流 |
-| 10 Go Sidecar | 已校准 | 增加当前 Go 服务矩阵：indexer/filetools 默认启用，executor/MCP 默认关闭 |
-| 11 MCP 与 Skills | 可直接学习 | 内容方向正确，重点理解 MCP 是工具协议，Skills 是任务规范 |
+| 03 Agent Loop | 已升级 | 补充运行时合约、真实链路、三类任务对比、面试深挖和源码阅读任务 |
+| 04 Agent 编排 | 已升级 | 补充“Agent 是运行时资源”的解释、创建决策升级路线、子 Agent 输出规范和面试模板 |
+| 05 上下文管理 | 已升级 | 补充 ContextPack / Budget / Ledger 区分、Agent 视图差异、压缩心智和面试追问 |
+| 06 记忆机制 | 已升级 | 补充“记忆是被治理的长期上下文”、生命周期、记忆/上下文关系和面试表达 |
+| 07 工具治理 | 已升级 | 补充工具调用五段式、shell/写文件风险、失败恢复边界和面试表达 |
+| 08 EventStore 与 SSE | 已升级 | 补充事件账本、session/event/snapshot 区别、前端投影和失败恢复关系 |
+| 09 异步边界 | 已升级 | 补充 async 正确性、线程/协程/Go sidecar 分层、排查路径和面试表达 |
+| 10 Go Sidecar | 已升级 | 补充 Go sidecar 边界、成熟度分层、性能取舍、跨语言一致性和面试表达 |
+| 11 MCP 与 Skills | 已升级 | 补充 MCP/Skills 区别、成熟工具对比、GitHub Skills 风险、上下文和权限治理 |
 | 12 前端可观测 | 已校准 | 校准 React + Zustand 路径，明确前端是事件消费层 |
 | 13 测试与质量 | 可直接学习 | 内容方向正确，重点读 contract test 和真实任务 smoke test |
 | 14 启动与配置 | 已校准 | 修正 Go 启动命令，从旧 `cmd/server` 改为脚本和 `cmd/nanocursor-*` |
@@ -46,7 +46,9 @@
 4. 读 `05-context-management.md` 和 `06-memory-system.md`，理解“聪明程度”主要来自上下文和记忆。
 5. 读 `07-tool-governance.md`、`08-event-store-and-sse.md`、`09-runtime-and-async-boundary.md`，理解系统为什么可控、可观察、不会卡死事件循环。
 6. 最后读 `10-go-sidecar.md`、`11-mcp-and-skills.md`、`13-testing-and-quality.md`、`14-deployment-and-startup.md`，把工程边界、扩展能力和启动测试补齐。
-7. 面试前读 `15-project-retrospective.md` 和 `interview/01-project-pitch.md`。
+7. 做 `exercises/02-trace-one-real-run.md`，用问候、只读分析、代码交付三类任务验证链路。
+8. 做 `exercises/03-memory-tool-governance-lab.md`，验证记忆选择、规则记忆、shell 分类和 approval。
+9. 面试前读 `15-project-retrospective.md`、`interview/01-project-pitch.md`、`interview/03-agent-loop-deep-dive.md` 和 `interview/04-context-and-memory.md`。
 
 ## 还需要人工深读的地方
 
@@ -57,3 +59,81 @@
 - Go sidecar 要结合状态接口和 contract test 看，不能只看“Go 更快”这个表面结论。
 - MCP/Skills 目前是可用能力，不是成熟生态；学习时要重点看安全边界和 fallback。
 - 前端可观测章节主要帮助你理解事件如何被消费，不代表当前 UI 已经没有设计问题。
+
+## 2026-06-11 内容升级记录
+
+本轮开始按 `LEARNING_CONTENT_UPGRADE_PLAN.md` 执行“高质量学习资料”升级，优先处理最有项目区分度和面试价值的主线。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `exercises/02-trace-one-real-run.md` | 用三个真实任务追踪 run、事件、上下文、工具调用和交付结果 |
+| `interview/03-agent-loop-deep-dive.md` | 准备 Agent Loop、多 Agent 协同、为什么不用固定 DAG 等高频追问 |
+
+升级章节：
+
+| 章节 | 升级重点 |
+|---|---|
+| `chapters/03-agent-loop.md` | 把 Agent Loop 解释成运行时合约，而不是普通 while loop |
+| `chapters/04-agent-orchestration.md` | 强化“默认 Lead、按需临时 Agent、完成后归档”的产品化思路 |
+| `chapters/05-context-management.md` | 强化上下文选择、预算、账本、压缩和不同 Agent 视图 |
+
+下一轮建议继续升级：
+
+1. `chapters/12-frontend-observability.md`：可适当压缩，不要让前端材料喧宾夺主。
+2. `chapters/13-testing-and-quality.md`：补充 benchmark、ablation、contract test 和 CI 失败排查。
+3. `chapters/15-project-retrospective.md`：最终收束项目价值、边界和简历讲法。
+
+## 2026-06-11 第二轮内容升级记录
+
+本轮继续执行高质量内容计划，把上下文主线补到记忆和工具治理。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `interview/04-context-and-memory.md` | 准备上下文管理、记忆机制、压缩和可解释选择的面试追问 |
+| `exercises/03-memory-tool-governance-lab.md` | 用实验串联 MemoryRecord、规则记忆、shell 分类、approval 和失败恢复 |
+
+升级章节：
+
+| 章节 | 升级重点 |
+|---|---|
+| `chapters/06-memory-system.md` | 把记忆从“保存历史”改讲成“受治理的长期上下文候选池” |
+| `chapters/07-tool-governance.md` | 把工具治理从权限表扩展成 propose/classify/decide/execute/record 管线 |
+
+## 2026-06-11 第三轮内容升级记录
+
+本轮继续把工程化主线补齐，重点处理可观测运行和异步边界。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `interview/05-tools-recovery-and-observability.md` | 准备工具治理、失败恢复、EventStore、SSE、异步边界相关面试追问 |
+
+升级章节：
+
+| 章节 | 升级重点 |
+|---|---|
+| `chapters/08-event-store-and-sse.md` | 把事件从“日志”提升为运行时账本，补充前端投影和恢复链路 |
+| `chapters/09-runtime-and-async-boundary.md` | 把 async 从语法层讲到线程、to_thread、Go sidecar 和排查方法 |
+
+## 2026-06-11 第四轮内容升级记录
+
+本轮完成 Go sidecar、MCP/Skills 和综合面试题库。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `interview/06-go-mcp-and-project-boundary.md` | 准备 Go 微服务、MCP/Skills、项目边界和成熟工具差距相关追问 |
+| `interview/07-interview-question-bank.md` | 72 个高频面试问题，按模块覆盖项目总览、Agent Loop、上下文、记忆、工具、恢复、事件、异步、Go、MCP/Skills、测试和简历价值 |
+
+升级章节：
+
+| 章节 | 升级重点 |
+|---|---|
+| `chapters/10-go-sidecar.md` | 把 Go 从“语言占比”讲成“确定性系统边界”，补充性能取舍和 sidecar 成熟度分层 |
+| `chapters/11-mcp-and-skills.md` | 把 MCP/Skills 从“功能菜单”讲成“工具协议 + 行为规范 + 安全治理” |

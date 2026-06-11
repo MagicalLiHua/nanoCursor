@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { BrainCircuit, CheckCircle2, Gauge, RefreshCcw, Scissors, ShieldCheck, Sparkles } from "lucide-react";
+import { BrainCircuit, CheckCircle2, ChevronDown, Gauge, RefreshCcw, Scissors, ShieldCheck, Sparkles } from "lucide-react";
 import { getApiClient } from "../../core/sharedApi.js";
 
 function isRealThreadId(value = "") {
@@ -154,6 +154,7 @@ function CompactionCard({ event }) {
 }
 
 export default function ContextWindowPanel({ state }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [model, setModel] = useState(null);
   const [ledger, setLedger] = useState(null);
   const [settings, setSettings] = useState({
@@ -307,38 +308,55 @@ export default function ContextWindowPanel({ state }) {
         </div>
       </div>
 
-      <div className="context-mode-selector" aria-label="摘要压缩模式">
-        <button
-          type="button"
-          className={settings.summary_mode === "deterministic" ? "active" : ""}
-          onClick={() => updateSummaryMode("deterministic")}
-          disabled={settingsBusy}
-        >
-          确定性
-        </button>
-        <button
-          type="button"
-          className={settings.summary_mode === "llm" ? "active" : ""}
-          onClick={() => updateSummaryMode("llm")}
-          disabled={settingsBusy}
-        >
-          LLM
-        </button>
-      </div>
+      <button
+        type="button"
+        className="context-detail-toggle"
+        onClick={() => setDetailsOpen((value) => !value)}
+        aria-expanded={detailsOpen}
+      >
+        <span>
+          <strong>上下文明细</strong>
+          <small>{sections.length ? `${sections.length} 个主要来源` : "运行后可查看 token 构成"}</small>
+        </span>
+        <ChevronDown size={15} />
+      </button>
 
-      {sections.length ? (
-        <div className="context-section-list">
-          {sections.map((section) => (
-            <SectionBar key={section.id} section={section} maxTokens={inputTokens} />
-          ))}
-        </div>
-      ) : (
-        <div className="context-window-empty">
-          <span>运行后显示 system、历史、文件、工具、记忆等占用。</span>
+      {detailsOpen && (
+        <div className="context-detail-body">
+          <div className="context-mode-selector" aria-label="摘要压缩模式">
+            <button
+              type="button"
+              className={settings.summary_mode === "deterministic" ? "active" : ""}
+              onClick={() => updateSummaryMode("deterministic")}
+              disabled={settingsBusy}
+            >
+              确定性
+            </button>
+            <button
+              type="button"
+              className={settings.summary_mode === "llm" ? "active" : ""}
+              onClick={() => updateSummaryMode("llm")}
+              disabled={settingsBusy}
+            >
+              LLM
+            </button>
+          </div>
+
+          {sections.length ? (
+            <div className="context-section-list">
+              {sections.map((section) => (
+                <SectionBar key={section.id} section={section} maxTokens={inputTokens} />
+              ))}
+            </div>
+          ) : (
+            <div className="context-window-empty">
+              <span>运行后显示 system、历史、文件、工具、记忆等占用。</span>
+            </div>
+          )}
+
+          <CompactionCard event={compactionEvent} />
         </div>
       )}
-
-      <CompactionCard event={compactionEvent} />
 
       <div className="context-window-actions">
         <button type="button" onClick={compactNow} disabled={!ledger || busy}>
