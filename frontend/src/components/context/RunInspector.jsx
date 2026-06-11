@@ -16,6 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { shortPath, statusLabel } from "../../core/format.js";
+import ContextWindowPanel from "./ContextWindowPanel.jsx";
 
 function normalizeTaskTitle(title = "") {
   return String(title).replace(/\s+/g, "").replace(/[：:]/g, ":").trim();
@@ -265,6 +266,7 @@ export default function RunInspector({ state }) {
           <ProgressList state={state} />
         </Section>
         <Environment state={state} />
+        <ContextWindowPanel state={state} />
         <QualityInfo state={state} />
       </div>
     </div>

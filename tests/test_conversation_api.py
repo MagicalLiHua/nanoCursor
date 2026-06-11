@@ -1,6 +1,19 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from src.api import legacy_runtime as api_server
+
+
+@pytest.fixture(autouse=True)
+def isolate_optional_indexer(monkeypatch):
+    """Keep conversation API tests focused on runtime behavior, not optional Go sidecar availability."""
+
+    monkeypatch.setenv("NANOCURSOR_GO_INDEXER_ENABLED", "false")
+    from src.indexer.indexer import reset_index
+
+    reset_index()
+    yield
+    reset_index()
 
 
 def test_conversation_run_persists_execution_plan_and_events(tmp_path, monkeypatch):

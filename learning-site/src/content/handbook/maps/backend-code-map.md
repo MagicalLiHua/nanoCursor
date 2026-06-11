@@ -297,8 +297,8 @@ Python 接入：
 - `src/tools/file_ops.py`
 - `src/api/services/go_filetools_service.py`
 - `src/api/routes/runtime.py`
-- `src/api/services/go_runtime_client.py`
-- `src/api/services/go_mcp_gateway_client.py`
+- `src/runtime/go_runtime_client.py`
+- `src/runtime/go_mcp_gateway_client.py`
 
 理解重点：
 

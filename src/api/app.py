@@ -199,6 +199,7 @@ def create_app(*, lifespan=None) -> FastAPI:
     from src.api.routes.mcp import router as mcp_router
     from src.api.routes.skills import router as skills_router
     from src.api.routes.runtime import router as runtime_status_router
+    from src.api.routes.context import router as context_router
 
     app.include_router(system_router)
     app.include_router(evals_router)
@@ -219,5 +220,6 @@ def create_app(*, lifespan=None) -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(skills_router)
     app.include_router(runtime_status_router)
+    app.include_router(context_router)
 
     return app

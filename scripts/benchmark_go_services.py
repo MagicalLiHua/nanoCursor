@@ -313,6 +313,11 @@ def _format_table(results: dict) -> str:
     return "\n".join(lines)
 
 
+def _default_output_paths(workspace: Path) -> tuple[Path, Path]:
+    root = workspace / ".nanocursor" / "benchmarks" / "go-services"
+    return root / "latest.json", root / "latest.md"
+
+
 def _write_outputs(results: dict, output_json: Path | None, output_markdown: Path | None) -> None:
     if output_json:
         output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -344,9 +349,14 @@ def main() -> int:
     parser.add_argument("--files", type=int, default=160, help="Synthetic workspace file count.")
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--output-markdown", type=Path, default=None)
+    parser.add_argument("--no-default-output", action="store_true", help="Do not write .nanocursor/benchmarks/go-services/latest.*")
     args = parser.parse_args()
 
     workspace = args.workspace.resolve() if args.workspace else _make_workspace(args.files)
+    output_json = args.output_json
+    output_markdown = args.output_markdown
+    if not args.no_default_output and output_json is None and output_markdown is None:
+        output_json, output_markdown = _default_output_paths(workspace)
     indexer_port = _free_port()
     executor_port = _free_port()
     filetools_port = _free_port()
@@ -370,7 +380,7 @@ def main() -> int:
         }
         print()
         print(_format_table(results))
-        _write_outputs(results, args.output_json, args.output_markdown)
+        _write_outputs(results, output_json, output_markdown)
     finally:
         _stop_processes(processes)
     return 0

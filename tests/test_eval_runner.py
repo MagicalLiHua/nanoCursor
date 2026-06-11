@@ -21,7 +21,17 @@ def test_load_eval_tasks_task_has_fixture():
     bug_fix = next((t for t in load_eval_tasks() if t["id"] == "bug_fix_import_error"), None)
     assert bug_fix is not None
     assert "fixture" in bug_fix
-    assert bug_fix.get("test_command") == "pytest -q"
+    assert bug_fix.get("test_command") == "python -m pytest -q"
+
+
+def test_load_eval_tasks_contains_new_benchmark_fixtures():
+    tasks = {task["id"]: task for task in load_eval_tasks()}
+
+    assert tasks["context_pack_target_file"]["fixture"] == "context_pack_target_file"
+    assert tasks["context_pack_target_file"]["expected_signals"]["required_files"] == ["app/billing.py"]
+    assert tasks["failure_recovery_pytest_repair"]["fixture"] == "failure_recovery_pytest_repair"
+    assert tasks["failure_recovery_pytest_repair"]["expected_signals"]["required_files"] == ["app.py"]
+    assert tasks["go_sidecar_filetools_batch"]["category"] == "go"
 
 
 def test_prepare_eval_workspace_creates_copy(tmp_path, monkeypatch):
@@ -53,6 +63,30 @@ def test_run_eval_json_task_uses_fixture_workspace(tmp_path):
     assert (Path(eval_workspace) / "app" / "util.py").exists()
     saved = json.loads((workspace / ".nanocursor" / "evals" / result["eval_run_id"] / "result.json").read_text(encoding="utf-8"))
     assert saved["workspace_dir"] == eval_workspace
+
+
+def test_run_eval_context_pack_fixture_writes_target_file(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    result = run_eval("context_pack_target_file", str(workspace), store)
+
+    assert result["score"]["overall"] == "passed"
+    fixed = Path(result["workspace_dir"]) / "app" / "billing.py"
+    assert "discount_percent / 100" in fixed.read_text(encoding="utf-8")
+
+
+def test_run_eval_failure_recovery_fixture_writes_repair(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EventStore()
+
+    result = run_eval("failure_recovery_pytest_repair", str(workspace), store)
+
+    assert result["score"]["overall"] == "passed"
+    fixed = Path(result["workspace_dir"]) / "app.py"
+    assert "capitalize()" in fixed.read_text(encoding="utf-8")
 
 
 def test_score_eval_run_required_events(tmp_path):

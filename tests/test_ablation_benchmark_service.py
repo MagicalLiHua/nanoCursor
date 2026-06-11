@@ -1,7 +1,13 @@
 from src.api.services.ablation_benchmark_service import (
     build_ablation_matrix,
     build_component_necessity_report,
+    create_ablation_suite,
+    get_ablation_artifacts,
+    get_ablation_report,
+    get_ablation_suite,
+    list_ablation_suites,
     list_ablation_components,
+    run_persisted_ablation_suite,
     run_ablation_suite,
     save_ablation_artifacts,
 )
@@ -96,6 +102,93 @@ def test_run_ablation_suite_executes_matrix_and_persists(tmp_path):
     assert result["artifacts"]["artifacts"]["report_md"].endswith("report.md")
 
 
+def test_ablation_suite_lifecycle_can_create_run_and_read_artifacts(tmp_path):
+    created = create_ablation_suite(
+        str(tmp_path),
+        ["bug_fix_import_error"],
+        ["agent_loop"],
+        mode="agent",
+    )
+    suite_id = created["suite"]["suite_id"]
+
+    stored = get_ablation_suite(str(tmp_path), suite_id)
+    assert stored["suite"]["status"] == "pending"
+    assert len(stored["matrix"]) == 2
+
+    run = run_persisted_ablation_suite(str(tmp_path), suite_id)
+    assert run["summary"]["run_count"] == 2
+    by_variant = {item["variant_id"]: item for item in run["results"]}
+    assert by_variant["baseline"]["effective_mode"] == "agent"
+    assert by_variant["disable_agent_loop"]["effective_mode"] == "command_only"
+    assert by_variant["disable_agent_loop"]["runtime_effect"]["has_runtime_hook"] is True
+
+    report = get_ablation_report(str(tmp_path), suite_id)
+    assert report["suite_id"] == suite_id
+    assert report["components"][0]["component"] == "agent_loop"
+
+    artifacts = get_ablation_artifacts(str(tmp_path), suite_id)
+    assert artifacts["artifacts"]["runs"].endswith("/runs")
+
+    listing = list_ablation_suites(str(tmp_path))
+    assert listing["total"] == 1
+    assert listing["suites"][0]["suite_id"] == suite_id
+
+
+def test_context_pack_ablation_has_runtime_effect(tmp_path):
+    result = run_ablation_suite(
+        str(tmp_path),
+        ["context_pack_target_file"],
+        ["context_pack", "project_index"],
+        mode="agent",
+        persist=False,
+    )
+
+    by_variant = {item["variant_id"]: item for item in result["results"]}
+    assert by_variant["baseline"]["score"]["overall"] == "passed"
+    assert by_variant["disable_context_pack"]["effective_mode"] == "command_only"
+    assert by_variant["disable_context_pack"]["score"]["overall"] == "failed"
+    assert by_variant["disable_project_index"]["effective_mode"] == "command_only"
+    assert by_variant["disable_project_index"]["score"]["overall"] == "failed"
+
+    verdicts = {item["component"]: item["verdict"] for item in result["report"]["components"]}
+    assert verdicts["context_pack"] == "necessary"
+    assert verdicts["project_index"] == "necessary"
+
+
+def test_failure_recovery_ablation_keeps_original_failure_when_disabled(tmp_path):
+    result = run_ablation_suite(
+        str(tmp_path),
+        ["failure_recovery_pytest_repair"],
+        ["failure_recovery"],
+        mode="agent",
+        persist=False,
+    )
+
+    by_variant = {item["variant_id"]: item for item in result["results"]}
+    assert by_variant["baseline"]["score"]["overall"] == "passed"
+    assert by_variant["disable_failure_recovery"]["effective_mode"] == "baseline"
+    assert by_variant["disable_failure_recovery"]["score"]["overall"] == "failed"
+    assert result["report"]["components"][0]["component"] == "failure_recovery"
+    assert result["report"]["components"][0]["verdict"] == "necessary"
+
+
+def test_go_sidecar_ablation_is_reported_without_starting_services(tmp_path):
+    result = run_ablation_suite(
+        str(tmp_path),
+        ["go_sidecar_filetools_batch"],
+        ["go_sidecars"],
+        mode="deterministic",
+        persist=False,
+    )
+
+    by_variant = {item["variant_id"]: item for item in result["results"]}
+    assert by_variant["baseline"]["score"]["overall"] == "passed"
+    assert by_variant["disable_go_sidecars"]["score"]["overall"] == "failed"
+    assert by_variant["baseline"]["eval_result"]["notes"]
+    assert result["report"]["components"][0]["component"] == "go_sidecars"
+    assert result["report"]["components"][0]["verdict"] == "necessary"
+
+
 def test_list_ablation_components_contains_planned_core_modules():
     ids = {item["id"] for item in list_ablation_components()}
 
@@ -140,3 +233,26 @@ def test_ablation_api_builds_matrix_and_report():
     })
     assert suite_response.status_code == 200
     assert suite_response.json()["summary"]["run_count"] == 2
+
+    create_response = client.post("/api/evals/ablation/suites", json={
+        "eval_ids": ["todo_web_app"],
+        "components": ["context_pack"],
+    })
+    assert create_response.status_code == 200
+    suite_id = create_response.json()["suite"]["suite_id"]
+
+    get_response = client.get(f"/api/evals/ablation/suites/{suite_id}")
+    assert get_response.status_code == 200
+    assert get_response.json()["suite"]["suite_id"] == suite_id
+
+    run_response = client.post(f"/api/evals/ablation/suites/{suite_id}/run")
+    assert run_response.status_code == 200
+    assert run_response.json()["summary"]["run_count"] == 2
+
+    report_response = client.get(f"/api/evals/ablation/suites/{suite_id}/report")
+    assert report_response.status_code == 200
+    assert report_response.json()["suite_id"] == suite_id
+
+    artifacts_response = client.get(f"/api/evals/ablation/suites/{suite_id}/artifacts")
+    assert artifacts_response.status_code == 200
+    assert artifacts_response.json()["suite_id"] == suite_id

@@ -6,15 +6,24 @@ import difflib
 import json
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from src.api.services.compaction_policy_service import decide_compaction
+from src.api.services.compaction_service import compact_ledger
+from src.api.services.context_ledger_service import (
+    ContextLedger,
+    ContextSection,
+    build_context_ledger,
+)
 from src.api.services.event_store import EventStore
 from src.api.services.intent_router import classify_user_intent
+from src.api.services.model_context_registry_service import ModelContextSpec
 from src.api.services.routing_decision_service import build_routing_decision
 from src.api.services.skill_registry_service import import_skill
+from src.api.services.summary_compaction_service import summary_compact_ledger
 from src.infra import config as config_module
-
 
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "todo-web-app": {
@@ -167,6 +176,20 @@ REAL_TASK_BENCHMARKS: list[dict[str, Any]] = [
 ]
 
 
+CONTEXT_WINDOW_PRESSURE_CASE: dict[str, Any] = {
+    "id": "context-window-pressure",
+    "title": "Context Window Compaction Pressure",
+    "description": "构造超长上下文账本，验证确定性压缩和摘要式压缩是否降低 token 并保留关键锚点。",
+    "difficulty": "hard",
+    "success_criteria": [
+        "触发 emergency compaction",
+        "压缩后 token 明显下降",
+        "当前用户请求、当前计划和工具策略不被压缩",
+        "压缩后上下文回到 soft 阈值以下",
+    ],
+}
+
+
 def _workspace(workspace_dir: str | None = None) -> Path:
     root = Path(workspace_dir or config_module.WORKSPACE_DIR).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -215,6 +238,342 @@ def list_real_task_benchmarks(workspace_dir: str | None = None) -> list[dict[str
     """Return real-task benchmark catalog without mutating the workspace."""
     _workspace(workspace_dir)
     return [dict(case) for case in REAL_TASK_BENCHMARKS]
+
+
+def list_context_window_benchmarks(workspace_dir: str | None = None) -> dict[str, Any]:
+    """Return context-window benchmark metadata."""
+    _workspace(workspace_dir)
+    return {"suite": "context_window", "benchmarks": [dict(CONTEXT_WINDOW_PRESSURE_CASE)]}
+
+
+def run_context_window_pressure_benchmark(
+    *,
+    workspace_dir: str | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Run a deterministic compaction pressure benchmark.
+
+    This benchmark avoids LLM calls. It evaluates the control plane itself:
+    ledger construction, policy decision, deterministic compaction, and anchor
+    preservation.
+    """
+    workspace = _workspace(workspace_dir)
+    started = time.perf_counter()
+    model = ModelContextSpec(
+        provider="benchmark",
+        model="context-window-pressure",
+        context_window=10_000,
+        max_output_tokens=1_000,
+        source="benchmark",
+    )
+    anchors = {"current_user_message", "current_plan", "tool_policy"}
+    sections = [
+        ContextSection(
+            id="current_user_message",
+            label="Current User Message",
+            category="current",
+            tokens=800,
+            priority=100,
+            compactible=False,
+        ),
+        ContextSection(
+            id="current_plan",
+            label="Current Plan",
+            category="plan",
+            tokens=700,
+            priority=100,
+            compactible=False,
+        ),
+        ContextSection(
+            id="tool_policy",
+            label="Tool Policy",
+            category="policy",
+            tokens=600,
+            priority=100,
+            compactible=False,
+        ),
+        ContextSection(
+            id="old_agent_activity",
+            label="Old Agent Activity",
+            category="history",
+            tokens=2_200,
+            priority=20,
+            compactible=True,
+        ),
+        ContextSection(
+            id="tool_results",
+            label="Tool Results",
+            category="tool",
+            tokens=4_800,
+            priority=25,
+            compactible=True,
+        ),
+        ContextSection(
+            id="selected_files",
+            label="Selected Files",
+            category="files",
+            tokens=1_400,
+            priority=80,
+            compactible=True,
+        ),
+    ]
+    before = build_context_ledger(
+        sections,
+        model,
+        run_id="benchmark-context-window-pressure",
+        conversation_id="benchmark-context-window",
+    )
+    decision = decide_compaction(before)
+    result = compact_ledger(before, decision=decision, reason="benchmark")
+    after = result.ledger or before
+    summary_result = summary_compact_ledger(before, decision=decision, mode="deterministic")
+    summary_after = summary_result.ledger or before
+    llm_summary_result = summary_compact_ledger(
+        before,
+        decision=decision,
+        mode="llm",
+        summarizer=_benchmark_llm_summary,
+    )
+    llm_summary_after = llm_summary_result.ledger or before
+    llm_fallback_result = summary_compact_ledger(
+        before,
+        decision=decision,
+        mode="llm",
+        summarizer=_benchmark_failing_summary,
+    )
+    llm_fallback_after = llm_fallback_result.ledger or before
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+    preserved = anchors.intersection({section.id for section in after.sections if not section.compactible})
+    anchor_preservation_rate = round(len(preserved) / len(anchors), 3)
+    reduction_ratio = round(result.reduced_tokens / max(result.before_tokens, 1), 3)
+    summary_reduction_ratio = round(summary_result.reduced_tokens / max(summary_result.before_tokens, 1), 3)
+    llm_reduction_ratio = round(llm_summary_result.reduced_tokens / max(llm_summary_result.before_tokens, 1), 3)
+    llm_fallback_reduction_ratio = round(
+        llm_fallback_result.reduced_tokens / max(llm_fallback_result.before_tokens, 1),
+        3,
+    )
+    ablation = {
+        "without_compaction": _context_window_ablation_case(
+            before,
+            model,
+            anchors=anchors,
+            changed_sections=[],
+            reduced_tokens=0,
+        ),
+        "deterministic_compaction": _context_window_ablation_case(
+            after,
+            model,
+            anchors=anchors,
+            changed_sections=result.updated_sections,
+            reduced_tokens=result.reduced_tokens,
+        ),
+        "summary_compaction": _context_window_ablation_case(
+            summary_after,
+            model,
+            anchors=anchors,
+            changed_sections=summary_result.source_section_ids,
+            reduced_tokens=summary_result.reduced_tokens,
+            mode=summary_result.mode,
+            used_llm=summary_result.used_llm,
+            warnings=summary_result.warnings,
+        ),
+        "llm_summary_compaction": _context_window_ablation_case(
+            llm_summary_after,
+            model,
+            anchors=anchors,
+            changed_sections=llm_summary_result.source_section_ids,
+            reduced_tokens=llm_summary_result.reduced_tokens,
+            mode=llm_summary_result.mode,
+            used_llm=llm_summary_result.used_llm,
+            warnings=llm_summary_result.warnings,
+        ),
+        "llm_summary_fallback": _context_window_ablation_case(
+            llm_fallback_after,
+            model,
+            anchors=anchors,
+            changed_sections=llm_fallback_result.source_section_ids,
+            reduced_tokens=llm_fallback_result.reduced_tokens,
+            mode=llm_fallback_result.mode,
+            used_llm=llm_fallback_result.used_llm,
+            warnings=llm_fallback_result.warnings,
+        ),
+    }
+    variants = [
+        _context_window_variant_row("without_compaction", ablation["without_compaction"]),
+        _context_window_variant_row("deterministic_compaction", ablation["deterministic_compaction"]),
+        _context_window_variant_row("summary_compaction", ablation["summary_compaction"]),
+        _context_window_variant_row("llm_summary_compaction", ablation["llm_summary_compaction"]),
+        _context_window_variant_row("llm_summary_fallback", ablation["llm_summary_fallback"]),
+    ]
+    checks: list[dict[str, Any]] = []
+    _bench_expect(checks, "context_window", "trigger_emergency", before.status == "emergency", before.status, "emergency")
+    _bench_expect(checks, "context_window", "compacted", result.compacted, result.compacted, True)
+    _bench_expect(
+        checks,
+        "context_window",
+        "reduction_ratio",
+        reduction_ratio >= 0.30,
+        reduction_ratio,
+        ">= 0.30",
+    )
+    _bench_expect(
+        checks,
+        "context_window",
+        "anchor_preservation",
+        anchor_preservation_rate == 1.0,
+        anchor_preservation_rate,
+        1.0,
+    )
+    _bench_expect(
+        checks,
+        "context_window",
+        "after_soft_threshold",
+        after.usage_ratio <= model.soft_compact_ratio,
+        round(after.usage_ratio, 3),
+        f"<= {model.soft_compact_ratio}",
+    )
+    _bench_expect(
+        checks,
+        "context_window",
+        "summary_compaction",
+        ablation["summary_compaction"]["passed"],
+        ablation["summary_compaction"]["status"],
+        "under soft limit",
+    )
+    _bench_expect(
+        checks,
+        "context_window",
+        "llm_summary_path",
+        llm_summary_result.used_llm and ablation["llm_summary_compaction"]["passed"],
+        {"used_llm": llm_summary_result.used_llm, "status": llm_summary_after.status},
+        {"used_llm": True, "status": "ok/soft"},
+    )
+    _bench_expect(
+        checks,
+        "context_window",
+        "llm_fallback_path",
+        (not llm_fallback_result.used_llm)
+        and bool(llm_fallback_result.warnings)
+        and ablation["llm_summary_fallback"]["passed"],
+        {"used_llm": llm_fallback_result.used_llm, "warnings": llm_fallback_result.warnings},
+        "fallback with warning and pass",
+    )
+    overall = "passed" if all(check["status"] == "passed" for check in checks) else "failed"
+    evidence_sentences = [
+        (
+            f"无压缩时上下文占用 {before.input_tokens} tokens，状态为 {before.status}；"
+            f"deterministic 压缩后降到 {after.input_tokens} tokens。"
+        ),
+        (
+            f"summary 压缩将 {len(summary_result.source_section_ids)} 个低优先级 section "
+            f"压成摘要，token 降幅 {summary_reduction_ratio:.0%}。"
+        ),
+        (
+            "LLM 摘要路径可被独立验证；当 LLM 摘要提供方失败时，系统会降级到本地确定性摘要，"
+            "仍保留当前请求、当前计划和工具策略。"
+        ),
+    ]
+    summary = {
+        "suite": "context_window",
+        "benchmark_id": CONTEXT_WINDOW_PRESSURE_CASE["id"],
+        "overall": overall,
+        "before_tokens": before.input_tokens,
+        "after_tokens": after.input_tokens,
+        "reduced_tokens": result.reduced_tokens,
+        "reduction_ratio": reduction_ratio,
+        "before_usage_ratio": round(before.usage_ratio, 3),
+        "after_usage_ratio": round(after.usage_ratio, 3),
+        "before_status": before.status,
+        "after_status": after.status,
+        "anchor_preservation_rate": anchor_preservation_rate,
+        "preserved_anchors": sorted(preserved),
+        "updated_sections": result.updated_sections,
+        "summary_after_tokens": summary_after.input_tokens,
+        "summary_reduced_tokens": summary_result.reduced_tokens,
+        "summary_reduction_ratio": summary_reduction_ratio,
+        "summary_source_sections": summary_result.source_section_ids,
+        "llm_summary_after_tokens": llm_summary_after.input_tokens,
+        "llm_summary_reduced_tokens": llm_summary_result.reduced_tokens,
+        "llm_summary_reduction_ratio": llm_reduction_ratio,
+        "llm_summary_used_llm": llm_summary_result.used_llm,
+        "llm_fallback_after_tokens": llm_fallback_after.input_tokens,
+        "llm_fallback_reduced_tokens": llm_fallback_result.reduced_tokens,
+        "llm_fallback_reduction_ratio": llm_fallback_reduction_ratio,
+        "llm_fallback_warnings": llm_fallback_result.warnings,
+        "variants": variants,
+        "ablation": ablation,
+        "evidence_sentences": evidence_sentences,
+        "compaction_duration_ms": elapsed_ms,
+        "decision": decision.model_dump(),
+        "checks": checks,
+        "completed_at": time.time(),
+    }
+    if persist:
+        summary["benchmark_run_id"] = _persist_context_window_benchmark_result(summary, workspace)
+    return summary
+
+
+def _context_window_ablation_case(
+    ledger: ContextLedger,
+    model: ModelContextSpec,
+    *,
+    anchors: set[str],
+    changed_sections: list[str],
+    reduced_tokens: int,
+    mode: str = "none",
+    used_llm: bool = False,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    preserved = anchors.intersection({section.id for section in ledger.sections if not section.compactible})
+    anchor_preservation_rate = round(len(preserved) / max(len(anchors), 1), 3)
+    under_soft_limit = ledger.usage_ratio <= model.soft_compact_ratio
+    task_success_rate = 1.0 if under_soft_limit and anchor_preservation_rate == 1.0 else 0.0
+    return {
+        "input_tokens": ledger.input_tokens,
+        "usage_ratio": round(ledger.usage_ratio, 3),
+        "status": ledger.status,
+        "reduced_tokens": reduced_tokens,
+        "reduction_ratio": round(reduced_tokens / max(ledger.input_tokens + reduced_tokens, 1), 3),
+        "changed_sections": changed_sections,
+        "anchor_preservation_rate": anchor_preservation_rate,
+        "task_success_rate": task_success_rate,
+        "mode": mode,
+        "used_llm": used_llm,
+        "warnings": warnings or [],
+        "passed": task_success_rate == 1.0,
+    }
+
+
+def _context_window_variant_row(variant: str, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "variant": variant,
+        "input_tokens": result["input_tokens"],
+        "usage_ratio": result["usage_ratio"],
+        "status": result["status"],
+        "reduced_tokens": result["reduced_tokens"],
+        "reduction_ratio": result["reduction_ratio"],
+        "anchor_preservation_rate": result["anchor_preservation_rate"],
+        "used_llm": result["used_llm"],
+        "warning_count": len(result.get("warnings") or []),
+        "passed": result["passed"],
+    }
+
+
+def _benchmark_llm_summary(sections: list[ContextSection], ledger: ContextLedger) -> str:
+    section_names = ", ".join(section.id for section in sections[:8])
+    return "\n".join(
+        [
+            "LLM-style compact context summary:",
+            f"- Run: {ledger.run_id or 'n/a'}; conversation: {ledger.conversation_id or 'n/a'}.",
+            f"- Compressed low-priority sections: {section_names}.",
+            "- Preserve the current user request, active plan, tool policy, and recovery constraints verbatim.",
+            "- Historical agent activity and tool outputs were summarized because they exceeded the model context budget.",
+        ]
+    )
+
+
+def _benchmark_failing_summary(_sections: list[ContextSection], _ledger: ContextLedger) -> str:
+    raise RuntimeError("simulated LLM summarizer outage")
 
 
 def run_real_task_benchmark_suite(
@@ -398,6 +757,32 @@ def get_real_task_benchmark_run(run_id: str, workspace_dir: str | None = None) -
     if not result_path.exists():
         raise ValueError(f"Real task benchmark run 不存在: {run_id}")
     return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def get_context_window_benchmark_run(run_id: str, workspace_dir: str | None = None) -> dict[str, Any]:
+    """Read a persisted context-window benchmark result."""
+    safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in run_id).strip("-")
+    result_path = (
+        _workspace(workspace_dir)
+        / ".nanocursor"
+        / "benchmarks"
+        / "context_window"
+        / "runs"
+        / safe_id
+        / "result.json"
+    )
+    if not result_path.exists():
+        raise ValueError(f"Context window benchmark run 不存在: {run_id}")
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def _persist_context_window_benchmark_result(summary: dict[str, Any], workspace: Path) -> str:
+    run_id = f"context-window-{int(time.time() * 1000)}"
+    result_dir = workspace / ".nanocursor" / "benchmarks" / "context_window" / "runs" / run_id
+    result_dir.mkdir(parents=True, exist_ok=True)
+    persisted = {**summary, "benchmark_run_id": run_id}
+    (result_dir / "result.json").write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
+    return run_id
 
 
 def _benchmark_tasks(benchmark: dict[str, Any]) -> list[dict[str, Any]]:

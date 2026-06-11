@@ -37,7 +37,7 @@ async def run():
 | `src/api/services/workflow_thread_service.py` | 将 Agent 执行从 API 线程分离到独立线程 |
 | `src/runtime/command_runner.py` | 命令执行、超时控制、后端路由 |
 | `src/tools/bash.py` | Bash 工具定义和执行入口 |
-| `src/api/services/go_runtime_client.py` | Go sidecar HTTP/gRPC 客户端 |
+| `src/runtime/go_runtime_client.py` | Go sidecar HTTP/gRPC 客户端 |
 | `src/api/app.py` | FastAPI lifespan、中间件 |
 | `src/infra/background.py` | 后台任务管理 |
 

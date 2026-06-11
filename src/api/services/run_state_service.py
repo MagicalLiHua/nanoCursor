@@ -10,8 +10,26 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from src.agent.context_pack import ContextPack
+from src.api.services.compaction_policy_service import decide_compaction
+from src.api.services.compaction_service import append_compaction_history
+from src.api.services.context_compaction_settings_service import (
+    get_context_compaction_settings,
+    should_auto_compact_level,
+)
+from src.api.services.context_ledger_service import (
+    ContextLedger,
+    build_context_ledger,
+    save_context_ledger,
+    sections_from_context_pack,
+)
 from src.api.services.context_service import build_context_pack
 from src.api.services.event_store import get_event_store
+from src.api.services.model_context_registry_service import get_current_model_context_spec
+from src.api.services.summary_compaction_service import (
+    SummaryCompactionResult,
+    summary_compact_ledger,
+)
 from src.runtime.task_board import (
     RunTask,
     RunTaskBoard,
@@ -20,7 +38,6 @@ from src.runtime.task_board import (
     save_task_board,
 )
 from src.tools.tool_result import is_tool_error_output
-
 
 TASK_EVENT_STATUS_MAP = {
     "todo": "pending",
@@ -557,8 +574,25 @@ def build_run_context_pack(
         thread_id=thread_id,
         turn_context=turn_context,
     )
+    ledger_state = prepare_context_pack_ledger(
+        pack,
+        thread_id,
+        workspace_dir,
+        conversation_id=session.get("conversation_id"),
+        turn_id=str(turn_context.get("step")) if isinstance(turn_context, dict) and turn_context.get("step") else None,
+        purpose=purpose,
+        task_id=task_id,
+        auto_compact=True,
+    )
     data = pack.to_dict()
     data = _stamp_context_pack(data, thread_id, workspace_dir, purpose=purpose, task_id=task_id)
+    context_ledger = ledger_state.get("context_ledger")
+    if context_ledger:
+        data["context_ledger"] = context_ledger
+    if ledger_state.get("context_ledger_before_compaction"):
+        data["context_ledger_before_compaction"] = ledger_state["context_ledger_before_compaction"]
+    if ledger_state.get("context_compaction"):
+        data["context_compaction"] = ledger_state["context_compaction"]
     context_dir = _run_dir(thread_id, workspace_dir) / "context"
     context_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(context_dir / "run_context_pack.json", data)
@@ -619,10 +653,27 @@ def build_task_context_pack(thread_id: str, workspace_dir: str, task_id: str) ->
         conversation_id=session.get("conversation_id"),
         thread_id=thread_id,
     )
+    ledger_state = prepare_context_pack_ledger(
+        pack,
+        thread_id,
+        workspace_dir,
+        conversation_id=session.get("conversation_id"),
+        turn_id=task_id,
+        purpose="agent_task",
+        task_id=task_id,
+        auto_compact=True,
+    )
     data = pack.to_dict()
     data = _stamp_context_pack(data, thread_id, workspace_dir, purpose="agent_task", task_id=task_id)
     data["task"] = task.model_dump()
     data["graph_node"] = data["task"]
+    context_ledger = ledger_state.get("context_ledger")
+    if context_ledger:
+        data["context_ledger"] = context_ledger
+    if ledger_state.get("context_ledger_before_compaction"):
+        data["context_ledger_before_compaction"] = ledger_state["context_ledger_before_compaction"]
+    if ledger_state.get("context_compaction"):
+        data["context_compaction"] = ledger_state["context_compaction"]
     node_dir = _run_dir(thread_id, workspace_dir) / "context" / "nodes"
     node_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(node_dir / f"{task_id}-context.json", data)
@@ -706,9 +757,283 @@ def preview_context_pack(
         thread_id=thread_id,
     )
     data = _stamp_context_pack(pack.to_dict(), thread_id, workspace_dir, purpose="preview")
+    context_ledger = _build_context_ledger_from_pack(
+        pack,
+        thread_id,
+        workspace_dir,
+        conversation_id=session.get("conversation_id"),
+    )
+    if context_ledger:
+        data["context_ledger"] = context_ledger
     data["preview"] = True
     data["persisted"] = False
     return data
+
+
+def _build_context_ledger_from_pack(
+    pack: ContextPack,
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        spec = get_current_model_context_spec(workspace_dir)
+        ledger = build_context_ledger(
+            sections_from_context_pack(pack),
+            spec,
+            conversation_id=conversation_id,
+            run_id=thread_id,
+            turn_id=turn_id,
+        )
+        return ledger.model_dump()
+    except Exception as exc:
+        get_event_store().append_event(
+            thread_id,
+            "context_ledger_failed",
+            title="上下文账本生成失败",
+            content=str(exc)[:500],
+            agent="system",
+            payload={"error": str(exc)[:500]},
+            workspace_dir=workspace_dir,
+        )
+        return None
+
+
+def prepare_context_pack_ledger(
+    pack: ContextPack,
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+    purpose: str = "run",
+    task_id: str | None = None,
+    auto_compact: bool = True,
+) -> dict[str, Any]:
+    """Persist a ContextPack ledger and auto-compact hard/emergency pressure.
+
+    This is the runtime bridge between ContextPack construction and the
+    context-window budget system. It mutates ``pack`` only when summary
+    compaction is actually applied.
+    """
+
+    data = _build_context_ledger_from_pack(
+        pack,
+        thread_id,
+        workspace_dir,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+    if not data:
+        return {}
+    try:
+        ledger = ContextLedger(**data)
+        save_context_ledger(ledger, workspace_dir)
+    except Exception as exc:
+        get_event_store().append_event(
+            thread_id,
+            "context_ledger_persist_failed",
+            title="上下文账本保存失败",
+            content=str(exc)[:500],
+            agent="system",
+            payload={"error": str(exc)[:500], "purpose": purpose, "task_id": task_id},
+            workspace_dir=workspace_dir,
+        )
+        return {"context_ledger": data}
+
+    state: dict[str, Any] = {"context_ledger": ledger.model_dump()}
+    if not auto_compact:
+        return state
+
+    compaction = _auto_compact_context_pack(
+        pack,
+        ledger,
+        thread_id,
+        workspace_dir,
+        purpose=purpose,
+        task_id=task_id,
+    )
+    if compaction:
+        state.update(compaction)
+    return state
+
+
+def _persist_context_ledger_from_pack(
+    pack: ContextPack,
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any] | None:
+    state = prepare_context_pack_ledger(
+        pack,
+        thread_id,
+        workspace_dir,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        auto_compact=False,
+    )
+    return state.get("context_ledger")
+
+
+def _auto_compact_context_pack(
+    pack: ContextPack,
+    ledger: ContextLedger,
+    thread_id: str,
+    workspace_dir: str,
+    *,
+    purpose: str,
+    task_id: str | None,
+) -> dict[str, Any] | None:
+    decision = decide_compaction(ledger)
+    settings = get_context_compaction_settings(workspace_dir)
+    if not decision.should_compact or not should_auto_compact_level(decision.level, settings):
+        return None
+
+    store = get_event_store()
+    payload = {
+        "level": decision.level,
+        "reason": decision.reason,
+        "strategy": "summary",
+        "summary_mode": settings.summary_mode,
+        "purpose": purpose,
+        "task_id": task_id,
+        "before_tokens": ledger.input_tokens,
+        "before_usage_ratio": round(ledger.usage_ratio, 3),
+        "before_status": ledger.status,
+    }
+    store.append_event(
+        thread_id,
+        "context_compaction_started",
+        title="上下文自动压缩开始",
+        content=f"上下文占用 {ledger.usage_ratio:.1%}，开始压缩低优先级历史和工具上下文。",
+        agent="system",
+        payload=payload,
+        workspace_dir=workspace_dir,
+    )
+    try:
+        result = summary_compact_ledger(ledger, decision=decision, mode=settings.summary_mode)
+        _apply_summary_compaction_to_pack(pack, result)
+        refreshed_data = _build_context_ledger_from_pack(
+            pack,
+            thread_id,
+            workspace_dir,
+            conversation_id=ledger.conversation_id,
+            turn_id=ledger.turn_id,
+        )
+        refreshed_ledger = ContextLedger(**refreshed_data) if refreshed_data else result.ledger
+        if refreshed_ledger is None:
+            raise RuntimeError("context compaction produced no ledger")
+        save_context_ledger(refreshed_ledger, workspace_dir)
+        append_compaction_history(
+            workspace_dir,
+            result,
+            conversation_id=ledger.conversation_id,
+            run_id=ledger.run_id,
+            reason=f"auto:{purpose}",
+        )
+        result_payload = result.model_dump(exclude={"ledger"})
+        store.append_event(
+            thread_id,
+            "context_compaction_finished",
+            title="上下文自动压缩完成",
+            content=(
+                f"已将 {len(result.source_section_ids)} 个低优先级上下文区块压缩为摘要，"
+                f"token {ledger.input_tokens} -> {refreshed_ledger.input_tokens}。"
+            ),
+            agent="system",
+            payload={
+                **payload,
+                "after_tokens": refreshed_ledger.input_tokens,
+                "after_usage_ratio": round(refreshed_ledger.usage_ratio, 3),
+                "after_status": refreshed_ledger.status,
+                "reduced_tokens": max(ledger.input_tokens - refreshed_ledger.input_tokens, 0),
+                "source_section_ids": result.source_section_ids,
+                "preserved_anchors": result.preserved_anchors,
+                "used_llm": result.used_llm,
+                "summary_mode": result.mode,
+                "warnings": result.warnings,
+            },
+            workspace_dir=workspace_dir,
+        )
+        return {
+            "context_ledger_before_compaction": ledger.model_dump(),
+            "context_ledger": refreshed_ledger.model_dump(),
+            "context_compaction": result_payload,
+        }
+    except Exception as exc:
+        store.append_event(
+            thread_id,
+            "context_compaction_failed",
+            title="上下文自动压缩失败",
+            content=str(exc)[:500],
+            agent="system",
+            payload={**payload, "error": str(exc)[:500]},
+            workspace_dir=workspace_dir,
+        )
+        return None
+
+
+def _apply_summary_compaction_to_pack(pack: ContextPack, result: SummaryCompactionResult) -> None:
+    if not result.compacted or not result.summary:
+        return
+    summary = result.summary.strip()
+    if not summary:
+        return
+
+    pack.context_debug = dict(pack.context_debug or {})
+    pack.context_debug["context_compaction"] = {
+        "strategy": "summary",
+        "source_section_ids": result.source_section_ids,
+        "before_tokens": result.before_tokens,
+        "after_tokens": result.after_tokens,
+        "summary_tokens": result.summary_tokens,
+        "warnings": result.warnings,
+    }
+    pack.conversation_summary = _merge_compaction_summary(pack.conversation_summary, summary)
+    pack.omitted = list(pack.omitted or [])
+    pack.omitted.append(
+        {
+            "kind": "context_compaction",
+            "reason": "context window pressure",
+            "source_section_ids": result.source_section_ids,
+            "summary": summary[:800],
+        }
+    )
+    _trim_compacted_pack_sections(pack, set(result.source_section_ids))
+
+
+def _merge_compaction_summary(existing: str, summary: str) -> str:
+    existing = str(existing or "").strip()
+    marker = "【自动上下文压缩摘要】"
+    merged = f"{marker}\n{summary}"
+    if existing:
+        merged = f"{existing[:1200]}\n\n{merged}"
+    return merged[:2400]
+
+
+def _trim_compacted_pack_sections(pack: ContextPack, source_ids: set[str]) -> None:
+    if "selected_files" in source_ids:
+        pack.selected_files = list(pack.selected_files or [])[:6]
+    if "file_outlines" in source_ids:
+        pack.file_outlines = list(pack.file_outlines or [])[:6]
+    if "symbols" in source_ids:
+        pack.symbols = list(pack.symbols or [])[:12]
+    if "recent_changes" in source_ids:
+        pack.recent_changes = list(pack.recent_changes or [])[:8]
+    if "selection_reasons" in source_ids:
+        pack.selection_reasons = list(pack.selection_reasons or [])[:4]
+    if "omitted" in source_ids:
+        pack.omitted = list(pack.omitted or [])[-6:]
+    if "selected_skill_details" in source_ids:
+        pack.selected_skill_details = list(pack.selected_skill_details or [])[:4]
+    if "selected_memories" in source_ids:
+        pack.selected_memories = list(pack.selected_memories or [])[:6]
+    if "user_preferences" in source_ids:
+        pack.user_preferences = list(pack.user_preferences or [])[:8]
 
 
 def get_task_evidence(thread_id: str, workspace_dir: str, task_id: str) -> dict[str, Any]:

@@ -5,8 +5,11 @@ import time
 from fastapi.testclient import TestClient
 
 from src.api.services.benchmark_service import (
+    get_context_window_benchmark_run,
     get_real_task_benchmark_run,
+    list_context_window_benchmarks,
     list_real_task_benchmarks,
+    run_context_window_pressure_benchmark,
     run_real_task_benchmark_suite,
 )
 
@@ -42,9 +45,48 @@ def test_real_task_benchmark_reports_missing_case(tmp_path):
     assert result["results"][0]["overall"] == "error"
 
 
+def test_context_window_pressure_benchmark_compacts_and_preserves_anchors(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    catalog = list_context_window_benchmarks(str(workspace))
+    assert catalog["suite"] == "context_window"
+    assert catalog["benchmarks"][0]["id"] == "context-window-pressure"
+
+    result = run_context_window_pressure_benchmark(workspace_dir=str(workspace))
+
+    assert result["overall"] == "passed"
+    assert result["before_status"] == "emergency"
+    assert result["after_tokens"] < result["before_tokens"]
+    assert result["reduction_ratio"] >= 0.30
+    assert result["anchor_preservation_rate"] == 1.0
+    assert result["summary_reduction_ratio"] >= result["reduction_ratio"]
+    assert result["llm_summary_used_llm"] is True
+    assert result["llm_summary_reduction_ratio"] >= result["reduction_ratio"]
+    assert result["llm_fallback_reduction_ratio"] >= result["reduction_ratio"]
+    assert result["llm_fallback_warnings"]
+    assert {item["variant"] for item in result["variants"]} >= {
+        "without_compaction",
+        "deterministic_compaction",
+        "summary_compaction",
+        "llm_summary_compaction",
+        "llm_summary_fallback",
+    }
+    assert result["ablation"]["without_compaction"]["task_success_rate"] == 0.0
+    assert result["ablation"]["deterministic_compaction"]["task_success_rate"] == 1.0
+    assert result["ablation"]["summary_compaction"]["task_success_rate"] == 1.0
+    assert result["ablation"]["llm_summary_compaction"]["used_llm"] is True
+    assert result["ablation"]["llm_summary_fallback"]["used_llm"] is False
+    assert result["ablation"]["llm_summary_fallback"]["warnings"]
+    assert len(result["evidence_sentences"]) >= 3
+    assert result["benchmark_run_id"].startswith("context-window-")
+    persisted = get_context_window_benchmark_run(result["benchmark_run_id"], str(workspace))
+    assert persisted["before_tokens"] == result["before_tokens"]
+
+
 def test_benchmark_routes_start_and_finalize_run(tmp_path, monkeypatch):
-    from src.api import legacy_runtime as api_server
     import src.api.services.benchmark_service as benchmark_service
+    from src.api import legacy_runtime as api_server
     from src.api.services.benchmark_service import emit_benchmark_run as original_emit
 
     workspace = tmp_path / "workspace"
@@ -97,8 +139,8 @@ def test_benchmark_routes_start_and_finalize_run(tmp_path, monkeypatch):
 
 
 def test_real_task_benchmark_routes(tmp_path, monkeypatch):
-    from src.api.server import app
     import src.infra.config as config_module
+    from src.api.server import app
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -120,3 +162,29 @@ def test_real_task_benchmark_routes(tmp_path, monkeypatch):
     persisted = client.get(f"/api/benchmarks/real-tasks/runs/{data['benchmark_run_id']}")
     assert persisted.status_code == 200
     assert persisted.json()["benchmark_run_id"] == data["benchmark_run_id"]
+
+
+def test_context_window_benchmark_routes(tmp_path):
+    from src.api.run_state import get_workspace, set_active_workspace
+    from src.api.server import app
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_workspace = get_workspace()
+    set_active_workspace(str(workspace))
+    client = TestClient(app)
+    try:
+        catalog = client.get("/api/benchmarks/context-window")
+        assert catalog.status_code == 200
+        assert catalog.json()["suite"] == "context_window"
+
+        run = client.post("/api/benchmarks/context-window/run")
+        assert run.status_code == 200
+        data = run.json()
+        assert data["overall"] == "passed"
+
+        persisted = client.get(f"/api/benchmarks/context-window/runs/{data['benchmark_run_id']}")
+        assert persisted.status_code == 200
+        assert persisted.json()["benchmark_run_id"] == data["benchmark_run_id"]
+    finally:
+        set_active_workspace(old_workspace)

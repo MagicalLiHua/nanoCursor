@@ -174,3 +174,376 @@
 .bottom-content {
   scrollbar-color: rgba(154, 162, 175, 0.48) transparent;
 }
+
+.context-window-panel {
+  gap: 10px;
+}
+
+.context-icon-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+}
+
+.context-icon-button:hover {
+  background: var(--hover-fill);
+  color: var(--text);
+}
+
+.context-window-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-tint);
+}
+
+.context-window-topline,
+.context-usage-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-window-topline strong,
+.context-usage-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.context-window-topline span,
+.context-usage-line strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.context-progress,
+.context-section-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  overflow: hidden;
+}
+
+.context-progress i,
+.context-section-meter i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+
+.context-window-summary.watch .context-progress i {
+  background: var(--blue);
+}
+
+.context-window-summary.warn .context-progress i {
+  background: var(--amber);
+}
+
+.context-window-summary.danger .context-progress i {
+  background: var(--coral);
+}
+
+.context-mode-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.context-mode-selector button {
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.context-mode-selector button.active {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), inset 0 0 0 1px rgba(148, 163, 184, 0.16);
+}
+
+.context-mode-selector button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.context-section-list {
+  display: grid;
+  gap: 8px;
+}
+
+.context-section-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px 44px;
+  align-items: center;
+  gap: 8px;
+}
+
+.context-section-row div:first-child {
+  min-width: 0;
+}
+
+.context-section-row strong,
+.context-section-row span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-section-row strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.context-section-row span,
+.context-section-row em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.context-section-row em {
+  text-align: right;
+}
+
+.context-section-meter i {
+  background: var(--blue);
+}
+
+.context-window-empty {
+  padding: 10px;
+  border-radius: 10px;
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.08);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.context-compaction-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.context-compaction-card.finished {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(240, 253, 244, 0.62);
+}
+
+.context-compaction-card.failed {
+  border-color: rgba(244, 63, 94, 0.2);
+  background: rgba(255, 241, 242, 0.62);
+}
+
+.context-compaction-card.running {
+  border-color: rgba(37, 99, 235, 0.2);
+  background: rgba(239, 246, 255, 0.62);
+}
+
+.context-compaction-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+
+.context-compaction-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.context-compaction-head span {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.06);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 780;
+}
+
+.context-compaction-card.finished .context-compaction-head span {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--green);
+}
+
+.context-compaction-card.failed .context-compaction-head span {
+  background: rgba(244, 63, 94, 0.12);
+  color: var(--coral);
+}
+
+.context-compaction-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.context-compaction-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.context-compaction-stats span {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.16);
+}
+
+.context-compaction-stats small,
+.context-compaction-stats strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-compaction-stats small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.context-compaction-stats strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.context-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.context-chip-list span {
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-anchor-line,
+.context-success,
+.context-warning-line {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.context-anchor-line span,
+.context-success,
+.context-warning-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-window-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.context-window-actions button {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 760;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.context-window-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.context-window-actions > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+[data-theme="dark"] .context-compaction-card {
+  background: rgba(23, 26, 32, 0.82);
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
+[data-theme="dark"] .context-compaction-card.finished {
+  background: rgba(6, 78, 59, 0.18);
+}
+
+[data-theme="dark"] .context-compaction-card.failed {
+  background: rgba(127, 29, 29, 0.18);
+}
+
+[data-theme="dark"] .context-compaction-card.running {
+  background: rgba(30, 58, 138, 0.18);
+}
+
+[data-theme="dark"] .context-compaction-stats span,
+[data-theme="dark"] .context-chip-list span {
+  background: rgba(255, 255, 255, 0.05);
+}

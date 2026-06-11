@@ -91,11 +91,9 @@ The current backend is a FastAPI + Agent Runtime split:
 | `src/api/routes/` | FastAPI route modules |
 | `src/api/services/` | Backend service layer for runs, conversations, context, tools, recovery, quality and evals |
 | `src/indexer/indexer.py` | 项目索引器 |
-| `src/team/team.py` | Legacy teammate runtime; do not extend unless explicitly reviving persistent teammates |
 | `src/api/services/memory_governance_service.py` | Governed memory 的唯一存储与生命周期入口 |
 | `src/api/services/memory_selection_service.py` | 按作用域、相关性和预算选择记忆 |
 | `src/tasks/manager.py` | 早期任务池工具 |
-| `src/tasks/skill.py` | 技能按需加载 |
 | `src/tools/file_tools.py` | 文件操作 |
 | `src/tools/bash.py` | Bash 命令执行 |
 | `src/tools/git_tools.py` | Git 操作 |

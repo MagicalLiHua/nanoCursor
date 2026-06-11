@@ -683,6 +683,7 @@ def reset_index():
         except Exception:
             pass
     _index = None
+    _GO_INDEXER_DISABLED_UNTIL_BY_ADDR.clear()
 
 
 __all__ = ["ProjectIndex", "HybridProjectIndex", "get_project_index", "reset_index", "FileEntry"]

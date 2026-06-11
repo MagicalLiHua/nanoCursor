@@ -25,7 +25,13 @@ from src.api.services.agent_eval_service import (
 from src.api.services.ablation_benchmark_service import (
     build_ablation_matrix,
     build_component_necessity_report,
+    create_ablation_suite,
+    get_ablation_artifacts,
+    get_ablation_report,
+    get_ablation_suite,
+    list_ablation_suites,
     list_ablation_components,
+    run_persisted_ablation_suite,
     run_ablation_suite,
     save_ablation_artifacts,
 )
@@ -78,6 +84,13 @@ class AblationSuiteRunRequest(BaseModel):
     repetitions: int = Field(default=1, ge=1, le=10)
     mode: str = "deterministic"
     persist: bool = True
+
+
+class AblationSuiteCreateRequest(BaseModel):
+    eval_ids: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    repetitions: int = Field(default=1, ge=1, le=20)
+    mode: str = "deterministic"
 
 
 @router.get("")
@@ -239,6 +252,63 @@ async def ablation_suite_run(request: AblationSuiteRunRequest):
         )
     except ValueError as exc:
         raise_400(str(exc))
+
+
+@router.get("/ablation/suites")
+async def ablation_suite_list(limit: int = 50):
+    """List persisted ablation suites."""
+    return list_ablation_suites(get_workspace(), limit=min(max(limit, 1), 200))
+
+
+@router.post("/ablation/suites")
+async def ablation_suite_create(request: AblationSuiteCreateRequest):
+    """Create a persisted ablation suite without running it."""
+    try:
+        return create_ablation_suite(
+            get_workspace(),
+            request.eval_ids,
+            request.components,
+            repetitions=request.repetitions,
+            mode=request.mode,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        raise_400(str(exc))
+
+
+@router.get("/ablation/suites/{suite_id}")
+async def ablation_suite_get(suite_id: str):
+    """Return persisted suite definition, matrix, results, report, and artifact paths."""
+    try:
+        return get_ablation_suite(get_workspace(), suite_id)
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
+@router.post("/ablation/suites/{suite_id}/run")
+async def ablation_suite_run_existing(suite_id: str):
+    """Run an existing persisted ablation suite."""
+    try:
+        return run_persisted_ablation_suite(get_workspace(), suite_id)
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
+@router.get("/ablation/suites/{suite_id}/report")
+async def ablation_suite_report(suite_id: str):
+    """Return or rebuild the component necessity report for a suite."""
+    try:
+        return get_ablation_report(get_workspace(), suite_id)
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
+@router.get("/ablation/suites/{suite_id}/artifacts")
+async def ablation_suite_artifacts(suite_id: str):
+    """Return artifact paths for a persisted ablation suite."""
+    try:
+        return get_ablation_artifacts(get_workspace(), suite_id)
+    except ValueError as exc:
+        raise_404(str(exc))
 
 
 @router.get("/{eval_id}")

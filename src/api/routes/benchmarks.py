@@ -12,10 +12,13 @@ from src.api.models import BenchmarkRunRequest, RealTaskBenchmarkRunRequest, Run
 from src.api.run_state import emit_agenthub_event, event_store, get_workspace, run_manager, runs_lock
 from src.api.services.benchmark_service import (
     get_benchmark,
+    get_context_window_benchmark_run,
     get_real_task_benchmark_run,
+    list_context_window_benchmarks,
     list_benchmarks,
     list_real_task_benchmarks,
     run_benchmark_workflow,
+    run_context_window_pressure_benchmark,
     run_real_task_benchmark_suite,
 )
 from src.api.services.run_context import RunContext
@@ -47,6 +50,24 @@ async def run_real_task_benchmarks(request: RealTaskBenchmarkRunRequest):
 async def get_real_task_benchmark_result(run_id: str):
     try:
         return get_real_task_benchmark_run(run_id, get_workspace())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/benchmarks/context-window")
+async def get_context_window_benchmarks():
+    return list_context_window_benchmarks(get_workspace())
+
+
+@router.post("/benchmarks/context-window/run")
+async def run_context_window_benchmark():
+    return run_context_window_pressure_benchmark(workspace_dir=get_workspace(), persist=True)
+
+
+@router.get("/benchmarks/context-window/runs/{run_id}")
+async def get_context_window_benchmark_result(run_id: str):
+    try:
+        return get_context_window_benchmark_run(run_id, get_workspace())
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

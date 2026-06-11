@@ -21,7 +21,6 @@ ALLOWLIST = {
     "src/api/services/benchmark_service.py",
     "src/infra/cron.py",
     "src/api/services/intent_router.py",
-    "src/team/team.py",
 }
 
 PATTERN = re.compile(r"subprocess\.run|time\.sleep|urllib\.request|urlopen|shell=True")

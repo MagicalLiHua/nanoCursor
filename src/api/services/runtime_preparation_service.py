@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
+from src.agent.context_pack import ContextPack
 from src.agent.prompt_builder import _build_core
 from src.api.services.agent_loop_state_service import append_loop_step
 from src.api.services.context_service import build_context_pack
 from src.api.services.orchestration_service import build_runtime_instructions
-from src.api.services.run_state_service import save_run_context_pack
-
+from src.api.services.run_state_service import prepare_context_pack_ledger, save_run_context_pack
 
 EmitEvent = Callable[..., Any]
 EmitActivity = Callable[..., Any]
@@ -73,8 +74,24 @@ def prepare_runtime_system(
             conversation_id=conversation_id,
             thread_id=thread_id,
         )
+        ledger_state: dict[str, Any] = {}
+        if isinstance(context_pack, ContextPack):
+            ledger_state = prepare_context_pack_ledger(
+                context_pack,
+                thread_id,
+                workspace_dir,
+                conversation_id=conversation_id,
+                purpose="runtime_prompt",
+                auto_compact=True,
+            )
         system = f"{system}\n\n{context_pack.to_text()}"
         context_data = context_pack.to_dict()
+        if ledger_state.get("context_ledger"):
+            context_data["context_ledger"] = ledger_state["context_ledger"]
+        if ledger_state.get("context_ledger_before_compaction"):
+            context_data["context_ledger_before_compaction"] = ledger_state["context_ledger_before_compaction"]
+        if ledger_state.get("context_compaction"):
+            context_data["context_compaction"] = ledger_state["context_compaction"]
         event_store.update_session(thread_id, workspace_dir, context_pack=context_data)
         try:
             save_run_context_pack(thread_id, workspace_dir, context_data)
