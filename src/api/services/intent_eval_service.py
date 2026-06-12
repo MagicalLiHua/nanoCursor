@@ -9,6 +9,8 @@ from typing import Any
 from src.api.services.eval_service import _evals_root, _workspace
 from src.api.services.intent_router import classify_user_intent
 
+SHELL_REQUIRED = {"shell": True}
+
 INTENT_CORE_EVALS: list[dict[str, Any]] = [
     {
         "id": "greeting_direct_answer",
@@ -307,7 +309,7 @@ def _generated_intent_eval_cases() -> list[dict[str, Any]]:
         "页面点击后崩溃，请帮我修复",
     ]
     for idx, prompt in enumerate(debug_prompts, 1):
-        add("debug_fix", idx, prompt, "debug_fix", read=True, write=True, shell=True)
+        add("debug_fix", idx, prompt, "debug_fix", read=True, write=True, **SHELL_REQUIRED)
 
     test_prompts = [
         "帮我运行 pytest 验证一下",
@@ -322,7 +324,7 @@ def _generated_intent_eval_cases() -> list[dict[str, Any]]:
         "帮我跑一下性能测试",
     ]
     for idx, prompt in enumerate(test_prompts, 1):
-        add("test_only", idx, prompt, "test_only", read=True, write=False, shell=True, forbidden_agents=["Coder"])
+        add("test_only", idx, prompt, "test_only", read=True, write=False, **SHELL_REQUIRED, forbidden_agents=["Coder"])
 
     review_prompts = [
         "帮我审查一下当前 diff 有没有风险",
@@ -360,7 +362,17 @@ def _generated_intent_eval_cases() -> list[dict[str, Any]]:
         "git push current branch to GitHub",
     ]
     for idx, prompt in enumerate(risky_prompts, 1):
-        add("risky_operation", idx, prompt, "risky_operation", read=True, write=True, shell=True, approval=True, risk_level="high")
+        add(
+            "risky_operation",
+            idx,
+            prompt,
+            "risky_operation",
+            read=True,
+            write=True,
+            **SHELL_REQUIRED,
+            approval=True,
+            risk_level="high",
+        )
 
     followup_cases = [
         ("继续", "上一轮用户要求实现 Python 排序算法性能比较脚本，已经进入代码任务并准备写文件。", "feature_delivery", True, True, None),

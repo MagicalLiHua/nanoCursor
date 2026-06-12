@@ -494,6 +494,8 @@ def assess_loop_finish_readiness(
     """Inspect whether the Lead loop has enough evidence to finish successfully."""
     from src.api.services.agent_loop_finish_service import build_loop_finish_readiness
 
+    if state is None:
+        state = load_agent_loop_state(thread_id, workspace_dir)
     return build_loop_finish_readiness(thread_id, workspace_dir, state=state)
 
 

@@ -381,7 +381,7 @@ def test_loop_finish_readiness_reports_unfinished_task_board(tmp_path):
     assert state["next_actions"] == ["observe", "wait_for_tool", "verify"]
 
 
-def test_loop_finish_readiness_allows_successful_terminal_task_board(tmp_path):
+def test_loop_finish_readiness_requires_write_evidence_even_with_terminal_task_board(tmp_path):
     from src.api.services.agent_loop_state_service import (
         assess_loop_finish_readiness,
         get_agent_loop_state,
@@ -416,11 +416,12 @@ def test_loop_finish_readiness_allows_successful_terminal_task_board(tmp_path):
     readiness = assess_loop_finish_readiness(thread_id, str(workspace))
     state = get_agent_loop_state(thread_id, str(workspace))
 
-    assert readiness["ready"] is True
+    assert readiness["ready"] is False
     assert readiness["counts"]["passed"] == 2
     assert readiness["counts"]["skipped"] == 1
     assert readiness["non_terminal_task_ids"] == []
-    assert state["next_actions"] == ["summarize", "finish"]
+    assert readiness["mode"] == "missing_write_evidence"
+    assert state["next_actions"] == ["observe", "decide"]
 
 
 def test_loop_action_gate_blocks_direct_answer_task_creation(tmp_path):
@@ -598,7 +599,8 @@ def test_check_loop_action_allows_valid_tool_action(tmp_path):
     assert result["allowed"] is True
     assert result["code"] == "allowed"
     assert result["repaired_action"] is None
-    assert result["finish_readiness"]["ready"] is True
+    assert result["finish_readiness"]["ready"] is False
+    assert result["finish_readiness"]["mode"] == "missing_write_evidence"
 
 
 def test_merge_agent_result_requires_agent_and_evidence_payload(tmp_path):

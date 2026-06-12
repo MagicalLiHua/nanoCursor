@@ -183,11 +183,17 @@ def _apply_semantic_consistency_bounds(
     fallback_route = str(fallback.route or "")
     fallback_complexity = _fallback_complexity(fallback, complexity)
     fallback_signals = set(fallback.signals or fallback.indicators or [])
+    runtime_correction = (
+        isinstance(raw.get("runtime_correction"), dict)
+        or str(raw.get("source") or "") == "runtime_correction"
+    )
     if route == fallback_route and "conversation_followup" in set(fallback.signals or fallback.indicators or []):
         complexity = fallback_complexity
     downgraded_to_lightweight = route in DIRECT_ROUTES or route in READ_ONLY_ROUTES
     upgraded_to_write = route in WRITE_ROUTES or requires_write
     if (
+        not runtime_correction
+        and
         fallback_route in READ_ONLY_ROUTES | {"test_only"}
         and not fallback.requires_workspace_write
         and "write_action" not in fallback_signals

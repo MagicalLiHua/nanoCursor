@@ -73,7 +73,7 @@ MEDIUM_SCOPE_HINT_MARKERS = frozenset({
 
 HIGH_RISK_GUARD_MARKERS = frozenset({
     "安全", "权限", "认证", "鉴权", "secret", "token", "迁移", "数据库", "schema",
-    "删除所有", "清空", "删库", "drop table", "批量", "部署", "生产", "上线", "git push", "rm -rf", "node_modules",
+    "删除所有", "删除整个", "整个目录", "清空", "删库", "drop table", "批量", "部署", "生产", "上线", "git push", "rm -rf", "node_modules",
     "install", "安装依赖", "网络请求",
 })
 
@@ -626,7 +626,7 @@ def _collect_signals(raw: str, text: str, compact: str, conversation_summary: st
         signals.append("external_context")
     if _has_any(text, compact, MEDIUM_SCOPE_HINT_MARKERS):
         signals.append("multi_stage_scope")
-    if _has_any(text, compact, HIGH_RISK_GUARD_MARKERS) or _looks_like_file_delete(raw, text):
+    if _has_any(text, compact, HIGH_RISK_GUARD_MARKERS) or _looks_like_destructive_delete(raw, text):
         signals.append("high_risk_scope")
     if _has_any(text, compact, AMBIGUOUS_ACTION_GUARD_MARKERS):
         signals.append("ambiguous_action")
@@ -700,13 +700,15 @@ def _followup_decision_from_context(
     )
 
 
-def _looks_like_file_delete(raw: str, text: str) -> bool:
-    """Detect requests that delete an entire named file, not a line of content."""
+def _looks_like_destructive_delete(raw: str, text: str) -> bool:
+    """Detect destructive delete requests, not small text removal edits."""
 
     if not any(marker in text for marker in ["删除", "delete", "remove"]):
         return False
     if any(marker in text for marker in ["一句话", "一行", "段落", "多余的字", "错别字"]):
         return False
+    if any(marker in text for marker in ["目录", "文件夹", "整个", "全部", "所有", "folder", "directory"]):
+        return True
     return bool(
         re.search(
             r"(?i)(?:删除|delete|remove)\s+[\w./-]+\.(?:py|js|ts|tsx|jsx|json|md|yml|yaml|toml|txt|css|html|go|java|rs|sql)",
