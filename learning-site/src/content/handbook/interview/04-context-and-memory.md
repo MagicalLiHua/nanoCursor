@@ -1,8 +1,21 @@
 # 面试深挖：上下文管理与记忆机制
 
-最后更新：2026-06-11
+最后更新：2026-06-12
 
 这份材料用于准备 nanoCursor 里最容易讲出深度的第二条主线：上下文管理和记忆机制。它们决定 Agent 是否“看对东西”，比单纯增加 Agent 数量更重要。
+
+```mermaid
+flowchart LR
+  Problem["问题\n模型看错上下文会并行犯错"]
+  Pack["ContextPack\n本轮看什么"]
+  Budget["Budget/Ledger\n看多少/是否压缩"]
+  Memory["MemoryRecord\n长期事实如何被召回"]
+  Eval["验证\ncontext hit rate / omitted / benchmark"]
+
+  Problem --> Pack --> Budget --> Memory --> Eval
+```
+
+这类问题不要只说“我做了摘要”。更好的回答是：上下文是一个选择、预算、压缩、审计和评估系统。
 
 ## 1. 一句话版本
 

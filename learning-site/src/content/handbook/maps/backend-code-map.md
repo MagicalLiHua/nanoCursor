@@ -1,8 +1,41 @@
 # 后端代码地图
 
-最后更新：2026-06-06
+最后更新：2026-06-12
 
 这份地图用于快速定位 nanoCursor 后端主要模块。它不是 API 文档，而是“我要理解或修改某个能力时应该看哪里”。
+
+## 0. 后端阅读总图
+
+先用这张图建立方向感，再去看下面的文件列表。不要从 `src/api/services/` 随机打开文件读，那样会很容易迷路。
+
+```mermaid
+flowchart TB
+  Server["src/api/server.py\nASGI 入口"]
+  App["src/api/app.py\n中间件/路由注册/健康检查"]
+  Routes["src/api/routes/*\nHTTP 薄入口"]
+  ConvRun["conversation_run_service\n会话级 run 入口"]
+  RunStart["run_start_service\n创建 RunContext/EventStore/LoopState"]
+  Thread["workflow_thread_service\n后台执行线程"]
+  Intent["intent_router\n语义路由 + guard + fallback"]
+  Context["context_service / ContextPack\n构建模型上下文"]
+  Loop["agent_loop_* services\nLead Loop 状态和控制"]
+  Parallel["parallel_agent_service\n临时子 Agent / evidence merge"]
+  Tools["action_execution_service / tool_policy_runtime\n工具治理和执行"]
+  Runtime["runtime/*\n命令/Git/Go/MCP 边界"]
+  Events["event_store / sse_broker\n事件账本和推送"]
+  Frontend["frontend store\nSSE 投影到 UI"]
+
+  Server --> App --> Routes --> ConvRun --> RunStart --> Thread
+  ConvRun --> Intent
+  ConvRun --> Context
+  Thread --> Loop
+  Loop --> Parallel
+  Loop --> Tools --> Runtime
+  Loop --> Events --> Frontend
+  Tools --> Events
+```
+
+读代码时按这条主干走：**入口 -> 会话 run -> 意图 -> 上下文 -> Loop -> 工具 -> 事件**。看懂主干后，再按问题去读具体 service。
 
 ## 1. 后端入口
 
@@ -59,6 +92,31 @@ python -m uvicorn src.api.server:app --host 127.0.0.1 --port 8100
 | `evals.py` | Agent 评估相关接口 |
 
 ## 3. 运行启动链路
+
+### 一次 run 的服务调用链
+
+```mermaid
+sequenceDiagram
+  participant Route as run_entry.py
+  participant Conv as conversation_run_service
+  participant Intent as intent_router
+  participant Plan as orchestration_service
+  participant Start as run_start_service
+  participant Loop as agent_loop_state_service
+  participant Thread as workflow_thread_service
+  participant Store as EventStore
+
+  Route->>Conv: start_conversation_run()
+  Conv->>Intent: classify_user_intent_async()
+  Conv->>Plan: compose team / build execution plan
+  Conv->>Start: start_standard_run()
+  Start->>Store: create_session()
+  Start->>Loop: init_agent_loop_state()
+  Start->>Thread: start_workflow_thread()
+  Thread-->>Store: append run events
+```
+
+这张图可以用来排查“前端点发送后到底后端走到哪里了”。比如没有 `thread_id`，看 `run_entry` 和 `conversation_run_service`；有 `thread_id` 但没有事件，看 `run_start_service`、`workflow_thread_service` 和 `EventStore`。
 
 ### `src/api/services/conversation_run_service.py`
 

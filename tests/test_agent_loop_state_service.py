@@ -601,6 +601,67 @@ def test_check_loop_action_allows_valid_tool_action(tmp_path):
     assert result["finish_readiness"]["ready"] is True
 
 
+def test_merge_agent_result_requires_agent_and_evidence_payload(tmp_path):
+    from src.api.services.agent_loop_state_service import check_loop_action, init_agent_loop_state
+    from src.api.services.intent_router import classify_user_intent
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "loop-merge-payload-required"
+    init_agent_loop_state(
+        thread_id,
+        str(workspace),
+        user_request="帮我实现一个排序工具",
+        intent=classify_user_intent("帮我实现一个排序工具"),
+    )
+
+    result = check_loop_action(
+        thread_id,
+        str(workspace),
+        {"type": "merge_agent_result", "goal": "merge child result", "agent": "Lead"},
+    )
+
+    assert result["allowed"] is False
+    assert result["code"] == "merge_agent_result_payload_missing"
+    assert result["repaired_action"]["type"] == "summarize"
+
+
+def test_merge_agent_result_records_loop_step(tmp_path):
+    from src.api.services.agent_loop_state_service import append_loop_step, init_agent_loop_state
+    from src.api.services.intent_router import classify_user_intent
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "loop-merge-recorded"
+    init_agent_loop_state(
+        thread_id,
+        str(workspace),
+        user_request="帮我实现一个排序工具",
+        intent=classify_user_intent("帮我实现一个排序工具"),
+    )
+
+    state = append_loop_step(
+        thread_id,
+        str(workspace),
+        phase="synthesize",
+        action={
+            "type": "merge_agent_result",
+            "goal": "merge reviewer evidence",
+            "agent": "Lead",
+            "context_requirements": {
+                "agent_id": "agent-1",
+                "evidence_pack_id": "agent-evidence-1",
+                "context_pack_id": "ctx-1",
+            },
+        },
+        context_pack_id="ctx-1",
+    )
+
+    assert state.steps[-1].action.type == "merge_agent_result"
+    assert state.steps[-1].phase == "synthesize"
+    assert state.context_pack_id == "ctx-1"
+
+
 def test_check_loop_action_reports_schema_errors(tmp_path):
     from src.api.services.agent_loop_state_service import check_loop_action, init_agent_loop_state
     from src.api.services.intent_router import classify_user_intent

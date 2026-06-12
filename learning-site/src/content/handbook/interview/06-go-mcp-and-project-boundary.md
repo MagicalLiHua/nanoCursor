@@ -1,8 +1,24 @@
 # 面试深挖：Go Sidecar、MCP/Skills 与项目边界
 
-最后更新：2026-06-11
+最后更新：2026-06-12
 
 这份材料用于准备项目最后一组容易被追问的内容：为什么引入 Go、MCP/Skills 做到了什么程度、项目和成熟工具的边界在哪里。
+
+```mermaid
+flowchart TB
+  Python["Python\nAgent/Context/Policy/Event"]
+  Go["Go Sidecar\nIndexer/Filetools/Executor/MCP Gateway"]
+  MCP["MCP\n外部工具协议"]
+  Skills["Skills\n任务规范和经验"]
+  Guard["统一治理\n权限/上下文/审计/fallback"]
+
+  Python --> Guard
+  Go --> Guard
+  MCP --> Guard
+  Skills --> Guard
+```
+
+这个专题的回答核心是“边界”。Go、MCP、Skills 都是增强能力，不应该绕过 Python 的策略层、上下文预算和事件审计。
 
 ## 1. 一句话版本
 

@@ -138,12 +138,104 @@ def test_small_edit_runs_verification_summary_and_finish():
     ]
 
 
-def test_small_edit_fails_before_finish_when_evidence_is_not_ready():
+def test_small_edit_without_write_degrades_to_summary_and_finish():
     actions = []
     evidence = RuntimeDeliveryEvidence(
         thread_id="run-1",
         ready=False,
-        reason="no real changes",
+        has_write_action=False,
+        reason="no successful write",
+    )
+
+    result = asyncio.run(
+        execute_lightweight_runtime_route(
+            thread_id="run-1",
+            workspace_dir="/tmp/ws",
+            intent_route="small_edit",
+            stream_turn=lambda tools, context: _async_value("read-only answer"),
+            readonly_tools=[],
+            small_edit_tools=[{"name": "edit_file"}],
+            tool_evidence=[],
+            sync_run_context=lambda *args: None,
+            turn_runner=_turn_runner(actions),
+            evidence_collector=lambda *args, **kwargs: evidence,
+        )
+    )
+
+    assert result == "read-only answer"
+    assert [action["type"] for action in actions] == ["inspect_project", "summarize", "finish"]
+    assert actions[1]["context_requirements"]["degraded_from"] == "small_edit"
+
+
+def test_small_edit_without_write_and_read_failure_degrades_to_summary_and_finish():
+    actions = []
+    evidence = RuntimeDeliveryEvidence(
+        thread_id="run-1",
+        ready=False,
+        has_write_action=False,
+        failed_calls=[{"tool": "read_file", "ok": False}],
+        reason="no successful write",
+    )
+
+    result = asyncio.run(
+        execute_lightweight_runtime_route(
+            thread_id="run-1",
+            workspace_dir="/tmp/ws",
+            intent_route="small_edit",
+            stream_turn=lambda tools, context: _async_value("我查看了一下，目前没有发现需要修改的代码。"),
+            readonly_tools=[],
+            small_edit_tools=[{"name": "edit_file"}],
+            tool_evidence=[],
+            sync_run_context=lambda *args: None,
+            turn_runner=_turn_runner(actions),
+            evidence_collector=lambda *args, **kwargs: evidence,
+        )
+    )
+
+    assert result == "我查看了一下，目前没有发现需要修改的代码。"
+    assert [action["type"] for action in actions] == ["inspect_project", "summarize", "finish"]
+    assert actions[1]["context_requirements"]["degraded_from"] == "small_edit"
+
+
+def test_small_edit_without_write_but_claims_modified_still_fails():
+    actions = []
+    evidence = RuntimeDeliveryEvidence(
+        thread_id="run-1",
+        ready=False,
+        has_write_action=False,
+        reason="no successful write",
+    )
+
+    try:
+        asyncio.run(
+            execute_lightweight_runtime_route(
+                thread_id="run-1",
+                workspace_dir="/tmp/ws",
+                intent_route="small_edit",
+                stream_turn=lambda tools, context: _async_value("已修正 README 中的拼写。"),
+                readonly_tools=[],
+                small_edit_tools=[{"name": "edit_file"}],
+                tool_evidence=[],
+                sync_run_context=lambda *args: None,
+                turn_runner=_turn_runner(actions),
+                evidence_collector=lambda *args, **kwargs: evidence,
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "no successful write"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert [action["type"] for action in actions] == ["inspect_project", "fail"]
+
+
+def test_small_edit_failed_write_still_fails_before_finish():
+    actions = []
+    evidence = RuntimeDeliveryEvidence(
+        thread_id="run-1",
+        ready=False,
+        reason="write failed",
+        failed_calls=[{"tool": "edit_file", "ok": False}],
     )
 
     try:
@@ -162,7 +254,7 @@ def test_small_edit_fails_before_finish_when_evidence_is_not_ready():
             )
         )
     except RuntimeError as exc:
-        assert str(exc) == "no real changes"
+        assert str(exc) == "write failed"
     else:
         raise AssertionError("expected RuntimeError")
 

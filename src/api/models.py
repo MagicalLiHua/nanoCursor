@@ -1081,6 +1081,12 @@ class RoutingEvalRunRequest(BaseModel):
     persist: bool = True
 
 
+class AgentLoopEvalRunRequest(BaseModel):
+    """Agent Loop controller eval suite request."""
+    case_ids: list[str] = Field(default_factory=list)
+    persist: bool = True
+
+
 class AgentEvalRunRequest(BaseModel):
     """Aggregate agent-runtime eval suite request."""
     suite: Literal["core"] = "core"

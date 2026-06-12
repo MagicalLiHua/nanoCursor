@@ -22,6 +22,36 @@
 - 长会话为什么需要自动压缩和失败降级。
 - 为什么上下文管理比“多 Agent 数量”更重要。
 
+```mermaid
+flowchart TB
+  Request["当前用户请求\nP0"]
+  Summary["conversation_summary\n多轮会话摘要"]
+  Execution["execution_summary\n最近运行结果"]
+  Index["Project Index\n入口/源码/测试/配置"]
+  Outline["File Outline\n类/函数/符号"]
+  Memory["Memory\n偏好/事实/失败经验"]
+  Skills["Skills / MCP\n任务规范和外部能力"]
+  Failures["Recent Failures\n错误和恢复证据"]
+  Policy["Tool Policy\n权限边界 P0"]
+  Pack["ContextPack\n结构化模型输入"]
+  Budget["ContextBudget\n按任务类型分配窗口"]
+  Ledger["ContextLedger\n记录 token 占用和可压缩性"]
+  Prompt["LLM Prompt\n本轮可见上下文"]
+
+  Request --> Pack
+  Summary --> Pack
+  Execution --> Pack
+  Index --> Pack
+  Outline --> Pack
+  Memory --> Pack
+  Skills --> Pack
+  Failures --> Pack
+  Policy --> Pack
+  Pack --> Budget --> Ledger --> Prompt
+```
+
+这张图的重点是：上下文不是一个字符串，而是一条选择和治理流水线。每个来源都要能解释为什么进入本轮上下文，没进入的内容也要能记录到 `omitted` 或 ledger 里。
+
 ## 2. 上下文失控会发生什么
 
 如果上下文管理不好，系统会出现这些问题：
@@ -266,15 +296,20 @@ pack.budget_report = {
 
 运行时大致流程：
 
-```text
-构建 ContextPack
-  -> 生成 ContextLedger
-  -> 判断上下文压力
-  -> 如果达到 hard/emergency
-  -> 选择低优先级 section
-  -> 写入 compacted_summary
-  -> 保留当前请求、当前计划、工具策略
-  -> 继续进入 LLM 调用
+```mermaid
+flowchart LR
+  Build["构建 ContextPack"]
+  Ledger["生成 ContextLedger"]
+  Pressure{"窗口压力?"}
+  Keep["保持原上下文"]
+  Select["选择低优先级\ncompactible section"]
+  Summary["生成摘要\nLLM summary 或 deterministic"]
+  Preserve["保留 P0 锚点\n请求/计划/工具策略"]
+  Continue["继续 LLM 调用"]
+
+  Build --> Ledger --> Pressure
+  Pressure -->|ok/watch| Keep --> Continue
+  Pressure -->|hard/emergency| Select --> Summary --> Preserve --> Continue
 ```
 
 当前有两类压缩：

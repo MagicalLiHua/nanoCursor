@@ -33,6 +33,17 @@ function mapBackendTeam(members) {
   return mapBackendTeamBase(members, { agentToneFromName });
 }
 
+function defaultLeadMember() {
+  return {
+    name: "Lead",
+    role: "lead",
+    goal: "判断任务复杂度，直接回答或创建临时 Agent 完成交付。",
+    tools: ["plan", "delegate", "spawn_agent", "report"],
+    capabilities: ["tool.memory", "tool.project_index"],
+    artifacts: ["report", "score"],
+  };
+}
+
 function normalizeTask(task) {
   return normalizeTaskBase(task, { inferTaskCapabilities });
 }
@@ -94,8 +105,9 @@ export function createWorkspaceActions(set, get) {
   }
 
   function teamToBackendMembers(team) {
-    const members = team || get().team;
-    return members.map((member) => ({
+    const members = Array.isArray(team) && team.length ? team : get().team;
+    const safeMembers = Array.isArray(members) && members.length ? members : [defaultLeadMember()];
+    return safeMembers.map((member) => ({
       name: member.name,
       role: member.role,
       goal: member.goal || "",

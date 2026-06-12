@@ -40,7 +40,7 @@ class AgentLoopState(BaseModel):
     user_request: str
     intent: IntentDecision
     current_step: int = 0
-    max_steps: int = 20
+    max_steps: int = 40
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     active_agent: str = "Lead"
     context_pack_id: str | None = None
@@ -66,7 +66,7 @@ def init_agent_loop_state(
     user_request: str,
     intent: dict[str, Any] | IntentDecision,
     conversation_id: str | None = None,
-    max_steps: int = 20,
+    max_steps: int = 40,
 ) -> AgentLoopState:
     """Create or update the run's loop state with immutable run metadata."""
     existing = load_agent_loop_state(thread_id, workspace_dir)
@@ -302,6 +302,7 @@ def validate_loop_action(state: AgentLoopState, action: LeadAction) -> dict[str,
             "request_approval",
             "run_checks",
             "summarize",
+            "merge_agent_result",
             "finish",
             "fail",
         }
@@ -311,6 +312,18 @@ def validate_loop_action(state: AgentLoopState, action: LeadAction) -> dict[str,
                 f"small_edit 只允许受控局部修改动作，不能执行 {action_type}。",
                 "small_edit_action_mismatch",
                 suggested_repair="inspect_project",
+            )
+
+    if action_type == "merge_agent_result":
+        requirements = action.context_requirements if isinstance(action.context_requirements, dict) else {}
+        agent_id = str(requirements.get("agent_id") or requirements.get("source_agent_id") or "")
+        evidence_pack_id = str(requirements.get("evidence_pack_id") or "")
+        if not agent_id or not evidence_pack_id:
+            return _loop_gate_decision(
+                False,
+                "merge_agent_result action 必须包含 agent_id 和 evidence_pack_id。",
+                "merge_agent_result_payload_missing",
+                suggested_repair="summarize",
             )
 
     if state.intent.route in {"read_only", "review_only"} and action_type in {"run_checks"}:
@@ -414,6 +427,13 @@ def suggest_loop_action_repair(
             agent="Lead",
             task_id=action.task_id,
         ).model_dump()
+    if code == "merge_agent_result_payload_missing":
+        return LeadAction(
+            type="summarize",
+            goal="Summarize child Agent output only after agent_id and evidence_pack_id are available.",
+            agent="Lead",
+            task_id=action.task_id,
+        ).model_dump()
     if code == "loop_step_limit":
         return LeadAction(
             type="fail",
@@ -471,77 +491,10 @@ def assess_loop_finish_readiness(
     *,
     state: AgentLoopState | None = None,
 ) -> dict[str, Any]:
-    """Inspect whether the Lead loop has enough evidence to finish successfully.
+    """Inspect whether the Lead loop has enough evidence to finish successfully."""
+    from src.api.services.agent_loop_finish_service import build_loop_finish_readiness
 
-    This is deliberately advisory.  Older runs may not have a complete task
-    board, so the runtime records the readiness signal without hard-failing the
-    finalization path.
-    """
-    loop_state = state or load_agent_loop_state(thread_id, workspace_dir)
-    route = loop_state.intent.route if loop_state else ""
-    execution_route = loop_state.intent.execution_route if loop_state else ""
-    if route == "direct_answer" or execution_route == "lead_direct_reply":
-        return {
-            "ready": True,
-            "mode": "direct_answer",
-            "reason": "Lead direct reply does not require a task board.",
-            "task_count": 0,
-            "counts": {},
-            "non_terminal_task_ids": [],
-            "failed_task_ids": [],
-        }
-
-    run_dir = get_event_store().run_dir(thread_id, workspace_dir)
-    try:
-        from src.runtime.task_board import load_task_board
-
-        board = load_task_board(run_dir)
-    except Exception:
-        board = None
-    if not board or not board.nodes:
-        return {
-            "ready": True,
-            "mode": "no_task_board",
-            "reason": "No persisted task board exists for this run.",
-            "task_count": 0,
-            "counts": {},
-            "non_terminal_task_ids": [],
-            "failed_task_ids": [],
-        }
-
-    counts: dict[str, int] = {}
-    for task in board.nodes:
-        counts[task.status] = counts.get(task.status, 0) + 1
-    success_statuses = {"passed", "skipped"}
-    non_terminal = [
-        task
-        for task in board.nodes
-        if task.status not in success_statuses
-    ]
-    failed = [task for task in board.nodes if task.status in {"failed", "blocked", "cancelled"}]
-    if not non_terminal:
-        return {
-            "ready": True,
-            "mode": "task_board",
-            "reason": "All task-board items reached a successful terminal status.",
-            "task_count": len(board.nodes),
-            "counts": counts,
-            "non_terminal_task_ids": [],
-            "failed_task_ids": [],
-        }
-
-    reason = "Task board still has unfinished work."
-    if failed:
-        reason = "Task board has failed, blocked, or cancelled work."
-    return {
-        "ready": False,
-        "mode": "task_board",
-        "reason": reason,
-        "task_count": len(board.nodes),
-        "counts": counts,
-        "non_terminal_task_ids": [task.id for task in non_terminal],
-        "failed_task_ids": [task.id for task in failed],
-    }
+    return build_loop_finish_readiness(thread_id, workspace_dir, state=state)
 
 
 def suggest_loop_next_actions(state: AgentLoopState, readiness: dict[str, Any] | None = None) -> list[str]:
@@ -702,6 +655,9 @@ def finalize_agent_loop_state(
     status: str,
     final_message: str = "",
 ) -> AgentLoopState:
+    existing = load_agent_loop_state(thread_id, workspace_dir)
+    if existing and existing.terminal_status:
+        return existing
     action_type = "finish" if status == "completed" else "fail"
     readiness = assess_loop_finish_readiness(thread_id, workspace_dir)
     summary = final_message[:500] if final_message else f"Run finalized as {status}."

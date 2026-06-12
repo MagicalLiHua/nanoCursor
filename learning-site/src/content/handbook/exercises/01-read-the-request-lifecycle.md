@@ -1,6 +1,24 @@
 # 练习 01：读懂一次请求生命周期
 
+最后更新：2026-06-12
+
 目标：通过两个任务验证你是否理解 nanoCursor 的主请求链路。
+
+## 实验总图
+
+```mermaid
+flowchart LR
+  A["发送请求"]
+  B["记录 API\nconversation_id / thread_id"]
+  C["查看 intent_decision\nroute / execution_route"]
+  D["观察 Agent/任务/Diff"]
+  E["检查 EventStore\nsession / events"]
+  F["对照源码\n解释为什么这样走"]
+
+  A --> B --> C --> D --> E --> F
+```
+
+这个练习的核心不是“跑出结果”，而是能把前端现象、后端路由和源码位置连起来。
 
 ## 练习 A：简单问候
 
@@ -75,3 +93,15 @@
 4. EventStore 和内存 queue 分别解决什么问题？
 5. 如果新会话显示旧任务，最可能是哪一层出问题？
 
+## 证据记录表
+
+| 证据 | 简单问候 | 代码任务 |
+|---|---|---|
+| conversation_id 是否复用 |  |  |
+| thread_id |  |  |
+| route / execution_route |  |  |
+| 创建 Agent |  |  |
+| 任务板数量 |  |  |
+| Diff 统计 |  |  |
+| EventStore 事件数量 |  |  |
+| 最终回复是否干净 |  |  |

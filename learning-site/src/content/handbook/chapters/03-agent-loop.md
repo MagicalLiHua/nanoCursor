@@ -1,6 +1,6 @@
 # 03. Agent Loop：从固定流程到持续决策
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -15,6 +15,26 @@
 - 为什么 AI 编程更适合 Agent Loop，而不是一开始就把所有步骤画死。
 - nanoCursor 如何让 Loop 可控：最大步数、工具策略、任务板、事件日志、完成条件。
 - 简单问答、读文件任务、代码修改任务在同一个 Loop 体系里如何走不同路线。
+
+```mermaid
+stateDiagram-v2
+  [*] --> Observe: 初始化 AgentLoopState
+  Observe --> Decide: 汇总任务/上下文/事件/审批
+  Decide --> Validate: LeadAction 结构化
+  Validate --> Approval: 高风险动作
+  Validate --> Execute: 允许执行
+  Validate --> Repair: 动作不合法
+  Repair --> Validate: 自动修复候选动作
+  Approval --> Observe: 用户批准/拒绝
+  Execute --> Record: 工具结果/答案/子 Agent 结果
+  Record --> Observe: 继续下一步
+  Record --> Finish: 满足完成条件
+  Record --> Fail: 达到 max_steps / 不可恢复失败
+  Finish --> [*]
+  Fail --> [*]
+```
+
+这张图是学习 Agent Loop 的核心：Lead 不是一次性产出完整 DAG，而是在每一轮根据观察到的状态做一个小决策。每个小决策都要被校验、执行、记录，最后才能继续或结束。
 
 ## 2. 为什么不是固定 DAG
 
@@ -78,7 +98,7 @@ class AgentLoopState(BaseModel):
     user_request: str
     intent: IntentDecision
     current_step: int = 0
-    max_steps: int = 20
+    max_steps: int = 40
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     active_agent: str = "Lead"
     context_pack_id: str | None = None
@@ -156,7 +176,7 @@ if state.intent.execution_route == "lead_direct_reply":
 
 ## 7. 完成条件与最大步数
 
-Loop 不是无限循环。`append_loop_step` 会检查最大步数：
+Loop 不是无限循环。`append_loop_step` 会检查最大步数。当前默认上限是 40 步，这是为了给复杂任务、失败恢复和子 Agent 结果合并留下空间，同时仍然避免无限修复：
 
 ```python
 if (
@@ -199,7 +219,24 @@ ACTIVE_STATUSES = {"suggested", "active", "working", "waiting_input"}
 ARCHIVED_STATUSES = {"archived", "expired"}
 ```
 
-并行 Agent 的定位也很克制：先做只读 briefing，不直接抢着写文件。
+并行 Agent 的定位也很克制：先做只读 briefing，不直接抢着写文件。现在的关键链路是“子 Agent 独立上下文 -> 子 Agent 执行 -> evidence pack -> Lead merge action”：
+
+```mermaid
+flowchart TB
+  Lead["Lead Agent\n主 Loop 状态"]
+  Plan["Execution Plan\n阶段/验收/工具边界"]
+  Spawn["创建临时子 Agent\nrun scoped"]
+  ChildContext["Child ContextPack\n只包含该子任务需要的信息"]
+  Worker["子 Agent 执行\n只读调研/验证/文档建议"]
+  Evidence["EvidencePack\nsummary / risks / artifacts / event refs"]
+  Merge["merge_agent_result\nLead 合并证据"]
+  Archive["归档临时 Agent\n不污染长期团队"]
+
+  Lead --> Plan --> Spawn --> ChildContext --> Worker --> Evidence --> Merge --> Lead
+  Evidence --> Archive
+```
+
+这条链路能回答一个很关键的面试问题：**子 Agent 有没有独立上下文？有。它拿的是 scoped ContextPack；Lead 不直接继承子 Agent 的完整过程，只接收 evidence 和摘要。**
 
 ```python
 # src/api/services/parallel_agent_service.py
@@ -209,12 +246,10 @@ def should_run_parallel_briefing(execution_plan: dict[str, Any] | None) -> bool:
     if execution_plan.get("strategy") == "lead_direct_reply":
         return False
     stages = execution_plan.get("stages")
-    if not isinstance(stages, list) or len(stages) <= 1:
-        return False
-    return True
+    return isinstance(stages, list) and len(stages) > 1
 ```
 
-这个设计点可以作为面试亮点：**多 Agent 的价值在于并行获取证据和分工复核，不在于把所有任务都拆成很多人说话**。
+这个设计点可以作为面试亮点：**多 Agent 的价值在于并行获取证据和分工复核，不在于把所有任务都拆成很多人说话**。真正写代码仍然要回到 Lead 控制的工具治理链路里，避免多个 Agent 并发写同一个文件。
 
 ## 9. 你应该怎么读代码
 

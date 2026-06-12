@@ -7,20 +7,14 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_workspace, raise_404, raise_400
+from src.api.dependencies import get_workspace, raise_400, raise_404
 from src.api.models import (
     AgentEvalRunRequest,
+    AgentLoopEvalRunRequest,
     EvalScoreRequest,
     EvalSuiteRunRequest,
     IntentEvalRunRequest,
     RoutingEvalRunRequest,
-)
-from src.api.services.agent_eval_service import (
-    get_agent_eval_run,
-    list_agent_eval_runs,
-    list_agent_eval_catalog,
-    run_agent_eval_suite,
-    summarize_agent_eval_runs,
 )
 from src.api.services.ablation_benchmark_service import (
     build_ablation_matrix,
@@ -29,21 +23,38 @@ from src.api.services.ablation_benchmark_service import (
     get_ablation_artifacts,
     get_ablation_report,
     get_ablation_suite,
-    list_ablation_suites,
     list_ablation_components,
-    run_persisted_ablation_suite,
+    list_ablation_suites,
     run_ablation_suite,
+    run_persisted_ablation_suite,
     save_ablation_artifacts,
 )
-from src.api.services.eval_service import (
-    compare_eval_runs, compare_eval_runs_detailed, get_eval_artifacts,
-    get_eval_run, get_eval_task,
-    list_evals, run_eval, score_eval_run,
+from src.api.services.agent_eval_service import (
+    get_agent_eval_run,
+    list_agent_eval_catalog,
+    list_agent_eval_runs,
+    run_agent_eval_suite,
+    summarize_agent_eval_runs,
+)
+from src.api.services.agent_loop_eval_service import (
+    get_agent_loop_eval_run,
+    list_agent_loop_eval_cases,
+    run_agent_loop_eval_suite,
 )
 from src.api.services.eval_runner_service import (
-    run_eval_with_command,
-    run_eval_suite,
     get_eval_summary,
+    run_eval_suite,
+    run_eval_with_command,
+)
+from src.api.services.eval_service import (
+    compare_eval_runs,
+    compare_eval_runs_detailed,
+    get_eval_artifacts,
+    get_eval_run,
+    get_eval_task,
+    list_evals,
+    run_eval,
+    score_eval_run,
 )
 from src.api.services.intent_eval_service import (
     get_intent_eval_run,
@@ -110,6 +121,12 @@ async def list_intent_evals():
     return {"suite": "intent_core", "cases": list_intent_eval_cases()}
 
 
+@router.get("/intent/cases")
+async def list_intent_eval_cases_route():
+    """Return Intent Router eval cases using the canonical plan endpoint."""
+    return {"suite": "intent_core", "cases": list_intent_eval_cases()}
+
+
 @router.post("/intent/run")
 async def run_intent_evals(request: IntentEvalRunRequest):
     """Run Intent Router V3 core routing evals."""
@@ -148,6 +165,30 @@ async def run_routing_evals(request: RoutingEvalRunRequest):
 async def get_routing_eval_result(eval_run_id: str):
     try:
         return get_routing_eval_run(eval_run_id, get_workspace())
+    except ValueError as exc:
+        raise_404(str(exc))
+
+
+@router.get("/agent-loop/catalog")
+async def list_agent_loop_evals():
+    """Return Agent Loop controller eval catalog."""
+    return {"suite": "agent_loop_core", "cases": list_agent_loop_eval_cases()}
+
+
+@router.post("/agent-loop/run")
+async def run_agent_loop_evals(request: AgentLoopEvalRunRequest):
+    """Run Agent Loop controller evals."""
+    return run_agent_loop_eval_suite(
+        request.case_ids or None,
+        workspace_dir=get_workspace(),
+        persist=request.persist,
+    )
+
+
+@router.get("/agent-loop/runs/{eval_run_id}")
+async def get_agent_loop_eval_result(eval_run_id: str):
+    try:
+        return get_agent_loop_eval_run(eval_run_id, get_workspace())
     except ValueError as exc:
         raise_404(str(exc))
 

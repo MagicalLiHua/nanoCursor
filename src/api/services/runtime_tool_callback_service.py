@@ -8,27 +8,27 @@ calls of different tools cannot consume each other's policy result.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from src.api.services.agent_loop_state_service import (
     append_loop_step,
     check_loop_tool_guard,
 )
-from src.api.services.runtime_approval_wait_service import (
-    RuntimeApprovalWaitContext,
-    resolve_runtime_tool_approval,
-)
 from src.api.services.run_ledger_service import (
     record_tool_call_finish,
     record_tool_call_start,
+)
+from src.api.services.runtime_approval_wait_service import (
+    RuntimeApprovalWaitContext,
+    resolve_runtime_tool_approval,
 )
 from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
 from src.runtime.run_state import RunStatus
 from src.tools.file_ops import pop_filetools_backend_event
 from src.tools.filetools_evidence import build_file_tool_evidence
 from src.tools.tool_result import is_tool_error_output
-
 
 EmitEvent = Callable[..., Any]
 EmitActivity = Callable[..., Any]
@@ -247,6 +247,7 @@ class RuntimeToolCallbacks:
         self.emit_stage_updates(self.thread_id, self.workspace_dir, stage_updates)
 
         call_id = self._persist_ledger(tool_name, tool_input, output, ok_flag, current_stage_id)
+        loop_record = self._persist_loop_action(tool_name, tool_input, output, ok_flag, trace, call_id)
         metrics = self.metrics_collector.dump_summary()
         self.emit_event(
             thread_id=self.thread_id,
@@ -258,9 +259,14 @@ class RuntimeToolCallbacks:
                 "tool": tool_name,
                 "input": tool_input,
                 "output": output[:5000] if output else "",
+                "ok": ok_flag,
                 "metrics": metrics,
                 "capability_trace": trace,
                 "stage_id": current_stage_id,
+                "loop_step_id": loop_record.get("loop_step_id", ""),
+                "loop_action_type": loop_record.get("action_type", ""),
+                "loop_recorded": loop_record.get("recorded", False),
+                "loop_step_error": loop_record.get("error", ""),
                 "filetool_evidence": filetool_evidence,
                 "filetools_backend_event": filetools_backend_event,
             },
@@ -275,7 +281,6 @@ class RuntimeToolCallbacks:
         )
         self._emit_filetools_backend_events(filetools_backend_event, trace, tool_name, tool_input)
         self._emit_filetool_evidence_events(filetool_evidence, trace)
-        self._persist_loop_action(tool_name, tool_input, output, ok_flag, trace, call_id)
         for derived_event in derive_agenthub_events(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -416,8 +421,8 @@ class RuntimeToolCallbacks:
         ok_flag: bool,
         trace: dict[str, str],
         call_id: str,
-    ) -> None:
-        action_type = "run_checks" if tool_name == "run_tests" else "call_tool"
+    ) -> dict[str, Any]:
+        action_type = _loop_action_type_for_tool(tool_name, tool_input)
         loop_action = {
             "type": action_type,
             "goal": f"Call {tool_name}.",
@@ -433,7 +438,7 @@ class RuntimeToolCallbacks:
             if self.uses_runtime_turn_loop:
                 from src.api.services.agent_loop_controller_service import run_loop_controller_step
 
-                run_loop_controller_step(
+                result = run_loop_controller_step(
                     self.thread_id,
                     self.workspace_dir,
                     action=loop_action,
@@ -443,8 +448,15 @@ class RuntimeToolCallbacks:
                     summary=(output or "")[:500],
                     event_id=call_id or None,
                 )
+                step = result.get("step") if isinstance(result, dict) else None
+                return {
+                    "recorded": bool(result.get("committed")) if isinstance(result, dict) else False,
+                    "loop_step_id": _loop_step_id_from_step(step),
+                    "action_type": action_type,
+                    "error": "",
+                }
             else:
-                append_loop_step(
+                state = append_loop_step(
                     self.thread_id,
                     self.workspace_dir,
                     phase="act",
@@ -453,8 +465,38 @@ class RuntimeToolCallbacks:
                     summary=(output or "")[:500],
                     event_id=call_id or None,
                 )
-        except Exception:
-            pass
+                return {
+                    "recorded": True,
+                    "loop_step_id": state.steps[-1].id if getattr(state, "steps", None) else "",
+                    "action_type": action_type,
+                    "error": "",
+                }
+        except Exception as exc:
+            error = str(exc)
+            try:
+                self.emit_event(
+                    thread_id=self.thread_id,
+                    event_type="agent_loop_step_record_failed",
+                    title=f"工具动作未能写入 Agent Loop: {tool_name}",
+                    content=error[:1000],
+                    agent="lead",
+                    payload={
+                        "tool": tool_name,
+                        "action_type": action_type,
+                        "agent": trace.get("agent") or "Lead",
+                        "call_id": call_id,
+                        "error": error,
+                    },
+                    workspace_dir=self.workspace_dir,
+                )
+            except Exception:
+                pass
+            return {
+                "recorded": False,
+                "loop_step_id": "",
+                "action_type": action_type,
+                "error": error,
+            }
 
     @staticmethod
     def _tool_target(tool_input: dict[str, Any]) -> Any:
@@ -467,3 +509,21 @@ class RuntimeToolCallbacks:
             or tool_input.get("query")
             or ""
         )
+
+
+def _loop_action_type_for_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
+    if tool_name == "run_tests":
+        return "run_checks"
+    if tool_name in {"bash", "run_command"}:
+        command = ""
+        if isinstance(tool_input, dict):
+            command = str(tool_input.get("command") or "").lower()
+        if any(marker in command for marker in ("pytest", "npm test", "pnpm test", "yarn test", "go test", "ruff", "mypy", "lint")):
+            return "run_checks"
+    return "call_tool"
+
+
+def _loop_step_id_from_step(step: Any) -> str:
+    if isinstance(step, dict):
+        return str(step.get("id") or "")
+    return str(getattr(step, "id", "") or "")

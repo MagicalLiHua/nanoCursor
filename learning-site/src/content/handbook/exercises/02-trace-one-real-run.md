@@ -19,6 +19,26 @@ npm run dev
 
 如果你启用了 Go sidecar，可以在启动脚本里选择开启，或者单独启动对应服务。练习本身不强依赖 Go sidecar，但你可以记录右侧栏里 Go 服务是否连接。
 
+## 1.1 三类任务对比图
+
+```mermaid
+flowchart TB
+  Start["同一个前端入口发送消息"]
+  Greeting["任务 A：哈喽"]
+  Readonly["任务 B：只读项目分析"]
+  Delivery["任务 C：真实代码交付"]
+  Direct["Lead 直接回答\n无复杂任务/无 Diff"]
+  Read["读目录/索引/文件\n不写文件"]
+  Code["计划/写文件/验证/交付\n产生 Diff 和报告"]
+  Compare["对比三次 run\nintent / agents / events / context / diff"]
+
+  Start --> Greeting --> Direct --> Compare
+  Start --> Readonly --> Read --> Compare
+  Start --> Delivery --> Code --> Compare
+```
+
+三类任务放在一起跑，是为了验证系统是否“该轻的时候轻，该重的时候重”。
+
 ## 2. 任务 A：Lead 直接回答
 
 在前端发送：
@@ -143,6 +163,20 @@ execution route：
 最终用户回复是否干净：
 我认为最需要改进的一点：
 ```
+
+## 7.1 事件证据表
+
+| 证据项 | 任务 A | 任务 B | 任务 C |
+|---|---|---|---|
+| `run_started` |  |  |  |
+| `intent_routed` / trace |  |  |  |
+| `plan_created` |  |  |  |
+| `agent_activity` |  |  |  |
+| `tool_call` / `tool_result` |  |  |  |
+| `agent_context_pack_built` |  |  |  |
+| `agent_evidence_pack_built` |  |  |  |
+| `agent_result_merge_recorded` |  |  |  |
+| `run_completed` / `run_failed` |  |  |  |
 
 ## 8. 自测问题
 

@@ -1,6 +1,6 @@
 # 11. MCP 与 Skills：把能力接入系统，而不是堆菜单
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -15,6 +15,24 @@ MCP 和 Skills 是 nanoCursor 后期最容易变成“功能堆叠”的部分�
 MCP 提供“能调用什么”。
 Skills 提供“遇到这种任务应该怎么做”。
 ```
+
+```mermaid
+flowchart LR
+  Prompt["用户任务"]
+  SkillSelect["Skill 选择\n任务规范/最佳实践/约束"]
+  Context["ContextPack\nselected_skills"]
+  MCPPlan["MCP 计划\n需要哪些外部工具"]
+  Catalog["工具目录\nserver/tools/cache"]
+  Policy["Tool Policy\nmcp_read / mcp_write / approval"]
+  Runtime["MCP Runtime\nPython stdio 或 Go Gateway"]
+  Evidence["工具结果证据\n事件/报告/恢复上下文"]
+
+  Prompt --> SkillSelect --> Context
+  Prompt --> MCPPlan --> Catalog --> Policy --> Runtime --> Evidence
+  Context --> Policy
+```
+
+这张图能帮你区分两件事：Skills 更像“怎么做这类任务”的知识注入，MCP 更像“可以调用哪些外部工具”的协议接入。它们都会进入上下文和工具治理，而不是绕过系统边界。
 
 ## 2. 当前代码地图
 

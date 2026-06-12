@@ -1,6 +1,6 @@
 # 13. 测试与质量：证明系统不是只能跑 demo
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -11,6 +11,21 @@
 - 真实任务 smoke test 怎么设计？它和单元测试有什么区别？
 - 测试覆盖率目标是什么？哪些模块最需要测试？
 - CI 检查流程包含哪些步骤？
+
+```mermaid
+flowchart TB
+  Unit["单元测试\n纯函数/策略/模型"]
+  Contract["契约测试\nPython ↔ Go 行为一致"]
+  Service["服务层测试\nrun/context/memory/tool/recovery"]
+  API["API/集成测试\n路由/SSE/生命周期"]
+  Smoke["真实任务 Smoke\n问候/只读/小改/复杂开发"]
+  Bench["Benchmark\n上下文/恢复/Go/Python/消融"]
+  CI["CI gate\npytest / ruff / build / smoke"]
+
+  Unit --> Contract --> Service --> API --> Smoke --> Bench --> CI
+```
+
+这个质量体系不是为了追求覆盖率数字，而是为了回答“这个模块是不是真的有用”。比如上下文压缩要看 token reduction 和锚点保留，Go sidecar 要看行为一致性和 fallback，Agent Loop 要看不同任务路由是否合理。
 
 ## 2. 测试金字塔
 

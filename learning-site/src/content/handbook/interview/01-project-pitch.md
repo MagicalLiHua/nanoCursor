@@ -1,6 +1,21 @@
 # 面试讲述模板：nanoCursor
 
-最后更新：2026-06-06
+最后更新：2026-06-12
+
+## 0. 讲述结构
+
+```mermaid
+flowchart LR
+  Problem["问题\nAI 编程不是聊天生成代码"]
+  Design["设计\nLead Agent Loop + ContextPack + ToolPolicy"]
+  Execution["执行\nFastAPI + EventStore/SSE + Go sidecar"]
+  Evidence["证据\n真实任务/测试/benchmark/消融"]
+  Boundary["边界\n不是商业替代品，但能讲清核心机制"]
+
+  Problem --> Design --> Execution --> Evidence --> Boundary
+```
+
+面试讲项目时不要从“我用了哪些技术栈”开始，而要从问题开始：AI 编程系统如何在本地项目里可控地做事。
 
 ## 1. 30 秒版本
 
@@ -45,4 +60,3 @@ nanoCursor 是一个前后端分离的 AI 编程工作台。前端类似轻量 C
 ### Q4：当前最大短板是什么？
 
 前端体验还有一些细节问题，后端也还需要继续强化异步边界、类型模型和安全策略。它目前更适合单机本地工作台和学习型工程项目，还不是多用户生产 SaaS。
-

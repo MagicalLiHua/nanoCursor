@@ -6,10 +6,9 @@ and recovery code can read event fields reliably.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 SCHEMA_VERSION = "1.0"
 
@@ -44,6 +43,10 @@ class ToolCallPayload(BaseModel):
     ok: bool = True
     capability_trace: dict[str, Any] = Field(default_factory=dict)
     stage_id: str = ""
+    loop_step_id: str = ""
+    loop_action_type: str = ""
+    loop_recorded: bool = False
+    loop_step_error: str = ""
 
 
 class StageUpdatedPayload(BaseModel):

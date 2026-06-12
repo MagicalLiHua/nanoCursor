@@ -1,6 +1,6 @@
 # 01. 项目全景：nanoCursor 到底是什么
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -35,7 +35,52 @@ nanoCursor 的主链路更长：
 
 所以项目关注的不只是“模型怎么回复”，而是一次编程任务从请求到交付的控制面：模型看到什么、能做什么、做错了怎么恢复、用户如何知道系统没卡住。
 
-## 4. 核心模块总览
+## 4. 系统分层图
+
+学习这个项目时，不要把它看成“前端 + 后端 + Go 服务”三块，而要按职责分层理解：
+
+```mermaid
+flowchart LR
+  subgraph Interaction["交互层"]
+    UI["React 工作台\n聊天 / 进度 / Diff / 证据抽屉"]
+    SSE["SSE 消费\n实时投影运行事件"]
+  end
+
+  subgraph Control["控制层"]
+    API["FastAPI 路由\n薄入口"]
+    Intent["意图路由\n是否直接回答 / 是否写文件"]
+    Loop["Lead Agent Loop\n结构化动作 + 状态账本"]
+    Team["临时子 Agent\n独立上下文 + 证据回传"]
+  end
+
+  subgraph Context["上下文层"]
+    Pack["ContextPack\n本轮给模型看什么"]
+    Budget["ContextBudget\n每类内容占多少"]
+    Memory["Memory / Skills\n长期偏好和任务规范"]
+  end
+
+  subgraph Execution["执行层"]
+    Policy["Tool Policy\n权限 / 审批 / 路径保护"]
+    PyTools["Python 工具适配\n文件 / shell / git / runtime"]
+    GoSidecar["Go Sidecar\nindexer / filetools / executor / MCP"]
+  end
+
+  subgraph Evidence["证据层"]
+    Store["EventStore\nsession + events + artifacts"]
+    Report["交付报告\nDiff / 风险 / 测试 / 恢复"]
+  end
+
+  UI --> API --> Intent --> Pack --> Loop
+  Loop --> Team --> Store
+  Loop --> Policy --> PyTools --> GoSidecar
+  Policy --> Store
+  Store --> SSE --> UI
+  Store --> Report
+```
+
+这张图能帮你回答“项目到底复杂在哪里”：复杂点不在某个单独 API，而在控制层、上下文层、执行层、证据层之间的约束关系。
+
+## 5. 核心模块总览
 
 | 模块 | 入口文件 | 解决的问题 | 学习重点 |
 |---|---|---|---|
@@ -49,37 +94,38 @@ nanoCursor 的主链路更长：
 | 失败恢复 | `failure_recovery_loop_service.py`、`recovery.py` | 失败分类、恢复计划、Coder 修复任务、验证重跑 | 不是所有错误都交给 Agent，有些要停下或审批 |
 | Go sidecar | `go-services/`、`file_ops.py`、`command_runner.py` | 文件工具、索引、命令执行、MCP 等确定性边界增强 | Go 是执行后端，不绕过 Python 策略层 |
 
-## 5. 和 LangGraph 的关系
+## 6. 和 LangGraph 的关系
 
 项目早期受 LangGraph / 状态图思路影响，但后来转向自研 Agent Loop。这个选择不是为了重复造轮子，而是因为交互式编程任务很难提前画死：用户可能只是问候，工具可能失败需要恢复，测试失败后也要先判断原因再决定改代码、改测试还是询问用户。
 
 LangGraph 的优势是流程显式、状态图清楚，适合 RAG 管道、审批流、固定业务流程。nanoCursor 当前更像 Codex/Cursor 这类工具的执行模型：Lead 持续观察状态，决定下一步动作，动作通过策略校验后执行，并把每一步记录成 ledger。它没有固定图的边，但有步数限制、工具策略、任务板、事件日志和完成条件。
 
-## 6. 和 Codex / Cursor 的差距
+## 7. 和 Codex / Cursor 的差距
 
 要诚实：nanoCursor 不是成熟商业编程工具。它依赖外部 LLM，本身没有模型训练；上下文选择、前端体验、真实任务稳定性、安全隔离和 MCP/Skills 生态都远不如成熟产品。当前安全也主要面向单机本地工具，不是多用户 SaaS。
 
 但这不影响它作为学习和展示项目的价值。它真正值得讲的是：你亲手拆解并实现了 AI 编程系统的关键后端机制，而不是只调一个 LLM API 或套一个框架。
 
-## 7. 最值得讲的五个点
+## 8. 最值得讲的五个点
 
 | 亮点 | 怎么讲 |
 |---|---|
 | Agent Loop | 默认只有 Lead，简单问题直接回答；复杂任务才进入计划、工具、子 Agent 和验证。重点是“该少的时候少”。 |
 | 上下文管理 | 用 ContextPack 结构化选择项目索引、文件 outline、最近变更、失败信息、记忆和 Skills，而不是无差别塞完整历史。 |
+| 子 Agent 证据合并 | 子 Agent 拿独立 ContextPack，只把 EvidencePack 和 summary 回传给 Lead，避免污染主上下文。 |
 | 工具治理 | 将工具分成 read_only、safe_write、risky_write、shell_safe、shell_risky、mcp_read、mcp_write，并接入审批和审计。 |
 | 事件流 | 用 EventStore + SSE 把 Agent 活动、工具调用、任务状态、Diff、恢复和交付物变成前端可感知运行。 |
 | 失败恢复 | 命令或测试失败后先分类，再生成恢复计划；代码/测试类失败交给 Coder 修复并重跑验证，缺依赖和高风险动作要用户确认。 |
 
-## 8. 当前不成熟的地方
+## 9. 当前不成熟的地方
 
 这个项目仍有明显边界：部分服务层还存在历史包袱，`dict[str, Any]` 仍然偏多；真实复杂任务的 benchmark 还不够系统；前端体验还需要继续打磨；Go sidecar 是增强层，不是所有场景都更快；MCP/Skills 可以用，但还不是成熟生态。面试时承认这些短板反而更可信，因为你能说出下一步如何补。
 
-## 9. 推荐学习路径
+## 10. 推荐学习路径
 
 不要从前端样式开始学，也不要从 API 列表开始硬背。更好的顺序是：先读请求生命周期，再读 Agent Loop；然后读上下文管理和工具治理；再看事件流如何驱动前端；最后看记忆、MCP/Skills、Go sidecar、测试质量和项目复盘。
 
-## 10. 面试追问
+## 11. 面试追问
 
 ### Q1：这个项目最核心的技术难点是什么？
 
@@ -97,7 +143,7 @@ LangGraph 的优势是流程显式、状态图清楚，适合 RAG 管道、审�
 
 不要说“我做了个 AI 编程工具”。更好的说法是：我拆解并实现了一个轻量 AI 编程工作台的核心后端机制，包括 Agent Loop、上下文管理、工具治理、事件流、失败恢复和 Go sidecar 扩展边界。
 
-## 11. 自测题
+## 12. 自测题
 
 1. nanoCursor 和普通聊天机器人的链路差在哪里？
 2. 为什么简单问候不应该进入完整 Agent Loop？
@@ -105,9 +151,9 @@ LangGraph 的优势是流程显式、状态图清楚，适合 RAG 管道、审�
 4. Go sidecar 在系统里为什么只是执行后端，而不是策略中心？
 5. 面试时如何诚实描述它和 Codex/Cursor 的差距？
 
-## 12. 动手练习
+## 13. 动手练习
 
-1. 启动学习站：`cd learning-site && npm run dev`，打开首页确认 15 个章节和代码地图能正常显示。
+1. 启动学习站：`cd learning-site && npm run dev`，打开首页确认 16 个章节和代码地图能正常显示。
 2. 打开 `src/api/services/conversation_run_service.py`，找到意图路由和 `lead_only_execution_plan` 的调用位置。
 3. 打开 `src/agent/context_pack.py`，找到 `ContextPack` 的核心字段，并解释每类字段为什么存在。
 4. 打开 `src/runtime/tool_policy_runtime.py`，确认 read/write/shell/MCP 的权限分级。

@@ -18,90 +18,113 @@ from typing import Any
 
 from src.api.models import IntentDecision
 
-
-EXECUTION_VERBS = frozenset({
+EXECUTION_VERB_HINT_MARKERS = frozenset({
     "帮我", "写", "做", "创建", "生成", "实现", "修改", "修复", "新增", "删除", "重构",
     "运行", "测试", "补充", "补", "构建", "开发", "完成", "比较", "统计", "优化", "改", "加",
     "write", "create", "generate", "implement", "modify", "fix", "add", "delete",
     "refactor", "run", "test", "build", "compare", "benchmark", "optimize",
 })
 
-WRITE_ACTION_MARKERS = frozenset({
+WRITE_ACTION_HINT_MARKERS = frozenset({
     "写", "创建", "生成", "实现", "修改", "修复", "新增", "删除", "重构", "补充", "补",
     "构建", "开发", "完成", "优化", "改", "加",
     "write", "create", "generate", "implement", "modify", "fix", "add", "delete",
     "refactor", "build", "optimize",
 })
 
-CODE_ARTIFACTS = frozenset({
+CODE_ARTIFACT_HINT_MARKERS = frozenset({
     "代码", "脚本", "函数", "类", "模块", "接口", "api", "页面", "组件", "样式", "测试",
     "文件", "readme", "配置", "算法", "排序", "性能", "benchmark", "demo", "app",
     "python", "javascript", "typescript", "react", "vue", "fastapi", "sql", "docker",
     "script", "function", "class", "module", "endpoint", "component", "test", "config",
 })
 
-DIRECT_ANSWER_MARKERS = frozenset({
+DIRECT_ANSWER_HINT_MARKERS = frozenset({
     "解释", "说明", "是什么", "为什么", "怎么看", "评价", "总结", "讲讲",
     "explain", "why", "what is", "summarize",
 })
 
-WORKSPACE_READ_MARKERS = frozenset({
+DISCUSSION_HINT_MARKERS = frozenset({
+    "谁更好", "哪个更好", "哪个更适合", "哪个好", "怎么选", "优缺点", "区别", "对比",
+    "比较一下", "谁更适合", "如何选择", "vs", "versus", "compare", "which is better",
+    "pros and cons",
+})
+
+WORKSPACE_READ_HINT_MARKERS = frozenset({
     "看看", "看一下", "看一看", "检查", "分析一下", "项目结构", "目录结构", "文件结构",
     "这个项目", "这个仓库", "这个文件夹", "当前目录", "有哪些文件", "都有什么",
     "inspect", "scan", "analyze", "project structure", "repository", "folder",
 })
 
-GREETING_MARKERS = frozenset({
+GREETING_GUARD_MARKERS = frozenset({
     "你好", "您好", "哈喽", "哈啰", "嗨", "hello", "hi", "hey",
     "你是谁", "是什么模型", "你能做什么", "关于你",
 })
 
-SMALL_EDIT_MARKERS = frozenset({
+SMALL_EDIT_HINT_MARKERS = frozenset({
     "错别字", "typo", "拼写", "文案", "一行", "小改", "微调", "readme", "注释",
     "rename", "format", "lint fix",
 })
 
-MEDIUM_MARKERS = frozenset({
+MEDIUM_SCOPE_HINT_MARKERS = frozenset({
     "完整", "模块", "多文件", "前后端", "端到端", "流程", "系统", "产品级", "重构",
     "complete", "multi-file", "end-to-end", "system", "architecture",
 })
 
-HIGH_RISK_MARKERS = frozenset({
+HIGH_RISK_GUARD_MARKERS = frozenset({
     "安全", "权限", "认证", "鉴权", "secret", "token", "迁移", "数据库", "schema",
-    "删除", "批量", "部署", "生产", "上线", "git push", "rm -rf", "node_modules",
+    "删除所有", "清空", "删库", "drop table", "批量", "部署", "生产", "上线", "git push", "rm -rf", "node_modules",
     "install", "安装依赖", "网络请求",
 })
 
-TOOLING_MARKERS = frozenset({
+TOOLING_HINT_MARKERS = frozenset({
     "运行", "测试", "验证", "benchmark", "性能", "pytest", "npm test", "check", "lint",
-    "run", "test", "verify", "benchmark",
+    "run", "test", "verify",
 })
 
-REVIEW_MARKERS = frozenset({
+REVIEW_HINT_MARKERS = frozenset({
     "复核", "审查", "评审", "风险", "diff", "review", "audit", "quality", "regression",
 })
 
-DEBUG_MARKERS = frozenset({
+READ_ONLY_REVIEW_QUESTION_MARKERS = frozenset({
+    "写得对不对", "写的对不对", "写得有没有问题", "写的有没有问题",
+    "写得不对", "写的不对", "写得不正确", "写的不正确",
+    "写得怎么样", "写的怎么样", "实现得对不对", "实现的对不对",
+    "实现得不对", "实现的不对", "实现得不正确", "实现的不正确",
+    "做得对不对", "做的对不对", "代码对不对", "代码有没有问题",
+    "代码写得不对", "代码写的不对", "代码写得不正确", "代码写的不正确",
+    "有没有问题", "有问题吗", "是否正确", "正不正确", "对不对",
+    "哪里不对", "哪里有问题",
+})
+
+WRITE_CONFIRMATION_ACTION_MARKERS = frozenset({
+    "并修改", "并修复", "然后修改", "然后修复", "顺手改", "直接改",
+    "帮我改", "帮我修", "修复一下", "修改一下", "改掉", "改成", "改为",
+    "创建", "生成", "新增", "删除", "重构", "补充", "加上", "加入",
+    "and fix", "then fix", "modify it", "fix it", "apply fix",
+})
+
+DEBUG_HINT_MARKERS = frozenset({
     "bug", "报错", "错误", "异常", "失败", "崩溃", "404", "500", "traceback",
     "fix bug", "broken", "error", "exception", "crash",
 })
 
-EXTERNAL_CONTEXT_MARKERS = frozenset({
+EXTERNAL_CONTEXT_HINT_MARKERS = frozenset({
     "github", "issue", "issues", "pr", "pull request", "ci", "仓库", "代码审查",
 })
 
-AMBIGUOUS_ACTION_MARKERS = frozenset({
+AMBIGUOUS_ACTION_GUARD_MARKERS = frozenset({
     "优化一下", "改一下", "弄一下", "搞一下", "完善一下", "处理一下",
     "make it better", "improve it", "fix it",
 })
 
-FOLLOWUP_MARKERS = frozenset({
+FOLLOWUP_HINT_MARKERS = frozenset({
     "继续", "接着", "按刚才", "按照刚才", "按上面", "按照上面", "继续做", "继续改",
     "继续实现", "继续修", "下一步", "接下来", "照着刚才",
     "continue", "keep going", "next step", "as above", "same way",
 })
 
-CONVERSATION_META_MARKERS = frozenset({
+CONVERSATION_META_GUARD_MARKERS = frozenset({
     "上一条消息", "上一条", "上条消息", "上条", "刚才我问", "刚刚我问",
     "我刚才问", "我刚刚问", "之前我问", "前面我问", "上一轮我问",
     "我问了什么", "我说了什么", "你记得我", "总结一下刚才",
@@ -109,14 +132,33 @@ CONVERSATION_META_MARKERS = frozenset({
 })
 
 
-def classify_user_intent(prompt: str, *, conversation_summary: str = "") -> dict[str, Any]:
+def classify_user_intent(
+    prompt: str,
+    *,
+    conversation_summary: str = "",
+    runtime_context: Any | None = None,
+) -> dict[str, Any]:
     """Return a structured, explainable routing decision for a user prompt."""
     guarded = _classify_deterministic(prompt, conversation_summary=conversation_summary)
     from src.api.services.intent_guards import evaluate_intent_guards
     from src.api.services.intent_normalizer import normalize_intent_decision
+    from src.api.services.semantic_intent_classifier import build_router_trace
 
     guards = evaluate_intent_guards(prompt, guarded)
-    return normalize_intent_decision(None, fallback=guarded, guards=guards).model_dump()
+    normalized = normalize_intent_decision(None, fallback=guarded, guards=guards, runtime_context=runtime_context)
+    raw = normalized.raw_decision if isinstance(normalized.raw_decision, dict) else {}
+    existing_trace = raw.get("router_trace") if isinstance(raw.get("router_trace"), dict) else {}
+    trace_notes = existing_trace.get("normalization_notes") if isinstance(existing_trace.get("normalization_notes"), list) else []
+    raw["router_trace"] = build_router_trace(
+        prompt=prompt,
+        fallback=guarded,
+        guard_hits=guards.hits,
+        runtime_context=runtime_context,
+        final_route=str(normalized.route),
+        normalization_notes=[str(item) for item in trace_notes],
+    ).model_dump()
+    normalized.raw_decision = raw
+    return normalized.model_dump()
 
 
 def is_lead_direct_intent(prompt: str, *, conversation_summary: str = "") -> bool:
@@ -129,32 +171,162 @@ async def classify_user_intent_async(
     prompt: str,
     *,
     conversation_summary: str = "",
+    runtime_context: Any | None = None,
 ) -> dict[str, Any]:
     """Classify intent with deterministic guards plus optional LLM assistance.
 
     High-confidence guards always win for empty, direct answer, risky, and
-    clarification cases. For ordinary coding requests, the existing lightweight
-    LLM classifier can refine strategy/roles, but its result is normalized back
-    into ``IntentDecision``.
+    clarification cases. For ordinary requests, semantic routing can refine the
+    route when enabled; otherwise the existing lightweight LLM classifier remains
+    the compatibility fallback.
     """
     guarded = _classify_deterministic(prompt, conversation_summary=conversation_summary)
     from src.api.services.intent_guards import evaluate_intent_guards
     from src.api.services.intent_llm_classifier import classify_intent_v3_with_llm
     from src.api.services.intent_normalizer import normalize_intent_decision
+    from src.api.services.intent_runtime_context import coerce_intent_runtime_context
+    from src.api.services.semantic_intent_classifier import (
+        build_router_trace,
+        classify_semantic_intent,
+        semantic_intent_mode,
+        semantic_low_confidence_clarify,
+        semantic_min_confidence,
+        semantic_require_llm,
+    )
 
     guards = evaluate_intent_guards(prompt, guarded)
-    if guards.hard_decision is not None:
-        return normalize_intent_decision(None, fallback=guarded, guards=guards).model_dump()
-
-    raw_decision = await classify_intent_v3_with_llm(
-        prompt,
+    context = coerce_intent_runtime_context(
+        runtime_context,
         conversation_summary=conversation_summary,
-        fallback=guarded,
     )
-    normalized = normalize_intent_decision(raw_decision, fallback=guarded, guards=guards)
-    if raw_decision and normalized.confidence < guarded.confidence:
-        return normalize_intent_decision(None, fallback=guarded, guards=guards).model_dump()
+    if guards.hard_decision is not None:
+        trace = build_router_trace(
+            prompt=prompt,
+            fallback=guarded,
+            guard_hits=guards.hits,
+            runtime_context=context,
+            final_route=str(guards.hard_decision.route),
+        )
+        return normalize_intent_decision(
+            {"router_trace": trace.model_dump()},
+            fallback=guarded,
+            guards=guards,
+            runtime_context=context,
+        ).model_dump()
+
+    mode = semantic_intent_mode()
+    semantic_raw: dict[str, Any] | None = None
+    if mode != "disabled":
+        semantic_raw = await classify_semantic_intent(prompt, runtime_context=context, fallback=guarded)
+
+    raw_decision: dict[str, Any] | None = None
+    raw_source = "deterministic"
+    if mode in {"enabled", "strict"} and _semantic_is_confident(semantic_raw):
+        raw_decision = semantic_raw
+        raw_source = "semantic"
+    elif mode in {"enabled", "strict"} and semantic_low_confidence_clarify() and _semantic_should_clarify(semantic_raw):
+        raw_decision = _semantic_clarification_payload(semantic_raw, guarded)
+        raw_source = "semantic_low_confidence_clarification"
+    elif mode == "enabled" and semantic_require_llm() and not semantic_raw:
+        raw_decision = _semantic_clarification_payload(None, guarded)
+        raw_source = "semantic_required_unavailable"
+    elif mode != "strict":
+        raw_decision = await classify_intent_v3_with_llm(
+            prompt,
+            conversation_summary=conversation_summary,
+            fallback=guarded,
+        )
+        raw_source = "legacy_llm" if raw_decision else "deterministic"
+    elif semantic_raw:
+        raw_decision = semantic_raw
+        raw_source = "semantic_low_confidence"
+    else:
+        raw_decision = _semantic_clarification_payload(None, guarded)
+        raw_source = "semantic_unavailable_clarification"
+
+    normalized = normalize_intent_decision(raw_decision, fallback=guarded, guards=guards, runtime_context=context)
+    if raw_source == "legacy_llm" and raw_decision and normalized.confidence < guarded.confidence:
+        normalized = normalize_intent_decision(None, fallback=guarded, guards=guards, runtime_context=context)
+        raw_source = "deterministic_low_confidence_fallback"
+
+    decision_raw = normalized.raw_decision if isinstance(normalized.raw_decision, dict) else {}
+    existing_trace = decision_raw.get("router_trace") if isinstance(decision_raw.get("router_trace"), dict) else {}
+    existing_notes = (
+        existing_trace.get("normalization_notes")
+        if isinstance(existing_trace.get("normalization_notes"), list)
+        else []
+    )
+    trace = build_router_trace(
+        prompt=prompt,
+        fallback=guarded,
+        guard_hits=guards.hits,
+        runtime_context=context,
+        semantic_result=semantic_raw,
+        final_route=str(normalized.route),
+        normalization_notes=[
+            *[str(item) for item in existing_notes],
+            raw_source,
+            f"semantic_mode={mode}",
+            f"semantic_min_confidence={semantic_min_confidence():.2f}",
+        ],
+    )
+    decision_raw["router_trace"] = trace.model_dump()
+    normalized.raw_decision = decision_raw
     return normalized.model_dump()
+
+
+def _semantic_is_confident(raw: dict[str, Any] | None) -> bool:
+    if not raw:
+        return False
+    try:
+        return float(raw.get("confidence") or 0.0) >= _semantic_min_confidence_cached()
+    except (TypeError, ValueError):
+        return False
+
+
+def _semantic_min_confidence_cached() -> float:
+    from src.api.services.semantic_intent_classifier import semantic_min_confidence
+
+    return semantic_min_confidence()
+
+
+def _semantic_should_clarify(raw: dict[str, Any] | None) -> bool:
+    if not raw:
+        return False
+    try:
+        confidence = float(raw.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return True
+    if confidence < 0.55:
+        return True
+    needs_write = bool(raw.get("requires_workspace_write"))
+    return needs_write and confidence < _semantic_min_confidence_cached()
+
+
+def _semantic_clarification_payload(raw: dict[str, Any] | None, fallback: IntentDecision) -> dict[str, Any]:
+    raw = raw or {}
+    missing = [str(item) for item in raw.get("missing_information", []) if str(item).strip()]
+    if not missing:
+        missing = ["请补充要处理的对象、范围或验收标准后再执行。"]
+    try:
+        confidence = min(float(raw.get("confidence") or 0.0), fallback.confidence)
+    except (TypeError, ValueError):
+        confidence = min(0.0, fallback.confidence)
+    return {
+        "route": "clarification_needed",
+        "complexity": "simple",
+        "confidence": confidence,
+        "requires_workspace_read": False,
+        "requires_workspace_write": False,
+        "requires_shell": False,
+        "requires_approval": False,
+        "suggested_agents": ["Lead"],
+        "missing_information": missing,
+        "rationale": str(raw.get("rationale") or "语义意图分类置信度不足，先澄清任务边界。"),
+        "intent": "semantic_low_confidence_clarification",
+        "source": "semantic_intent_classifier",
+        "raw_semantic_result": raw.get("raw_semantic_result") or raw,
+    }
 
 
 def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> IntentDecision:
@@ -263,7 +435,7 @@ def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> I
             suggested_agents=["Lead", "Coder", "Tester", "Reviewer"],
         )
 
-    if "review_or_risk_check" in signals:
+    if "review_or_risk_check" in signals and "write_action" not in signals:
         return _decision(
             route="review_only",
             intent="review_or_risk_check",
@@ -291,8 +463,38 @@ def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> I
             suggested_agents=["Lead", "Tester"],
         )
 
+    if "discussion_or_comparison" in signals and "write_action" not in signals and "workspace_read" not in signals:
+        return _decision(
+            route="direct_answer",
+            intent="technical_discussion",
+            level="simple",
+            strategy="analysis_only",
+            confidence=0.82,
+            rationale="请求是技术对比、选型或优缺点讨论，没有要求读取或修改工作区，应由 Lead 直接回答。",
+            signals=signals,
+            suggested_agents=["Lead"],
+        )
+
+    if ("workspace_read" in signals or "external_context" in signals) and "write_action" not in signals:
+        return _decision(
+            route="read_only",
+            intent="workspace_inspection",
+            level="simple",
+            strategy="analysis_only",
+            confidence=0.78,
+            rationale="请求需要查看项目、目录、文件、PR 或 CI 上下文，但没有明确写入要求。",
+            signals=signals,
+            requires_workspace_read=True,
+            requires_shell="external_context" in signals,
+            suggested_agents=["Lead", "Reviewer"] if "external_context" in signals else ["Lead"],
+        )
+
     wants_artifact = "write_action" in signals and "code_artifact" in signals
-    explicit_code = "code_artifact" in signals and "direct_answer_question" not in signals
+    explicit_code = (
+        "code_artifact" in signals
+        and "direct_answer_question" not in signals
+        and "discussion_or_comparison" not in signals
+    )
     if wants_artifact or explicit_code:
         route = "small_edit" if _looks_like_small_edit(signals) or _looks_like_single_step_code_edit(signals) else "feature_delivery"
         level = "small_code" if route == "small_edit" else "medium"
@@ -310,20 +512,6 @@ def _classify_deterministic(prompt: str, *, conversation_summary: str = "") -> I
             requires_workspace_write=True,
             requires_shell="tooling_or_verification" in signals,
             suggested_agents=_agents_for_level(level),
-        )
-
-    if "workspace_read" in signals or "external_context" in signals:
-        return _decision(
-            route="read_only",
-            intent="workspace_inspection",
-            level="simple",
-            strategy="analysis_only",
-            confidence=0.78,
-            rationale="请求需要查看项目、目录、文件、PR 或 CI 上下文，但没有明确写入要求。",
-            signals=signals,
-            requires_workspace_read=True,
-            requires_shell="external_context" in signals,
-            suggested_agents=["Lead", "Reviewer"] if "external_context" in signals else ["Lead"],
         )
 
     if "direct_answer_question" in signals:
@@ -407,41 +595,44 @@ def _collect_signals(raw: str, text: str, compact: str, conversation_summary: st
     signals: list[str] = []
     write_negated = _has_write_negation(text, compact)
     read_negated = _has_workspace_read_negation(text, compact)
+    read_only_review_question = _has_read_only_review_question(text, compact)
     if write_negated:
         signals.append("write_negated")
     if read_negated:
         signals.append("workspace_read_negated")
-    if _has_any(text, compact, GREETING_MARKERS):
+    if _has_any(text, compact, GREETING_GUARD_MARKERS):
         signals.append("greeting")
-    if _has_any(text, compact, DIRECT_ANSWER_MARKERS):
+    if _has_any(text, compact, DIRECT_ANSWER_HINT_MARKERS):
         signals.append("direct_answer_question")
-    if _has_any(text, compact, WORKSPACE_READ_MARKERS) and not read_negated:
+    if _has_any(text, compact, DISCUSSION_HINT_MARKERS):
+        signals.append("discussion_or_comparison")
+    if _has_any(text, compact, WORKSPACE_READ_HINT_MARKERS) and not read_negated:
         signals.append("workspace_read")
-    if _has_any(text, compact, EXECUTION_VERBS) and not write_negated:
+    if _has_any(text, compact, EXECUTION_VERB_HINT_MARKERS) and not write_negated:
         signals.append("execution_verb")
-    if _has_any(text, compact, WRITE_ACTION_MARKERS) and not write_negated:
+    if _has_write_action_hint(raw, text, compact) and not write_negated:
         signals.append("write_action")
-    if _has_any(text, compact, CODE_ARTIFACTS):
+    if _has_any(text, compact, CODE_ARTIFACT_HINT_MARKERS):
         signals.append("code_artifact")
-    if _has_any(text, compact, SMALL_EDIT_MARKERS):
+    if _has_any(text, compact, SMALL_EDIT_HINT_MARKERS):
         signals.append("small_edit_signal")
-    if _has_any(text, compact, TOOLING_MARKERS):
+    if _has_any(text, compact, TOOLING_HINT_MARKERS):
         signals.append("tooling_or_verification")
-    if _has_any(text, compact, REVIEW_MARKERS):
+    if _has_any(text, compact, REVIEW_HINT_MARKERS) or read_only_review_question:
         signals.append("review_or_risk_check")
-    if _has_any(text, compact, DEBUG_MARKERS):
+    if _has_any(text, compact, DEBUG_HINT_MARKERS):
         signals.append("debug_signal")
-    if _has_any(text, compact, EXTERNAL_CONTEXT_MARKERS):
+    if _has_any(text, compact, EXTERNAL_CONTEXT_HINT_MARKERS):
         signals.append("external_context")
-    if _has_any(text, compact, MEDIUM_MARKERS):
+    if _has_any(text, compact, MEDIUM_SCOPE_HINT_MARKERS):
         signals.append("multi_stage_scope")
-    if _has_any(text, compact, HIGH_RISK_MARKERS):
+    if _has_any(text, compact, HIGH_RISK_GUARD_MARKERS) or _looks_like_file_delete(raw, text):
         signals.append("high_risk_scope")
-    if _has_any(text, compact, AMBIGUOUS_ACTION_MARKERS):
+    if _has_any(text, compact, AMBIGUOUS_ACTION_GUARD_MARKERS):
         signals.append("ambiguous_action")
-    if _has_any(text, compact, FOLLOWUP_MARKERS):
+    if _has_any(text, compact, FOLLOWUP_HINT_MARKERS):
         signals.append("conversation_followup")
-    if _has_any(text, compact, CONVERSATION_META_MARKERS):
+    if _has_any(text, compact, CONVERSATION_META_GUARD_MARKERS):
         signals.append("conversation_meta_question")
     if len(raw) > 260:
         signals.append("long_prompt")
@@ -507,6 +698,90 @@ def _followup_decision_from_context(
         ["Lead", "Coder"],
         "用户使用连续对话跟进上一轮代码任务，应参考会话摘要继续执行而不是当作闲聊。",
     )
+
+
+def _looks_like_file_delete(raw: str, text: str) -> bool:
+    """Detect requests that delete an entire named file, not a line of content."""
+
+    if not any(marker in text for marker in ["删除", "delete", "remove"]):
+        return False
+    if any(marker in text for marker in ["一句话", "一行", "段落", "多余的字", "错别字"]):
+        return False
+    return bool(
+        re.search(
+            r"(?i)(?:删除|delete|remove)\s+[\w./-]+\.(?:py|js|ts|tsx|jsx|json|md|yml|yaml|toml|txt|css|html|go|java|rs|sql)",
+            raw,
+        )
+    )
+
+
+def _has_write_action_hint(raw: str, text: str, compact: str) -> bool:
+    """Return true only when write-like words are used as an action request."""
+
+    if not _has_any(text, compact, WRITE_ACTION_HINT_MARKERS):
+        return False
+    if _has_read_only_review_question(text, compact) and not _has_any(
+        text,
+        compact,
+        WRITE_CONFIRMATION_ACTION_MARKERS,
+    ):
+        return False
+    non_action_phrases = [
+        "写了什么",
+        "主要写了什么",
+        "怎么写",
+        "该怎么写",
+        "如何写",
+        "写得对不对",
+        "写的对不对",
+        "写得不对",
+        "写的不对",
+        "写得怎么样",
+        "写的怎么样",
+        "实现得对不对",
+        "实现的对不对",
+        "实现得不对",
+        "实现的不对",
+        "最近改动",
+        "当前改动",
+        "这次改动",
+        "本次改动",
+        "改动情况",
+        "当前变更",
+        "这次变更",
+        "本次变更",
+        "变更情况",
+    ]
+    if any(phrase in compact for phrase in non_action_phrases):
+        strong_write_verbs = [
+            "修改",
+            "修复",
+            "新增",
+            "删除",
+            "重构",
+            "补充",
+            "创建",
+            "生成",
+            "实现",
+            "开发",
+            "write",
+            "create",
+            "generate",
+            "implement",
+            "modify",
+            "fix",
+            "add",
+            "delete",
+            "refactor",
+        ]
+        return any(verb in text for verb in strong_write_verbs)
+    return True
+
+
+def _has_read_only_review_question(text: str, compact: str) -> bool:
+    """Detect review wording that contains write-like words but asks for judgement only."""
+
+    return _has_any(text, compact, READ_ONLY_REVIEW_QUESTION_MARKERS)
 
 
 def _decision(
@@ -599,9 +874,7 @@ def _is_greeting_or_identity(raw: str, signals: list[str]) -> bool:
         return False
     if {"execution_verb", "write_action", "workspace_read", "debug_signal"} & signal_set:
         return False
-    if "code_artifact" in signal_set and "write_negated" not in signal_set:
-        return False
-    return True
+    return "code_artifact" not in signal_set or "write_negated" in signal_set
 
 
 def _is_ambiguous_action(raw: str, signals: list[str]) -> bool:

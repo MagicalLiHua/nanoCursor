@@ -4,6 +4,18 @@
 
 这份材料用于准备项目最后一类高频追问：你怎么证明系统不是 demo？如果面试官质疑“组件是不是堆出来的”，应该怎么回答？
 
+```mermaid
+flowchart TB
+  Unit["正确性\nunit / service / API / contract"]
+  Runtime["运行证据\nEventStore / SSE / artifacts"]
+  Benchmark["有效性\nreal-task / context-window / recovery"]
+  Ablation["组件价值\nbaseline vs disabled"]
+  Retrospective["项目复盘\n收益 / 边界 / 下一步"]
+  Unit --> Runtime --> Benchmark --> Ablation --> Retrospective
+```
+
+这份材料的回答重点是：先证明系统能正确运行，再证明模块确实有用，最后诚实说明证据边界。不要把 benchmark 讲成商业级泛化能力，它更像一组工程验收样例。
+
 ## 1. 一句话版本
 
 nanoCursor 不只靠手动演示证明可用，而是用测试、contract、benchmark 和 ablation 从不同层面证明：模块能正确运行，跨语言行为一致，真实任务路由合理，上下文压缩有效，关键组件关闭后会造成可观测退化。

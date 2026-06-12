@@ -1,17 +1,40 @@
+import asyncio
 import json
 
 import pytest
 
-from src.api.services.agent_state import add_team_member, infer_task_capabilities, list_task_items, list_team_members
+from src.agent.context_pack import ContextPack
+from src.agent.strategy.planner import select_strategy
+from src.agent.strategy.tool_policy import ToolPolicy
+from src.api.services.agent_state import (
+    add_team_member,
+    infer_task_capabilities,
+    list_task_items,
+    list_team_members,
+)
 from src.api.services.artifact_service import build_artifact_center
-from src.api.services.benchmark_service import emit_benchmark_run, get_benchmark, list_benchmarks, write_benchmark_artifacts
-from src.api.services.capability_service import build_capability_hub, import_workspace_skill, recommend_capabilities
-from src.api.services.mcp_status_service import update_mcp_status
+from src.api.services.benchmark_service import (
+    emit_benchmark_run,
+    get_benchmark,
+    list_benchmarks,
+    write_benchmark_artifacts,
+)
+from src.api.services.capability_service import (
+    build_capability_hub,
+    import_workspace_skill,
+    recommend_capabilities,
+)
+from src.api.services.capability_usage_service import build_capability_usage
+from src.api.services.checkpoint_service import (
+    create_checkpoint,
+    list_checkpoints,
+    restore_checkpoint,
+)
 from src.api.services.conversation_service import (
     create_conversation,
     finalize_conversation_run,
-    get_conversation_memory,
     get_conversation,
+    get_conversation_memory,
     link_run_to_conversation,
     list_conversations,
     refresh_conversation_memory,
@@ -19,27 +42,9 @@ from src.api.services.conversation_service import (
     update_conversation_team,
 )
 from src.api.services.demo_run import emit_demo_run, write_demo_artifacts
-from src.api.services.preference_service import add_preference_memory, build_memory_profile
-from src.api.services.quality_service import build_quality_gate
-from src.api.services.recovery_service import build_recovery_center, rollback_from_backup
-from src.api.services.report_service import build_delivery_report
-from src.api.services.score_service import build_delivery_score
-from src.api.services.traceability_service import build_requirement_traceability
-from src.api.services.event_store import EventStore
-from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
-from src.api.services.workspace_registry_service import get_workspace_identity, list_recent_projects, open_project
-from src.api.services.workspace_service import build_workspace_health, build_workspace_overview
-from src.api.services.workspace_settings_service import get_workspace_settings, save_workspace_settings
-from src.agent.context_pack import ContextPack
-from src.agent.strategy.planner import select_strategy
-from src.agent.strategy.tool_policy import ToolPolicy
-from src.api.services.checkpoint_service import create_checkpoint, list_checkpoints, restore_checkpoint
 from src.api.services.eval_service import build_aggregate_metrics, list_evals, run_eval
-from src.api.services.git_sandbox_service import commit_branch, discard_branch, git_branch_status, prepare_git_branch
-from src.api.services.recovery_service import _action_risk_level
-from src.runtime.run_events import enrich_event
-from src.runtime.run_manager import RunManager
-from src.runtime.run_state import RunStateMachine, RunStatus
+from src.api.services.event_store import EventStore
+from src.api.services.failure_classifier_service import classify_failure
 from src.api.services.mcp_service import (
     install_mcp_server_preset,
     list_mcp_server_presets,
@@ -47,10 +52,36 @@ from src.api.services.mcp_service import (
     upsert_mcp_server_config,
     validate_mcp_config,
 )
-from src.api.services.capability_usage_service import build_capability_usage
-from src.api.services.failure_classifier_service import classify_failure
+from src.api.services.mcp_status_service import update_mcp_status
+from src.api.services.preference_service import add_preference_memory, build_memory_profile
+from src.api.services.quality_service import build_quality_gate
 from src.api.services.recovery_action_service import execute_recovery_action
-from src.api.services.skill_service import delete_workspace_skill, get_skill_detail, update_workspace_skill
+from src.api.services.recovery_service import (
+    _action_risk_level,
+    build_recovery_center,
+    rollback_from_backup,
+)
+from src.api.services.report_service import build_delivery_report
+from src.api.services.score_service import build_delivery_score
+from src.api.services.skill_service import (
+    delete_workspace_skill,
+    get_skill_detail,
+    update_workspace_skill,
+)
+from src.api.services.tool_events import capability_trace_for_tool, derive_agenthub_events
+from src.api.services.traceability_service import build_requirement_traceability
+from src.api.services.workspace_registry_service import (
+    list_recent_projects,
+    open_project,
+)
+from src.api.services.workspace_service import build_workspace_health, build_workspace_overview
+from src.api.services.workspace_settings_service import (
+    get_workspace_settings,
+    save_workspace_settings,
+)
+from src.runtime.run_events import enrich_event
+from src.runtime.run_manager import RunManager
+from src.runtime.run_state import RunStateMachine, RunStatus
 
 
 def test_list_task_items_normalizes_workspace_tasks(tmp_path):
@@ -312,6 +343,46 @@ def test_compose_runtime_team_scales_with_complexity(tmp_path):
     assert "Security" in [member["name"] for member in high["members"]]
     assert "Migration" in [member["name"] for member in high["members"]]
     assert all(member["lifetime"] == "run_snapshot" for member in medium["members"])
+
+
+def test_compose_runtime_team_async_uses_existing_intent_decision(tmp_path, monkeypatch):
+    from src.api.services.conversation_service import compose_runtime_team_async
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("intent should not be recomputed when intent_decision is provided")
+
+    monkeypatch.setattr("src.api.services.intent_router.classify_user_intent_async", fail_if_called)
+    intent = {
+        "level": "medium",
+        "rationale": "语义路由已判断为中等代码任务。",
+        "signals": ["semantic"],
+        "intent": "semantic_feature",
+        "route": "feature_delivery",
+        "execution_route": "agenthub_delivery",
+        "requires_workspace_write": True,
+        "requires_workspace_read": True,
+        "requires_shell": False,
+        "requires_approval": False,
+        "requires_execution": True,
+        "confidence": 0.93,
+        "suggested_agents": ["Lead", "Planner", "Coder", "Reviewer"],
+    }
+
+    team = asyncio.run(
+        compose_runtime_team_async(
+            "请实现一个导入模块",
+            str(workspace),
+            "conv-1",
+            intent_decision=intent,
+        )
+    )
+
+    assert team["complexity"]["intent_decision"] == intent
+    assert team["complexity"]["route"] == "feature_delivery"
+    assert [member["name"] for member in team["members"]] == ["Lead", "Planner", "Coder", "Reviewer"]
 
 
 def test_update_conversation_team_replaces_members(tmp_path):

@@ -1,6 +1,6 @@
 # 14. 启动与配置：别人 clone 后怎么跑起来
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -11,6 +11,33 @@
 - LLM provider 的自动检测机制是怎么工作的？
 - Go sidecar 的 feature flag 和 fallback 机制如何配置？
 - 常见启动问题的排查方法。
+
+```mermaid
+flowchart TB
+  Env[".env\nLLM provider / workspace / feature flags"]
+  Backend["FastAPI 后端\n127.0.0.1:8100"]
+  Frontend["主前端\n127.0.0.1:5173"]
+  Learning["学习站\n5174/5175"]
+  GoIndex["Go Indexer\n50051 可选"]
+  GoFile["Go Filetools\n50054 可选"]
+  GoExec["Go Executor\n50055 可选"]
+  GoMCP["Go MCP Gateway\n50056 可选"]
+  Fallback["Python fallback\nGo 不可用时继续运行"]
+
+  Env --> Backend
+  Backend --> Frontend
+  Backend --> GoIndex
+  Backend --> GoFile
+  Backend --> GoExec
+  Backend --> GoMCP
+  GoIndex -->|不可用| Fallback
+  GoFile -->|不可用| Fallback
+  GoExec -->|不可用| Fallback
+  GoMCP -->|不可用| Fallback
+  Learning -.独立学习资料.-> Env
+```
+
+这张图说明启动不是一个单进程应用：最小可用是后端 + 前端；Go sidecar 和学习站都是增强层，不应该成为用户第一次启动的阻塞点。
 
 ## 2. 完整启动流程
 

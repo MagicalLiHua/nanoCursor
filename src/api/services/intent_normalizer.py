@@ -9,7 +9,6 @@ from pydantic import ValidationError
 from src.api.models import AgentIntentSpec, IntentDecision, IntentRoute
 from src.api.services.intent_guards import IntentGuardResult
 
-
 WRITE_ROUTES = {"small_edit", "feature_delivery", "debug_fix", "risky_operation"}
 SHELL_ROUTES = {"feature_delivery", "debug_fix", "test_only", "risky_operation"}
 DIRECT_ROUTES = {"direct_answer", "clarification_needed"}
@@ -21,8 +20,10 @@ def normalize_intent_decision(
     *,
     fallback: IntentDecision,
     guards: IntentGuardResult,
+    runtime_context: Any | None = None,
 ) -> IntentDecision:
     """Normalize raw model output into the stable IntentDecision contract."""
+    del runtime_context
     if guards.hard_decision is not None:
         decision = guards.hard_decision
         decision.raw_decision = raw or {}
@@ -32,6 +33,7 @@ def normalize_intent_decision(
         decision.normalized_from = "hard_guard"
         decision.source = decision.source or "deterministic_guard"
         _fill_v3_defaults(decision)
+        _apply_explicit_user_bounds(decision, fallback)
         return decision
 
     raw = raw or {}
@@ -43,6 +45,16 @@ def normalize_intent_decision(
     requires_shell = bool(raw.get("requires_shell", fallback.requires_shell))
     requires_approval = bool(raw.get("requires_approval", fallback.requires_approval))
 
+    route, complexity, requires_read, requires_write, requires_shell, requires_approval = _apply_semantic_consistency_bounds(
+        raw,
+        route,
+        complexity,
+        requires_read,
+        requires_write,
+        requires_shell,
+        requires_approval,
+        fallback,
+    )
     route, complexity, requires_read, requires_write, requires_shell, requires_approval = _apply_policy_bounds(
         route,
         complexity,
@@ -90,7 +102,170 @@ def normalize_intent_decision(
         raw_decision=raw,
     )
     _fill_v3_defaults(decision)
+    _apply_explicit_user_bounds(decision, fallback)
     return decision
+
+
+def _apply_explicit_user_bounds(decision: IntentDecision, fallback: IntentDecision) -> None:
+    """Enforce explicit user negations after model/deterministic routing.
+
+    The semantic classifier may infer that a task *could* use tools, but explicit
+    instructions such as "不要改代码" and "不要读取文件" are user policy, not weak
+    signals. This late pass makes those instructions non-negotiable.
+    """
+
+    signals = set(fallback.signals or fallback.indicators or [])
+    notes: list[str] = []
+
+    if "write_negated" in signals:
+        decision.requires_workspace_write = False
+        if decision.route in WRITE_ROUTES:
+            decision.route = "read_only" if decision.requires_workspace_read else "direct_answer"
+            decision.execution_route = "agenthub_delivery" if decision.route == "read_only" else "lead_direct_reply"
+            decision.requires_execution = decision.route not in DIRECT_ROUTES
+            decision.requires_shell = False
+            decision.requires_approval = False
+            decision.suggested_agents = ["Lead"]
+            decision.suggested_agent_specs = []
+            decision.context_requirements = {}
+            decision.tool_permissions = {}
+            decision.acceptance_criteria = []
+        notes.append("explicit_no_write_enforced")
+
+    if "workspace_read_negated" in signals:
+        decision.requires_workspace_read = False
+        if not decision.requires_workspace_write:
+            decision.route = "direct_answer"
+            decision.execution_route = "lead_direct_reply"
+            decision.requires_execution = False
+            decision.requires_shell = False
+            decision.requires_approval = False
+            decision.suggested_agents = ["Lead"]
+            decision.suggested_agent_specs = []
+            decision.context_requirements = {}
+            decision.tool_permissions = {}
+            decision.acceptance_criteria = []
+        notes.append("explicit_no_read_enforced")
+
+    if notes:
+        raw = decision.raw_decision if isinstance(decision.raw_decision, dict) else {}
+        trace = raw.get("router_trace") if isinstance(raw.get("router_trace"), dict) else {}
+        trace_notes = trace.get("normalization_notes") if isinstance(trace.get("normalization_notes"), list) else []
+        trace["normalization_notes"] = _unique([*trace_notes, *notes])
+        raw["router_trace"] = trace
+        decision.raw_decision = raw
+        decision.indicators = _unique([*decision.indicators, *notes])
+        _fill_v3_defaults(decision)
+
+
+def _apply_semantic_consistency_bounds(
+    raw: dict[str, Any],
+    route: str,
+    complexity: str,
+    requires_read: bool,
+    requires_write: bool,
+    requires_shell: bool,
+    requires_approval: bool,
+    fallback: IntentDecision,
+) -> tuple[str, str, bool, bool, bool, bool]:
+    """Prevent optional semantic routing from erasing strong fallback evidence.
+
+    The semantic classifier improves natural-language judgement, but it is still
+    a model call. When deterministic fallback has a strong write/test route, a
+    high-confidence semantic ``direct_answer`` should not silently turn a coding
+    request into chat. Explicit user no-write/no-read constraints are still
+    enforced later by ``_apply_explicit_user_bounds``.
+    """
+
+    if route == "clarification_needed" and _is_semantic_unavailable_clarification(raw):
+        return route, complexity, requires_read, requires_write, requires_shell, requires_approval
+
+    fallback_route = str(fallback.route or "")
+    fallback_complexity = _fallback_complexity(fallback, complexity)
+    fallback_signals = set(fallback.signals or fallback.indicators or [])
+    if route == fallback_route and "conversation_followup" in set(fallback.signals or fallback.indicators or []):
+        complexity = fallback_complexity
+    downgraded_to_lightweight = route in DIRECT_ROUTES or route in READ_ONLY_ROUTES
+    upgraded_to_write = route in WRITE_ROUTES or requires_write
+    if (
+        fallback_route in READ_ONLY_ROUTES | {"test_only"}
+        and not fallback.requires_workspace_write
+        and "write_action" not in fallback_signals
+        and upgraded_to_write
+    ):
+        _append_normalization_note(raw, "llm_write_upgrade_blocked_by_read_fallback")
+        return (
+            fallback_route,
+            fallback_complexity,
+            bool(fallback.requires_workspace_read),
+            False,
+            bool(fallback.requires_shell),
+            False,
+        )
+    if fallback_route in WRITE_ROUTES and fallback.requires_workspace_write and downgraded_to_lightweight:
+        _append_normalization_note(raw, "llm_downgrade_blocked_by_write_fallback")
+        return (
+            fallback_route,
+            fallback_complexity,
+            True,
+            True,
+            bool(fallback.requires_shell),
+            bool(fallback.requires_approval),
+        )
+    if fallback_route == "test_only" and fallback.requires_shell and route in DIRECT_ROUTES | READ_ONLY_ROUTES:
+        _append_normalization_note(raw, "llm_downgrade_blocked_by_test_fallback")
+        return (
+            fallback_route,
+            fallback_complexity,
+            True,
+            False,
+            True,
+            bool(fallback.requires_approval),
+        )
+    if fallback_route == "review_only" and route in DIRECT_ROUTES | {"read_only"}:
+        _append_normalization_note(raw, "llm_downgrade_blocked_by_review_fallback")
+        return (
+            fallback_route,
+            fallback_complexity,
+            True,
+            False,
+            bool(fallback.requires_shell),
+            False,
+        )
+    if fallback_route == "read_only" and route in DIRECT_ROUTES:
+        _append_normalization_note(raw, "llm_downgrade_blocked_by_read_fallback")
+        return (
+            fallback_route,
+            fallback_complexity,
+            True,
+            False,
+            bool(fallback.requires_shell),
+            False,
+        )
+    return route, complexity, requires_read, requires_write, requires_shell, requires_approval
+
+
+def _is_semantic_unavailable_clarification(raw: dict[str, Any]) -> bool:
+    return (
+        str(raw.get("intent") or "") == "semantic_low_confidence_clarification"
+        and not raw.get("raw_semantic_result")
+    )
+
+
+def _fallback_complexity(fallback: IntentDecision, default: str) -> str:
+    route = str(fallback.route or "")
+    if route == "small_edit":
+        return "small_code"
+    if route == "test_only":
+        return "small_code"
+    return str(fallback.complexity or fallback.level or default)
+
+
+def _append_normalization_note(raw: dict[str, Any], note: str) -> None:
+    trace = raw.get("router_trace") if isinstance(raw.get("router_trace"), dict) else {}
+    notes = trace.get("normalization_notes") if isinstance(trace.get("normalization_notes"), list) else []
+    trace["normalization_notes"] = _unique([*notes, note])
+    raw["router_trace"] = trace
 
 
 def _apply_policy_bounds(
@@ -120,9 +295,14 @@ def _apply_policy_bounds(
     if route in WRITE_ROUTES:
         requires_read = True
         requires_write = True
+        if route == "small_edit" and complexity == "simple":
+            complexity = "small_code"
 
     if route in SHELL_ROUTES:
         requires_shell = True
+        requires_read = True
+        if route == "test_only" and complexity == "simple":
+            complexity = "small_code"
 
     if route == "risky_operation":
         complexity = "high_risk"

@@ -1,6 +1,6 @@
 # 15. 项目复盘：这个项目到底给你带来了什么
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -10,6 +10,20 @@
 - 知道哪些技术决策是正确的，哪些是可以改进的。
 - 清楚地回答"这个项目对求职真正有价值的地方是什么"。
 - 有能力讲清楚：如果重做一次，架构会怎么设计。
+
+```mermaid
+timeline
+  title nanoCursor 演化路线
+  LangGraph 原型期 : 固定 Planner/Coder/Reviewer/Tester DAG : 验证多 Agent 编程可行
+  自研 Agent Loop : 默认 Lead : 按需临时 Agent : 避免简单请求过度执行
+  服务层重构 : FastAPI routes 变薄 : services 分层 : EventStore/SSE 可观测
+  上下文与记忆 : ContextPack/Budget/Ledger : MemoryRecord : Skills 注入
+  工具治理与恢复 : 权限分级 : approval : failure classification : recovery loop
+  Go Sidecar : indexer/filetools/executor/MCP gateway : fallback + contract tests
+  学习站与收尾 : README/benchmark/消融实验 : 面试题库 : 项目复盘
+```
+
+复盘时最重要的不是证明每一步都完美，而是说明你在不断把系统从“能跑 demo”推向“有边界、有证据、能解释”的方向。
 
 ## 2. 项目演化简史
 

@@ -4,6 +4,26 @@
 
 这个练习用于把“上下文、记忆、工具权限、失败恢复”串起来。目标不是跑通一个炫酷 demo，而是确认你能解释系统为什么允许某些动作、拒绝某些动作，以及哪些信息进入了模型上下文。
 
+## 实验总图
+
+```mermaid
+flowchart TB
+  Memory["创建/加载记忆\nMemoryRecord / rule file"]
+  Select["记忆选择\nscope + confidence + freshness"]
+  Context["注入 ContextPack\nselected_memories"]
+  Action["Agent 提出动作\n读/写/shell/MCP"]
+  Policy["工具策略分类\nsafe/risky/approval"]
+  Execute["执行或等待审批"]
+  Failure["失败分类与恢复"]
+  Evidence["写入 evidence / EventStore"]
+
+  Memory --> Select --> Context --> Action --> Policy --> Execute --> Evidence
+  Execute -->|failed| Failure --> Policy
+  Failure --> Evidence
+```
+
+这个实验要把两件事连起来：记忆影响模型“知道什么”，工具治理限制模型“能做什么”。
+
 ## 1. 实验 A：创建并选择一条记忆
 
 创建一条 workspace 记忆：
@@ -123,3 +143,15 @@
 你可以这样总结这个实验：
 
 > 我把记忆和工具治理放在一起验证，是因为 Agent 真正能干活时，这两者会同时影响行为。记忆决定模型知道哪些长期事实，工具治理决定模型能不能执行动作。系统既要避免忘记重要项目规则，也要避免因为自动恢复或 shell 命令绕过安全边界。
+
+## 7. 完成证据
+
+完成后请留下这些证据：
+
+| 证据 | 说明 |
+|---|---|
+| MemoryRecord 或 transient rule 截图/路径 | 证明记忆来源可追踪 |
+| selected_memories / omitted | 证明不是所有记忆都注入 |
+| shell 分类结果 | 证明安全命令和风险命令能区分 |
+| approval 事件 | 证明高风险动作没有绕过用户 |
+| recovery evidence | 证明失败恢复仍走策略层 |

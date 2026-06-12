@@ -1,6 +1,10 @@
 import asyncio
 
-from src.api.services.intent_router import classify_user_intent, classify_user_intent_async, is_lead_direct_intent
+from src.api.services.intent_router import (
+    classify_user_intent,
+    classify_user_intent_async,
+    is_lead_direct_intent,
+)
 
 
 def test_greeting_routes_to_lead_direct_reply():
@@ -38,6 +42,8 @@ def test_greeting_with_negated_file_access_stays_lead_direct():
     assert "workspace_read_negated" in decision["signals"]
     assert "workspace_read" not in decision["signals"]
     assert "write_action" not in decision["signals"]
+    assert decision["raw_decision"]["router_trace"]["final_route"] == "direct_answer"
+    assert "explicit_no_write_enforced" in decision["raw_decision"]["router_trace"]["normalization_notes"]
 
 
 def test_short_python_artifact_request_routes_to_code_execution():
@@ -52,6 +58,9 @@ def test_short_python_artifact_request_routes_to_code_execution():
     assert "code_artifact" in decision["signals"]
     assert decision["context_requirements"]["need_project_index"] is True
     assert decision["tool_permissions"]["write_file"] == "safe_write"
+    trace = decision["raw_decision"]["router_trace"]
+    assert "code_artifact_hint" in trace["deterministic_hints"]
+    assert "tooling_hint" in trace["deterministic_hints"]
     assert is_lead_direct_intent("帮我用python写常见的排序算法并比较性能") is False
 
 
@@ -61,6 +70,20 @@ def test_read_only_explanation_stays_lightweight():
     assert decision["route"] == "direct_answer"
     assert decision["execution_route"] == "lead_direct_reply"
     assert decision["requires_workspace_write"] is False
+
+
+def test_technical_comparison_stays_lead_direct():
+    for prompt in [
+        "python和java谁更好",
+        "Python 和 Java 哪个更适合初学者",
+        "你觉得 React 和 Vue 怎么选",
+        "帮我比较一下 Python 和 Java 的优缺点",
+    ]:
+        decision = classify_user_intent(prompt)
+        assert decision["route"] == "direct_answer"
+        assert decision["execution_route"] == "lead_direct_reply"
+        assert decision["requires_workspace_write"] is False
+        assert "discussion_or_comparison" in decision["signals"]
 
 
 def test_high_risk_prompt_escalates():
@@ -82,6 +105,50 @@ def test_project_structure_routes_to_read_only():
     assert decision["requires_workspace_write"] is False
 
 
+def test_folder_file_listing_stays_read_only():
+    decision = classify_user_intent("帮我看看这个文件夹下面都有什么文件")
+
+    assert decision["route"] == "read_only"
+    assert decision["requires_workspace_read"] is True
+    assert decision["requires_workspace_write"] is False
+
+
+def test_read_only_write_word_phrases_do_not_trigger_write_action():
+    for prompt in [
+        "帮我看看项目说明写了什么",
+        "帮我看看最近改动情况",
+        "看一下 docs 目录主要写了什么",
+    ]:
+        decision = classify_user_intent(prompt)
+        assert decision["route"] == "read_only"
+        assert decision["requires_workspace_read"] is True
+        assert decision["requires_workspace_write"] is False
+        assert "write_action" not in decision["signals"]
+
+
+def test_code_correctness_review_stays_read_only():
+    for prompt in [
+        "你帮我看看这个路径下都有一些什么文件 有没有什么涉及到算法的代码 代码写的对不对",
+        "你帮我看看这个路径下都有什么文件 有没有什么涉及到算法的代码 代码写的不对",
+        "帮我检查一下这里的代码写得对不对",
+        "帮我看看这个文件夹有没有算法代码，代码有没有问题",
+    ]:
+        decision = classify_user_intent(prompt)
+        assert decision["route"] == "review_only"
+        assert decision["requires_workspace_read"] is True
+        assert decision["requires_workspace_write"] is False
+        assert "review_or_risk_check" in decision["signals"]
+        assert "write_action" not in decision["signals"]
+
+
+def test_review_question_with_explicit_fix_still_allows_write():
+    decision = classify_user_intent("帮我检查代码写得对不对，并修复问题")
+
+    assert decision["requires_workspace_write"] is True
+    assert decision["route"] in {"small_edit", "feature_delivery"}
+    assert "write_action" in decision["signals"]
+
+
 def test_small_readme_typo_routes_to_small_edit():
     decision = classify_user_intent("帮我改 README 的错别字")
 
@@ -89,6 +156,22 @@ def test_small_readme_typo_routes_to_small_edit():
     assert decision["execution_route"] == "agenthub_delivery"
     assert decision["requires_workspace_write"] is True
     assert decision["suggested_agents"] == ["Lead", "Coder"]
+
+
+def test_delete_word_is_not_always_high_risk():
+    decision = classify_user_intent("帮我删除 README 里多余的一句话")
+
+    assert decision["route"] == "small_edit"
+    assert decision["risk_level"] != "high"
+    assert decision["requires_approval"] is False
+
+
+def test_deleting_named_file_still_escalates():
+    decision = classify_user_intent("删除 old.py")
+
+    assert decision["route"] == "risky_operation"
+    assert decision["risk_level"] == "high"
+    assert decision["requires_approval"] is True
 
 
 def test_ambiguous_improve_request_asks_for_clarification():
@@ -152,6 +235,8 @@ def test_conversation_meta_question_stays_direct_even_with_code_history():
 
 
 def test_async_intent_router_normalizes_llm_result(monkeypatch):
+    monkeypatch.setenv("NANOCURSOR_SEMANTIC_INTENT_MODE", "disabled")
+
     async def fake_classifier(prompt, conversation_summary="", workspace_summary=None):
         return {
             "strategy": "feature_delivery",

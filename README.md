@@ -8,6 +8,7 @@ nanoCursor 不是 Cursor、Claude Code 或 Codex 的替代品。它更像是我�
 
 - 简单问题能不能由 Lead 直接回答，而不是每次都跑完整开发流程。
 - 复杂任务能不能按需创建临时 Agent，并在任务结束后归档。
+- 意图判断能不能结合 LLM 语义理解和确定性安全边界，而不是只靠关键词或完全相信模型。
 - 上下文能不能被选择、预算、压缩和审计，而不是把完整项目和完整历史塞给模型。
 - 工具调用能不能有权限、审批、证据和恢复。
 - Go sidecar 能不能只放在边界清楚的确定性模块里，而不是为了技术栈占比强行重构。
@@ -90,7 +91,7 @@ nanoCursor 打开一个本地目录后，会围绕一次代码任务完成一条
 | 模块 | 当前实现 |
 |---|---|
 | Agent Loop | 默认只有 Lead，复杂任务再动态创建 Planner / Coder / Tester / Reviewer 等临时 Agent |
-| 意图路由 | 区分问候、解释、只读分析、小改动、完整开发、高风险操作，避免所有消息都跑完整流程 |
+| 意图路由 | 默认启用 LLM 语义判断，结合 hard guard 和 normalizer 区分问候、解释、只读分析、小改动、完整开发、高风险操作 |
 | 上下文管理 | Project Index + Context Pack + Context Ledger，按任务选择相关文件、摘要、记忆、Skills 和 MCP 能力 |
 | 上下文压缩 | 监控上下文窗口占用，支持 deterministic、summary、LLM summary 和 LLM fallback |
 | 工具治理 | read-only / safe-write / risky-write / shell-safe / shell-risky 分级，高风险动作进入 approval |
@@ -144,6 +145,14 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 # Ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5-coder
+```
+
+意图路由默认启用 LLM 语义判断。如果你想在离线环境或调试场景退回确定性路由，可以设置：
+
+```bash
+NANOCURSOR_SEMANTIC_INTENT_MODE=disabled
+# 或兼容旧开关
+NANOCURSOR_SEMANTIC_INTENT_ENABLED=false
 ```
 
 ### 启动项目
@@ -249,6 +258,18 @@ Go 负责边界清楚、需要稳定 I/O 或进程治理的 sidecar。
 ```
 
 ## 关键设计
+
+### 语义意图路由，不是纯关键词
+
+早期版本大量依赖关键词规则，容易出现两个问题：用户说“哈喽”却生成一堆任务卡，或者用户讨论“Python 和 Java 谁更好”被误判成代码任务。现在的路由链路改成了四层：
+
+```text
+deterministic fallback -> hard guard -> LLM semantic classifier -> normalizer
+```
+
+LLM 负责理解用户真正想做什么；hard guard 负责空输入、问候、高风险、no-write 等强边界；normalizer 负责把模型输出收口成稳定的 `IntentDecision`。如果模型把明确的代码任务误判成闲聊，后端会用 deterministic hints 阻止降级；如果用户明确说“不要改代码”，模型再想写文件也会被收住。
+
+这不是为了证明模型判断永远正确，而是让系统同时具备两种能力：语义上更自然，工程上可回退、可审计、可测试。
 
 ### Agent Loop，不是固定 DAG
 

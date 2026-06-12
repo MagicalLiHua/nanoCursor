@@ -6,6 +6,26 @@
 
 目标不是刷高分，而是学会把一次 benchmark/ablation 跑成可以复盘的证据。
 
+## 实验总图
+
+```mermaid
+flowchart LR
+  Baseline["baseline\n全部模块开启"]
+  DisableContext["disable_context_pack"]
+  DisableRecovery["disable_failure_recovery"]
+  DisableGo["disable_go_sidecars"]
+  Metrics["收集指标\n成功率/token/步骤/风险/事件完整性"]
+  Verdict["组件结论\nnecessary/useful/neutral/negative"]
+
+  Baseline --> Metrics
+  DisableContext --> Metrics
+  DisableRecovery --> Metrics
+  DisableGo --> Metrics
+  Metrics --> Verdict
+```
+
+消融实验的重点不是“关闭模块后一定变差”，而是用同一任务、同一指标体系观察差异，避免只凭感觉说某个模块重要。
+
 ## 1. 实验 A：真实任务 benchmark
 
 先跑真实任务 benchmark：
@@ -123,3 +143,12 @@ curl -X POST http://127.0.0.1:8100/api/evals/ablation/matrix \
 3. ablation matrix 是怎么生成的？
 4. 组件 verdict 是怎么计算的？
 5. benchmark 能证明什么，不能证明什么？
+
+## 7. 结果记录模板
+
+| 实验 | baseline | disabled variant | 差异 | 初步结论 | 还需要补什么证据 |
+|---|---|---|---|---|---|
+| real task benchmark |  |  |  |  |  |
+| context window benchmark |  |  |  |  |  |
+| failure recovery ablation |  |  |  |  |  |
+| go sidecar ablation |  |  |  |  |  |

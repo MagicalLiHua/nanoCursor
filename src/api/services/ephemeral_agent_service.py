@@ -13,9 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from src.api.services.agent_lifecycle_service import build_agent_lifecycle_projection
 from src.api.services.event_store import get_event_store
 from src.infra.path_guard import safe_slug
-
 
 MAX_SUGGESTED_AGENTS = 5
 MAX_ACTIVE_AGENTS = 3
@@ -100,8 +100,11 @@ def _emit_agent_event(
         "role": agent.get("role", ""),
         "status": agent.get("status", ""),
         "terminal_status": agent.get("terminal_status", ""),
+        "parent_agent": agent.get("parent_agent", ""),
         "goal": agent.get("goal", ""),
         "reason": agent.get("reason", ""),
+        "last_action": agent.get("last_action", ""),
+        "archive_reason": agent.get("archive_reason", ""),
         "tools": agent.get("tools", []),
         "capabilities": agent.get("capabilities", []),
         "mcp_servers": agent.get("mcp_servers", []),
@@ -484,13 +487,51 @@ def list_ephemeral_agents(
     cleanup_expired_ephemeral_agents(thread_id, workspace_dir)
     state = _read_state(thread_id, workspace_dir)
     agents = state["agents"]
+    lifecycle = build_agent_lifecycle_projection(
+        thread_id,
+        workspace_dir,
+        agents=agents,
+        include_archived=True,
+    )
+    projected_by_id = {
+        str(agent.get("agent_id") or ""): agent
+        for agent in lifecycle.get("agents", [])
+        if isinstance(agent, dict)
+    }
     visible = agents if include_archived else [agent for agent in agents if agent.get("status") not in ARCHIVED_STATUSES]
+    visible = [
+        {
+            **agent,
+            **{
+                key: projected[key]
+                for key in (
+                    "lifecycle_status",
+                    "display_status",
+                    "is_active",
+                    "is_archived",
+                    "last_event_type",
+                    "last_event_id",
+                    "last_event_at",
+                    "loop_step_id",
+                    "loop_action_type",
+                    "event_count",
+                )
+                if key in projected
+            },
+        }
+        for agent in visible
+        for projected in [projected_by_id.get(str(agent.get("agent_id") or ""), {})]
+    ]
     return {
         "thread_id": thread_id,
         "agents": visible,
         "total": len(visible),
         "active_count": _active_count(agents),
         "archived_count": sum(1 for agent in agents if agent.get("status") in ARCHIVED_STATUSES),
+        "lifecycle": {
+            **lifecycle,
+            "timeline": lifecycle.get("timeline", [])[-100:],
+        },
         "limits": {
             "max_active_agents": MAX_ACTIVE_AGENTS,
             "max_suggested_agents": MAX_SUGGESTED_AGENTS,
@@ -635,6 +676,9 @@ def complete_ephemeral_agent(
             else []
         ),
     }
+    for key in ("context_pack_id", "evidence_pack_id", "merge_record"):
+        if key in result:
+            agent["result"][key] = result[key]
     _write_state(thread_id, workspace_dir, state)
     _emit_agent_event(thread_id, workspace_dir, "ephemeral_agent_completed", agent, agent["result"]["summary"])
     _emit_agent_event(thread_id, workspace_dir, "ephemeral_agent_archived", agent, "临时子 Agent 完成后自动归档。")

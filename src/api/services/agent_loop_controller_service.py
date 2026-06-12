@@ -130,13 +130,19 @@ def run_loop_controller_step(
 
 
 def propose_next_loop_action(observation: dict[str, Any]) -> dict[str, Any]:
-    """Propose a conservative next action from the current observation."""
+    """Propose the next structured Lead action from the current observation.
+
+    This intentionally remains a scheduler hint, not a workflow graph.  The
+    action must still pass ``check_loop_action`` before it can be committed.
+    """
     loop = observation.get("loop") if isinstance(observation.get("loop"), dict) else {}
     state = AgentLoopState.model_validate(loop)
     readiness = observation.get("finish_readiness") if isinstance(observation.get("finish_readiness"), dict) else {}
     task_board = observation.get("task_board") if isinstance(observation.get("task_board"), dict) else {}
     tasks = task_board.get("tasks") if isinstance(task_board.get("tasks"), list) else []
     last_action_type = _last_action_type(loop)
+    route = str(state.intent.route or "")
+    recent_failure = _recent_failure_event(observation)
 
     if state.terminal_status in {"completed", "failed", "cancelled"}:
         return LeadAction(
@@ -144,6 +150,19 @@ def propose_next_loop_action(observation: dict[str, Any]) -> dict[str, Any]:
             goal=f"Loop is already terminal: {state.terminal_status}.",
             agent="Lead",
             final_message=f"Lead loop already ended as {state.terminal_status}.",
+        ).model_dump()
+
+    if state.terminal_status == "waiting_approval" or state.pending_approval_id:
+        return LeadAction(
+            type="request_approval",
+            goal="Wait for the user to approve or reject the pending risky action.",
+            agent="Lead",
+            approval={
+                "approval_id": state.pending_approval_id or "pending",
+                "status": "waiting",
+                "source": "agent_loop_controller",
+            },
+            context_requirements={"pending_approval_id": state.pending_approval_id},
         ).model_dump()
 
     if state.intent.execution_route == "lead_direct_reply":
@@ -163,6 +182,39 @@ def propose_next_loop_action(observation: dict[str, Any]) -> dict[str, Any]:
             final_message="请补充要处理的对象、范围和验收标准。",
         ).model_dump()
 
+    if route == "risky_operation" and not _has_step_type(loop, {"request_approval"}):
+        return LeadAction(
+            type="request_approval",
+            goal="Request approval before any high-risk operation.",
+            agent="Lead",
+            approval={
+                "kind": "intent_route",
+                "route": route,
+                "risk": state.intent.risk_level or "high",
+                "reason": state.intent.rationale,
+            },
+            context_requirements={"risk_reasons": state.intent.risk_reasons},
+        ).model_dump()
+
+    if recent_failure and route in {"debug_fix", "feature_delivery", "test_only"}:
+        return _recovery_task_action(
+            reason="Recent tool or runtime failure needs a recovery task before continuing.",
+            failed_task_ids=[],
+            recent_failure=recent_failure,
+        )
+
+    if _should_inspect_before_finishing(route, loop, readiness):
+        return LeadAction(
+            type="inspect_project",
+            goal="Inspect project context before producing a read-only or review answer.",
+            agent="Lead",
+            context_requirements={
+                "route": route,
+                "readiness_mode": readiness.get("mode"),
+                "reason": readiness.get("reason"),
+            },
+        ).model_dump()
+
     if readiness.get("ready"):
         if last_action_type == "summarize":
             return LeadAction(type="finish", goal="Finish after summary.", agent="Lead").model_dump()
@@ -174,14 +226,62 @@ def propose_next_loop_action(observation: dict[str, Any]) -> dict[str, Any]:
 
     counts = readiness.get("counts") if isinstance(readiness.get("counts"), dict) else {}
     if counts.get("failed") or counts.get("blocked") or counts.get("cancelled"):
+        failed_task_ids = readiness.get("failed_task_ids", [])
+        if route in {"debug_fix", "feature_delivery", "test_only"}:
+            return _recovery_task_action(
+                reason="Task board has failed, blocked, or cancelled work; create a bounded recovery task.",
+                failed_task_ids=failed_task_ids if isinstance(failed_task_ids, list) else [],
+                recent_failure=recent_failure,
+            )
+        if route == "small_edit":
+            return LeadAction(
+                type="inspect_project",
+                goal="Inspect failed small-edit evidence before deciding whether to retry or stop.",
+                agent="Lead",
+                context_requirements={"failed_task_ids": failed_task_ids},
+            ).model_dump()
         return LeadAction(
             type="fail",
             goal="Stop because the task board has failed, blocked, or cancelled work.",
             agent="Lead",
-            context_requirements={"failed_task_ids": readiness.get("failed_task_ids", [])},
+            context_requirements={"failed_task_ids": failed_task_ids},
         ).model_dump()
 
     active_task = _first_task_with_status(tasks, {"running", "ready", "pending"})
+    if route == "test_only" and active_task and last_action_type != "run_checks":
+        return LeadAction(
+            type="run_checks",
+            goal=f"Run verification for task: {active_task.get('title') or active_task.get('id')}.",
+            agent="Lead",
+            task_id=active_task.get("id"),
+            context_requirements={"task": _task_context(active_task), "route": route},
+        ).model_dump()
+
+    if _should_spawn_read_only_agent(route, active_task, loop):
+        return LeadAction(
+            type="spawn_agent",
+            goal=f"Spawn a read-only {active_task.get('agent_role') or 'analysis'} Agent for {active_task.get('title') or active_task.get('id')}.",
+            agent="Lead",
+            task_id=active_task.get("id"),
+            context_requirements={
+                "agent": {
+                    "mode": "temporary",
+                    "permissions": ["read_only"],
+                    "role": active_task.get("agent_role") or active_task.get("type") or "analysis",
+                    "goal": active_task.get("goal") or active_task.get("title") or "",
+                    "task_id": active_task.get("id"),
+                }
+            },
+        ).model_dump()
+
+    if route in {"feature_delivery", "debug_fix"} and not tasks and not _has_step_type(loop, {"create_tasks"}):
+        return LeadAction(
+            type="create_tasks",
+            goal="Create a bounded task map before executing a multi-step coding run.",
+            agent="Lead",
+            context_requirements={"route": route, "reason": "missing_task_board"},
+        ).model_dump()
+
     return LeadAction(
         type="inspect_project",
         goal="Observe task-board state and gather the next relevant context.",
@@ -207,6 +307,102 @@ def _first_task_with_status(tasks: list[Any], statuses: set[str]) -> dict[str, A
         if isinstance(task, dict) and str(task.get("status") or "") in statuses:
             return task
     return None
+
+
+def _has_step_type(loop: dict[str, Any], action_types: set[str]) -> bool:
+    steps = loop.get("steps") if isinstance(loop.get("steps"), list) else []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        action = step.get("action") if isinstance(step.get("action"), dict) else {}
+        if str(action.get("type") or "") in action_types:
+            return True
+    return False
+
+
+def _should_inspect_before_finishing(route: str, loop: dict[str, Any], readiness: dict[str, Any]) -> bool:
+    if route not in {"read_only", "review_only"}:
+        return False
+    if _has_step_type(loop, {"inspect_project", "call_tool", "summarize"}):
+        return False
+    return bool(readiness.get("ready"))
+
+
+def _should_spawn_read_only_agent(route: str, task: dict[str, Any] | None, loop: dict[str, Any]) -> bool:
+    if route not in {"feature_delivery", "debug_fix", "review_only", "read_only"}:
+        return False
+    if not task or _has_step_type(loop, {"spawn_agent"}):
+        return False
+    if bool(task.get("writes_files")):
+        return False
+    task_type = str(task.get("type") or "")
+    role = str(task.get("agent_role") or "").lower()
+    return bool(task.get("can_parallel")) or task_type in {"analysis", "review", "context_build"} or role in {
+        "planner",
+        "reviewer",
+        "tester",
+        "security",
+    }
+
+
+def _task_context(task: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        return {}
+    return {
+        "id": task.get("id"),
+        "type": task.get("type"),
+        "title": task.get("title"),
+        "status": task.get("status"),
+        "agent_role": task.get("agent_role"),
+        "writes_files": task.get("writes_files"),
+    }
+
+
+def _recent_failure_event(observation: dict[str, Any]) -> dict[str, Any] | None:
+    events = observation.get("recent_events") if isinstance(observation.get("recent_events"), list) else []
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event_type in {"tool_call_failed", "agent_run_failed", "parallel_agent_failed", "run_failed"}:
+            return {
+                "id": event.get("id"),
+                "type": event_type,
+                "title": event.get("title"),
+                "agent": event.get("agent"),
+                "payload": payload,
+            }
+        if payload.get("ok") is False or str(payload.get("status") or "").lower() in {"failed", "error"}:
+            return {
+                "id": event.get("id"),
+                "type": event_type,
+                "title": event.get("title"),
+                "agent": event.get("agent"),
+                "payload": payload,
+            }
+    return None
+
+
+def _recovery_task_action(
+    *,
+    reason: str,
+    failed_task_ids: list[Any],
+    recent_failure: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return LeadAction(
+        type="create_tasks",
+        goal="Create or update a recovery task before continuing execution.",
+        agent="Lead",
+        context_requirements={
+            "recovery": {
+                "reason": reason,
+                "failed_task_ids": [str(item) for item in failed_task_ids if str(item).strip()],
+                "recent_failure": recent_failure or {},
+                "expected_next": "classify_failure_then_retry_or_stop",
+            }
+        },
+    ).model_dump()
 
 
 def _phase_for_action(action_type: str) -> str:

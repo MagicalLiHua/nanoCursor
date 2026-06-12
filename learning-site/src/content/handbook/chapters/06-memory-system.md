@@ -1,6 +1,6 @@
 # 06. 记忆机制：不是保存聊天记录那么简单
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -11,6 +11,22 @@
 - `MemoryRecord` 有哪些关键字段？confidence、freshness、importance 分别代表什么？
 - FailureLearner 和 ExperienceLearner 如何自动从运行中学习？
 - 文件指纹（file_fingerprint）有什么用？为什么记忆需要"新鲜度"？
+
+```mermaid
+flowchart TB
+  Sources["记忆来源\n用户偏好 / 规则文件 / 运行证据 / 失败恢复 / 系统摘要"]
+  Normalize["MemoryRecord 标准化\nscope / source / confidence / importance"]
+  Store["Memory Store\n按 workspace / conversation / file 绑定"]
+  Freshness["新鲜度检查\nfile_fingerprint / expires_at / stale"]
+  Select["记忆选择\nscope filter + relevance score"]
+  Budget["上下文预算\npreferences_skills section"]
+  Inject["注入 ContextPack\nselected_memories"]
+  Audit["使用回写\nlast_used_at / use_count / evidence_refs"]
+
+  Sources --> Normalize --> Store --> Freshness --> Select --> Budget --> Inject --> Audit --> Store
+```
+
+这张图说明：记忆不是“历史消息缓存”，而是一个有来源、有范围、有置信度、有过期机制的长期上下文候选池。
 
 ## 2. 为什么记忆不是简单的"保存聊天记录"
 

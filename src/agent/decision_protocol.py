@@ -12,13 +12,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 LeadActionType = Literal[
     "answer",
     "ask_clarification",
     "inspect_project",
     "create_tasks",
     "spawn_agent",
+    "merge_agent_result",
     "call_tool",
     "request_approval",
     "run_checks",
@@ -39,4 +39,3 @@ class LeadAction(BaseModel):
     context_requirements: dict[str, Any] = Field(default_factory=dict)
     approval: dict[str, Any] | None = None
     final_message: str = Field(default="", max_length=8000)
-

@@ -8,6 +8,9 @@ import time
 
 from fastapi.testclient import TestClient
 
+from src.agent.engine import bind_runtime_context, handle_spawn_agent
+from src.api.services.artifact_service import build_artifact_center
+from src.api.services.delivery_service import build_delivery_contract, render_delivery_markdown
 from src.api.services.ephemeral_agent_service import (
     archive_ephemeral_agent,
     cleanup_expired_ephemeral_agents,
@@ -18,19 +21,17 @@ from src.api.services.ephemeral_agent_service import (
     summarize_ephemeral_agent_contributions,
     update_ephemeral_agent_status,
 )
+from src.api.services.event_store import EventStore
 from src.api.services.parallel_agent_service import (
     load_parallel_merge_plan,
     load_parallel_proposals,
     render_parallel_briefing,
     render_parallel_merge_guidance,
     run_parallel_agent_briefing,
+    run_single_ephemeral_agent,
     should_run_parallel_briefing,
 )
-from src.api.services.artifact_service import build_artifact_center
-from src.api.services.delivery_service import build_delivery_contract, render_delivery_markdown
-from src.api.services.event_store import EventStore
 from src.api.services.report_service import build_delivery_report
-from src.agent.engine import bind_runtime_context, handle_spawn_agent
 
 
 def test_suggest_ephemeral_agents_uses_keywords_and_mcp_plan(tmp_path):
@@ -94,6 +95,92 @@ def test_spawn_complete_auto_archives_and_writes_events(tmp_path):
     assert "ephemeral_agent_spawned" in event_types
     assert "ephemeral_agent_completed" in event_types
     assert "ephemeral_agent_archived" in event_types
+
+
+def test_ephemeral_agent_lifecycle_projection_tracks_state_transitions(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "run-eagent-lifecycle"
+
+    agent = spawn_ephemeral_agent(
+        thread_id,
+        {
+            "name": "Action Agent",
+            "role": "implementation_worker",
+            "goal": "检查并整理文件。",
+            "capabilities": ["tool.project_index"],
+        },
+        str(workspace),
+    )
+    update_ephemeral_agent_status(thread_id, agent["agent_id"], "working", str(workspace), "正在读取项目文件。")
+    complete_ephemeral_agent(
+        thread_id,
+        agent["agent_id"],
+        {
+            "summary": "文件检查完成。",
+            "evidence": [{"type": "read", "status": "passed"}],
+            "risks": [],
+            "artifacts": [],
+        },
+        str(workspace),
+    )
+
+    active = list_ephemeral_agents(thread_id, str(workspace))
+    assert active["total"] == 0
+    assert active["lifecycle"]["counts"]["completed"] == 1
+
+    archived = list_ephemeral_agents(thread_id, str(workspace), include_archived=True)
+    projected = archived["agents"][0]
+    assert projected["agent_id"] == agent["agent_id"]
+    assert projected["lifecycle_status"] == "completed"
+    assert projected["display_status"] == "已完成"
+    assert projected["is_archived"] is True
+    assert projected["event_count"] >= 3
+    assert projected["last_event_type"] == "ephemeral_agent_archived"
+    assert archived["lifecycle"]["counts"]["archived"] == 1
+    assert [item["event_type"] for item in archived["lifecycle"]["timeline"]] == [
+        "ephemeral_agent_spawned",
+        "ephemeral_agent_updated",
+        "ephemeral_agent_completed",
+        "ephemeral_agent_archived",
+    ]
+
+
+def test_agent_lifecycle_projection_links_spawn_agent_tool_loop_step(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_id = "run-eagent-loop-step"
+
+    agent = spawn_ephemeral_agent(
+        thread_id,
+        {
+            "name": "Backend Reviewer",
+            "role": "backend_reviewer",
+            "goal": "复核后端边界。",
+            "capabilities": ["skill.delivery-review"],
+        },
+        str(workspace),
+    )
+    EventStore().append_event(
+        thread_id,
+        "tool_call_finished",
+        title="spawn_agent finished",
+        agent="Lead",
+        payload={
+            "tool": "spawn_agent",
+            "output": json.dumps({"agent_id": agent["agent_id"], "ok": True}),
+            "loop_step_id": "step-spawn-agent-1",
+            "loop_action_type": "spawn_agent",
+            "ok": True,
+        },
+        workspace_dir=str(workspace),
+    )
+
+    listed = list_ephemeral_agents(thread_id, str(workspace), include_archived=True)
+    projected = listed["agents"][0]
+    assert projected["loop_step_id"] == "step-spawn-agent-1"
+    assert projected["loop_action_type"] == "spawn_agent"
+    assert listed["lifecycle"]["agents"][0]["loop_step_id"] == "step-spawn-agent-1"
 
 
 def test_ephemeral_agent_contributions_feed_report_and_delivery(tmp_path):
@@ -308,7 +395,7 @@ def test_spawn_agent_tool_run_now_submits_to_pool(tmp_path):
         return "agent completed"
 
     async def run():
-        from src.agent.agent_pool import get_or_create_pool, cleanup_pool
+        from src.agent.agent_pool import cleanup_pool, get_or_create_pool
         pool = get_or_create_pool(thread_id)
 
         with bind_runtime_context(
@@ -338,7 +425,7 @@ def test_spawn_agent_tool_run_now_submits_to_pool(tmp_path):
 
         # Gather results from pool
         results = await pool.gather()
-        handle = list(results.values())[0]
+        handle = next(iter(results.values()))
         assert handle.status == "completed"
         assert handle.result == "agent completed"
 
@@ -347,12 +434,16 @@ def test_spawn_agent_tool_run_now_submits_to_pool(tmp_path):
     asyncio.run(run())
 
 
-def test_parallel_agent_briefing_runs_workers_concurrently_and_archives(tmp_path):
+def test_parallel_agent_briefing_runs_workers_concurrently_and_archives(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     thread_id = "run-parallel-eagents"
     events = []
     starts = []
+    monkeypatch.setattr(
+        "src.api.services.parallel_agent_service.build_child_agent_context_pack",
+        lambda **kwargs: {"id": f"ctx-{kwargs['agent']['agent_id']}", "selected_files": []},
+    )
 
     async def fake_runner(prompt, **kwargs):
         assert "不要改文件" in prompt
@@ -419,6 +510,93 @@ def test_parallel_agent_briefing_runs_workers_concurrently_and_archives(tmp_path
     merge_artifact = next(item for item in center["artifacts"] if item["id"] == "parallel_merge_plan")
     assert merge_artifact["status"] == "ready"
     assert merge_artifact["count"] == 3
+
+
+def test_parallel_worker_builds_child_context_evidence_and_merge_step(tmp_path, monkeypatch):
+    from src.api.services.agent_loop_state_service import (
+        get_agent_loop_state,
+        init_agent_loop_state,
+    )
+    from src.api.services.intent_router import classify_user_intent
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("# demo\n", encoding="utf-8")
+    thread_id = "run-parallel-context-evidence"
+    prompt = "帮我实现一个排序算法脚本，并补充测试"
+    EventStore().create_session(thread_id, prompt, str(workspace), status="running")
+    init_agent_loop_state(
+        thread_id,
+        str(workspace),
+        user_request=prompt,
+        intent=classify_user_intent(prompt),
+    )
+    agent = spawn_ephemeral_agent(
+        thread_id,
+        {
+            "name": "Context Reviewer",
+            "role": "reviewer",
+            "goal": "只读分析当前实现风险。",
+            "task_scope": {"include": ["README.md"], "allowed_actions": ["read_file", "search_codebase"]},
+        },
+        str(workspace),
+    )
+    def fake_context_pack(**kwargs):
+        EventStore().append_event(
+            thread_id,
+            "agent_context_pack_built",
+            title="context built",
+            agent=kwargs["agent"]["name"],
+            payload={"agent_id": kwargs["agent"]["agent_id"], "context_pack_id": f"ctx-{kwargs['agent']['agent_id']}"},
+            workspace_dir=str(workspace),
+        )
+        return {"id": f"ctx-{kwargs['agent']['agent_id']}", "selected_files": [{"path": "README.md"}]}
+
+    monkeypatch.setattr("src.api.services.parallel_agent_service.build_child_agent_context_pack", fake_context_pack)
+
+    async def fake_runner(prompt, **kwargs):
+        assert "ContextPack ID" in prompt
+        assert "上下文隔离" in prompt
+        return (
+            "## Summary\n"
+            "- README.md 已检查，建议 Lead 后续实现 sorting/benchmark.py。\n"
+            "## Evidence\n- README.md exists\n"
+            "## Risks\n- 需要避免覆盖已有文件。\n"
+            "## Recommended Next Actions\n- Lead 合并后再执行写入。"
+        )
+
+    events = []
+    result = asyncio.run(
+        run_single_ephemeral_agent(
+            thread_id=thread_id,
+            prompt=prompt,
+            workspace_dir=str(workspace),
+            execution_plan={"strategy": "feature_delivery", "stages": [{"id": "plan"}, {"id": "implement"}]},
+            agent=agent,
+            runner=fake_runner,
+            emit_event=lambda **kwargs: events.append(kwargs),
+            tools=[],
+            mode="parallel",
+        )
+    )
+
+    assert result["ok"] is True
+    completed_result = result["result"]
+    assert completed_result["context_pack_id"]
+    assert completed_result["evidence_pack_id"].startswith("agent-evidence-")
+    assert completed_result["merge_record"]["recorded"] is True
+
+    loop_state = get_agent_loop_state(thread_id, str(workspace))
+    merge_steps = [step for step in loop_state["steps"] if step["action"]["type"] == "merge_agent_result"]
+    assert len(merge_steps) == 1
+    assert merge_steps[0]["action"]["context_requirements"]["agent_id"] == agent["agent_id"]
+    assert merge_steps[0]["action"]["context_requirements"]["evidence_pack_id"] == completed_result["evidence_pack_id"]
+
+    event_types = [event.type for event in EventStore().list_events(thread_id, str(workspace))]
+    assert "agent_context_pack_built" in event_types
+    assert "agent_evidence_pack_built" in event_types
+    assert "agent_result_merge_recorded" in event_types
+    assert any(event["payload"].get("evidence_pack_id") == completed_result["evidence_pack_id"] for event in events)
 
 
 def test_parallel_agent_briefing_skips_lead_direct_reply():
@@ -525,8 +703,8 @@ def test_archive_and_cleanup_expired_agents(tmp_path):
 
 
 def test_ephemeral_agent_api_lifecycle(tmp_path):
-    from src.api.server import app
     import src.infra.config as cfg
+    from src.api.server import app
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

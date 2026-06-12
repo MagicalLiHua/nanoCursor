@@ -1,8 +1,21 @@
 # 面试深挖：Agent Loop 与多 Agent 协同
 
-最后更新：2026-06-11
+最后更新：2026-06-12
 
 这份材料用于准备面试中最可能被追问的部分：为什么 nanoCursor 不用固定 DAG，为什么不是默认多 Agent，以及如何让 Agent Loop 可控。
+
+```mermaid
+flowchart LR
+  Claim["结论\n不是固定 DAG，而是受控 Agent Loop"]
+  Why["原因\n编程任务依赖运行时状态"]
+  How["实现\nLeadAction + AgentLoopState + ToolPolicy"]
+  Proof["证据\n事件账本/任务板/真实任务测试"]
+  Limit["边界\n仍有规则和 guard，不是完全自主智能"]
+
+  Claim --> Why --> How --> Proof --> Limit
+```
+
+回答 Agent Loop 相关追问时，尽量按这五步说：先给结论，再讲为什么，再讲怎么做，再给证据，最后主动讲边界。
 
 ## 1. 一句话版本
 
@@ -86,6 +99,10 @@ nanoCursor 的核心不是“很多 Agent 聊天”，而是一个 Lead 驱动�
 答法：
 
 > 现在系统结合意图路由、任务复杂度、工具需求和关键词规则。比较成熟的方向不是纯硬编码，也不是完全交给模型，而是模型输出结构化判断，再由 deterministic guard 校验。比如模型可以建议需要 Coder 和 Tester，但如果当前任务是 read only，guard 会把写权限收掉。
+
+更新后的版本可以再补一句：
+
+> 当前意图路由默认启用 LLM 语义分类，但不是让模型裸奔。deterministic fallback 会提供 hints，hard guard 保护 no-write、高风险和问候等强边界，normalizer 最后统一权限、Agent 和执行路线。
 
 ### Q6：多 Agent 真的提升效果了吗？
 

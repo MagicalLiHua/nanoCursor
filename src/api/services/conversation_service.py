@@ -14,7 +14,6 @@ from src.api.services.capability_service import recommend_capabilities
 from src.api.services.intent_router import classify_user_intent
 from src.infra import config as config_module
 
-
 AGENT_PRESETS: dict[str, dict[str, Any]] = {
     member["name"].lower(): member for member in DEFAULT_TEAM
 }
@@ -347,6 +346,12 @@ def _capability_ids_for_agent(agent_name: str, recommendation: dict[str, Any]) -
 def assess_task_complexity(prompt: str) -> dict[str, Any]:
     """Classify how much Agent structure this run actually needs (keyword-only)."""
     intent = classify_user_intent(prompt)
+    return _complexity_from_intent(intent)
+
+
+def _complexity_from_intent(intent: dict[str, Any]) -> dict[str, Any]:
+    """Convert an IntentDecision dictionary into runtime team complexity."""
+
     return {
         "level": "high_risk" if intent["level"] == "high_risk" else intent["level"],
         "rationale": intent["rationale"],
@@ -364,25 +369,16 @@ def assess_task_complexity(prompt: str) -> dict[str, Any]:
     }
 
 
-async def assess_task_complexity_async(prompt: str) -> dict[str, Any]:
+async def assess_task_complexity_async(
+    prompt: str,
+    *,
+    runtime_context: Any | None = None,
+) -> dict[str, Any]:
     """Classify task complexity with LLM assistance."""
     from src.api.services.intent_router import classify_user_intent_async
-    intent = await classify_user_intent_async(prompt)
-    return {
-        "level": "high_risk" if intent["level"] == "high_risk" else intent["level"],
-        "rationale": intent["rationale"],
-        "indicators": intent["signals"],
-        "intent": intent["intent"],
-        "route": intent["route"],
-        "execution_route": intent["execution_route"],
-        "intent_decision": intent,
-        "requires_workspace_write": intent["requires_workspace_write"],
-        "requires_workspace_read": intent["requires_workspace_read"],
-        "requires_shell": intent["requires_shell"],
-        "requires_approval": intent["requires_approval"],
-        "requires_execution": intent["requires_execution"],
-        "confidence": intent["confidence"],
-    }
+
+    intent = await classify_user_intent_async(prompt, runtime_context=runtime_context)
+    return _complexity_from_intent(intent)
 
 
 def compose_runtime_team(
@@ -399,9 +395,16 @@ async def compose_runtime_team_async(
     prompt: str,
     workspace_dir: str | None = None,
     conversation_id: str | None = None,
+    *,
+    intent_decision: dict[str, Any] | None = None,
+    runtime_context: Any | None = None,
 ) -> dict[str, Any]:
     """Compose a minimal runtime team with LLM-assisted classification."""
-    complexity = await assess_task_complexity_async(prompt)
+    complexity = (
+        _complexity_from_intent(intent_decision)
+        if isinstance(intent_decision, dict)
+        else await assess_task_complexity_async(prompt, runtime_context=runtime_context)
+    )
     return _build_team_from_complexity(prompt, complexity, workspace_dir, conversation_id)
 
 

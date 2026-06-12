@@ -12,6 +12,7 @@ from src.api.dependencies import get_workspace, raise_404
 from src.api.models import (
     ActionCheckRequest,
     ActionExecuteRequest,
+    CancelResponse,
     ChangeSetApproveRequest,
     ChangeSetCollectRequest,
     ChangeSetReviewRequest,
@@ -28,8 +29,18 @@ from src.api.models import (
     RemediationRequest,
     RetryRunRequest,
     RunStatePatchRequest,
-    CancelResponse,
     TaskResultRequest,
+)
+from src.api.run_state import (
+    active_runs,
+    emit_agenthub_event,
+    emit_stage_updates,
+    event_store,
+    run_manager,
+    runs_lock,
+    session_for_thread,
+    sync_run_context,
+    workspace_for_thread,
 )
 from src.api.services.change_service import (
     approve_changes,
@@ -43,20 +54,9 @@ from src.api.services.delivery_service import (
     regenerate_delivery,
 )
 from src.api.services.event_store import get_event_store
-from src.api.run_state import (
-    active_runs,
-    emit_agenthub_event,
-    emit_stage_updates,
-    event_store,
-    run_manager,
-    runs_lock,
-    session_for_thread,
-    sync_run_context,
-    workspace_for_thread,
-)
+from src.api.services.retry_context_service import build_retry_prompt, collect_retry_context
 from src.api.services.run_context import RunContext
 from src.api.services.run_history import list_run_history_with_active
-from src.api.services.retry_context_service import build_retry_prompt, collect_retry_context
 from src.api.services.sse_broker import stream_events_push
 from src.api.services.workflow_thread_service import (
     start_resumed_workflow_thread,
@@ -554,7 +554,10 @@ async def get_failure(thread_id: str, failure_id: str):
 @router.post("/{thread_id}/failures/{failure_id}/remediate")
 async def post_remediate(thread_id: str, failure_id: str, request: RemediationRequest):
     """Create a remediation plan or retry run for a failure."""
-    from src.api.services.remediation_planner_service import create_remediation_run, plan_remediation
+    from src.api.services.remediation_planner_service import (
+        create_remediation_run,
+        plan_remediation,
+    )
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     plan = plan_remediation(failure_id, thread_id, workspace)
@@ -743,6 +746,15 @@ async def get_run_loop_observation(thread_id: str):
     return get_loop_observation(thread_id, workspace)
 
 
+@router.get("/{thread_id}/loop/finish-readiness")
+async def get_run_loop_finish_readiness(thread_id: str):
+    """Return the completion gate used by the Agent Loop."""
+    from src.api.services.agent_loop_finish_service import build_loop_finish_readiness
+
+    workspace = _workspace_for_run(thread_id, require_session=True)
+    return build_loop_finish_readiness(thread_id, workspace)
+
+
 @router.post("/{thread_id}/loop/step")
 async def post_run_loop_step(thread_id: str, request: LoopStepRequest):
     """Preview or commit one Agent Loop controller step."""
@@ -905,8 +917,8 @@ async def post_run_state_task_retry(thread_id: str, task_id: str):
 async def post_run_state_task_start(thread_id: str, task_id: str):
     """Mark a task-board task running and acquire its locks."""
     from src.api.services.run_state_service import get_or_create_run_state
-    from src.runtime.task_board import save_task_board
     from src.runtime.run_scheduler import mark_task_running
+    from src.runtime.task_board import save_task_board
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     state = get_or_create_run_state(thread_id, workspace)
@@ -935,8 +947,8 @@ async def post_run_state_task_result(
 ):
     """Apply a task-board task result and release locks."""
     from src.api.services.run_state_service import get_or_create_run_state
-    from src.runtime.task_board import save_task_board
     from src.runtime.run_scheduler import TaskExecutionResult, apply_task_result
+    from src.runtime.task_board import save_task_board
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     state = get_or_create_run_state(thread_id, workspace)
@@ -1112,8 +1124,8 @@ async def post_run_graph_node_retry(thread_id: str, node_id: str):
 async def post_run_graph_node_start(thread_id: str, node_id: str):
     """Mark a run-state node running and acquire its locks."""
     from src.api.services.run_state_service import get_or_create_run_state
-    from src.runtime.task_board import save_task_board
     from src.runtime.run_scheduler import mark_task_running
+    from src.runtime.task_board import save_task_board
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     state = get_or_create_run_state(thread_id, workspace)
@@ -1142,8 +1154,8 @@ async def post_run_graph_node_result(
 ):
     """Apply a run-state node result and release locks."""
     from src.api.services.run_state_service import get_or_create_run_state
-    from src.runtime.task_board import save_task_board
     from src.runtime.run_scheduler import TaskExecutionResult, apply_task_result
+    from src.runtime.task_board import save_task_board
 
     workspace = _workspace_for_run(thread_id, require_session=True)
     state = get_or_create_run_state(thread_id, workspace)

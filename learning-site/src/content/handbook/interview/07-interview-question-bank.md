@@ -1,8 +1,23 @@
 # nanoCursor 面试问题题库
 
-最后更新：2026-06-11
+最后更新：2026-06-12
 
 这份题库不是让你逐字背，而是让你面试前快速刷一遍“可能被问到什么”。每个回答都尽量按同一个结构：先给结论，再讲设计，再讲边界。
+
+## 0. 刷题路径
+
+```mermaid
+flowchart LR
+  Overview["项目总览\nQ1-Q6"]
+  Loop["Agent Loop\nQ7-Q15"]
+  Context["上下文 / 记忆\nQ16-Q28"]
+  Tools["工具 / 恢复 / 事件\nQ29-Q50"]
+  GoMCP["Go / MCP / Skills\nQ51-Q62"]
+  Quality["测试 / 路由 / 子 Agent\nQ63-Q90"]
+  Overview --> Loop --> Context --> Tools --> GoMCP --> Quality
+```
+
+不要从 Q1 背到 Q90。更有效的刷法是先把问题归到主线里：项目为什么存在、Agent Loop 怎么决策、上下文怎么组织、工具怎么受控、Go 和 MCP 为什么放在边界层、最后用测试和消融证明这些模块不是摆设。
 
 ## 1. 项目总览
 
@@ -315,3 +330,83 @@ Agent Loop 受控运行、ContextPack/Ledger、ToolPolicy/Approval、EventStore/
 ### Q72：如何诚实评价项目？
 
 它不是成熟商业工具，但已经超过玩具 Demo。它是一个围绕 AI Coding Agent 核心机制展开的本地工程系统。
+
+## 13. 语义意图路由
+
+### Q73：现在的意图路由是纯关键词吗？
+
+不是。当前默认启用 LLM 语义分类器，由模型输出结构化 route、confidence、risk、agents 和工具需求；确定性规则主要承担 fallback、hard guard 和可解释 hints。简单说：LLM 负责语义判断，后端规则负责安全边界和回退。
+
+### Q74：为什么不完全交给 LLM 判断？
+
+因为意图路由会直接影响是否读文件、写文件、运行命令和进入 approval。模型可能把代码任务误判成闲聊，也可能忽略“不要改代码”这样的边界。nanoCursor 的做法是让 LLM 提建议，再由 hard guard 和 normalizer 收口。
+
+### Q75：hard guard 主要保护什么？
+
+保护空输入、问候、显式 no-write、高风险操作、approval 边界等不应该被模型覆盖的场景。比如用户只是说“哈喽”，系统应该直接 Lead 回复；用户说“删除 node_modules 并 git push”，即使模型觉得只是普通任务，也必须进入高风险路径。
+
+### Q76：deterministic hints 有什么用？
+
+它们不是最终决策，而是给语义模型和 trace 提供线索。比如 fallback 看到 `code_artifact_hint` 和 `tooling_hint`，语义模型就不应该轻易把“写 Python 排序算法并比较性能”判断成 direct answer。这样既减少纯关键词误判，又避免完全失去可解释性。
+
+### Q77：如果 LLM 语义判断错了怎么办？
+
+normalizer 会做一致性收口。明确写代码的 fallback 证据不能被 LLM 直接降级成闲聊；明确 no-write 的用户边界会强制收掉写权限；高风险 guard 永远优先。LLM 超时或输出非法 JSON 时，也会 fallback 到 deterministic / legacy 路径或澄清。
+
+### Q78：怎么证明语义路由有效？
+
+一是跑 intent eval，覆盖问候、解释、只读、小改、feature、debug、test、review、高风险、连续对话和 no-write；二是看 `router_trace` 里 semantic route、fallback route、final route 和 normalization notes；三是用真实 LLM smoke 验证简单问候不会浪费模型调用，代码任务能进入 feature delivery。
+
+## 14. 子 Agent 独立上下文与结果合并
+
+### Q79：现在 Lead 是一开始就定死所有子 Agent 吗？
+
+不是完全定死。系统会先根据意图和 execution plan 判断是否需要并行 briefing 或临时子 Agent。当前仍有规则和计划约束，但不是每个请求默认创建固定四个 Agent。成熟方向是让 Lead 用模型结构化判断提出子 Agent 方案，再由 deterministic guard 限制数量、权限和风险。
+
+### Q80：子 Agent 有独立上下文吗？
+
+有第一版。子 Agent 执行前会构建 scoped ContextPack，只包含它完成当前子任务需要的信息；它完成后生成 EvidencePack，并通过 `merge_agent_result` 让 Lead 合并摘要和证据。Lead 不直接继承子 Agent 的完整过程，避免污染主上下文。
+
+### Q81：EvidencePack 解决什么问题？
+
+它把子 Agent 的输出从“聊天片段”变成可审计证据，包含 summary、artifacts、risks、event refs、context_pack_id 等信息。这样 Lead 合并的是结构化结果，而不是把子 Agent 的所有中间日志塞回 prompt。
+
+### Q82：为什么不让多个子 Agent 并行写代码？
+
+并行写会带来冲突、覆盖、回滚和责任归因问题。当前更稳的设计是并行读、并行分析、并行验证建议，然后由 Lead 在工具治理链路中收敛写操作。成熟工具也通常不会让多个写作者同时改同一批文件。
+
+## 15. 上下文窗口与压缩
+
+### Q83：上下文窗口面板展示的是什么？
+
+它展示当前模型、窗口上限、估算 token 使用量，以及各 section 的占比，例如 selected files、recovery context、recent failures、tool policy、turn context。它不是精确 tokenizer，但足够帮助判断是否接近压缩阈值。
+
+### Q84：达到 90% 窗口压力时怎么处理？
+
+系统应该触发压缩策略，优先压缩低优先级、可压缩 section，例如旧 Agent 动态、旧工具输出和远期历史。当前用户请求、当前计划、工具策略是 P0 锚点，不应该被压缩掉。
+
+### Q85：怎么证明上下文压缩不是拍脑袋？
+
+看 benchmark：无压缩、deterministic、summary、LLM summary、fallback 各自的 token reduction、pressure status 和 anchor preserved。面试时重点讲趋势，不要夸大某一次数字。
+
+## 16. 失败自动处理与组件价值
+
+### Q86：命令失败是不是都交给同一个 Agent 修？
+
+不是理想状态。系统先做失败分类：缺依赖、语法错误、测试断言失败、权限拒绝、超时、路径越界等，再决定自动修复、请求审批、降级或停止。Agent 负责可修复的代码/测试类问题，但策略和审批仍由后端控制。
+
+### Q87：缺依赖时为什么不能直接 pip install？
+
+安装依赖属于 shell_risky，可能改环境、联网或引入供应链风险。系统可以识别 `ModuleNotFoundError` 并建议安装，但执行前应该进入 approval。
+
+### Q88：如何证明某个模块是必须的？
+
+用消融实验。比如关闭语义路由看问候和 no-write 是否误判；关闭上下文选择看 context hit rate 是否下降；关闭工具治理看高风险命令是否被拦；关闭恢复看测试失败后能否自动收敛。
+
+### Q89：如果面试官说“这些功能都是 AI 帮你写的”，怎么回答？
+
+不要否认使用 AI 工具。更好的回答是：实现过程中借助了 AI，但系统边界、问题拆解、验证标准、模块取舍和最终复盘是我主导的。这个项目的价值不在于每行代码手写，而在于我能解释每个模块为什么存在、如何验证、有什么边界。
+
+### Q90：现在项目应该继续做什么，还是收尾？
+
+作为个人展示项目已经可以收尾。继续产品化当然还能做，但性价比最高的是整理 README、学习站、面试材料、稳定 demo 和 benchmark。再无限堆功能，收益不如把 Agent Loop、上下文、工具治理、恢复和 Go sidecar 讲深。

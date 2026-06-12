@@ -1,6 +1,6 @@
 # 08. EventStore 与 SSE：让运行过程可观察
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -24,6 +24,31 @@ AI 编程任务不是请求-响应式的。一次 run 可能持续几十秒甚�
                        ↑         ↑        ↑       ↑      ↑
                     前端实时展示每一步
 ```
+
+```mermaid
+flowchart TB
+  Runtime["运行时服务\nAgent Loop / tools / recovery / delivery"]
+  Append["append_event\n标准事件结构"]
+  Jsonl["events.jsonl\n追加式账本"]
+  Session["session.json\nrun 元数据"]
+  Broker["SSE Broker\n监听并推送"]
+  Hydrator["前端 hydrator\n按事件类型更新 store"]
+  Chat["聊天框 Agent 动态"]
+  Right["右侧进度/环境/上下文"]
+  Bottom["底部证据抽屉\n报告/Diff/事件/恢复/交付物"]
+  Replay["断线恢复\n读取 session + events"]
+
+  Runtime --> Append
+  Append --> Jsonl
+  Append --> Session
+  Append --> Broker --> Hydrator
+  Hydrator --> Chat
+  Hydrator --> Right
+  Hydrator --> Bottom
+  Jsonl --> Replay --> Hydrator
+```
+
+这张图解释了为什么 EventStore 不是普通日志：它既是后端审计账本，也是前端状态重建的数据源。
 
 ## 3. EventStore 的数据模型
 

@@ -1,6 +1,6 @@
 # 09. Runtime 与异步边界：别让 async 只停留在语法上
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -11,6 +11,27 @@
 - `asyncio.to_thread` 在项目中是怎么用的？
 - command_runner 的后端路由策略是什么？（Python subprocess → Go executor → fallback）
 - Go sidecar 和 Python runtime 之间的异步边界是怎么处理的？
+
+```mermaid
+flowchart TB
+  HTTP["FastAPI 请求线程\n快速返回 thread_id"]
+  RunContext["RunContext\n状态/取消/工作线程引用"]
+  Worker["后台工作线程\nAgent Runtime"]
+  AsyncOps["async 服务函数\nLLM / SSE / API orchestration"]
+  Blocking["阻塞操作\nsubprocess / 大文件 / 同步 gRPC"]
+  ToThread["asyncio.to_thread\n隔离阻塞"]
+  GoExec["Go executor\n可选命令执行后端"]
+  EventLoop["事件循环保持可用\nSSE 心跳 / API 响应"]
+
+  HTTP --> RunContext --> Worker
+  Worker --> AsyncOps
+  AsyncOps --> ToThread --> Blocking
+  AsyncOps --> GoExec
+  HTTP --> EventLoop
+  ToThread --> EventLoop
+```
+
+这张图的核心结论是：`async def` 不等于异步正确。真正重要的是把长任务和阻塞 I/O 从 FastAPI 事件循环里隔离出去。
 
 ## 2. 异步边界为什么重要
 

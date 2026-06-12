@@ -1,12 +1,34 @@
 # 07. 工具治理：Agent 能干活，也必须有边界
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
 AI 编程工具真正危险的地方不是“模型回答错了”，而是“模型可以写文件、删文件、跑命令、调用外部服务”。所以 nanoCursor 必须回答一组连在一起的问题：Agent 能调用哪些工具、每个工具属于什么权限级别、哪些动作要用户审批、工具失败后怎么恢复、工具调用证据怎么留下。
 
 本章重点看五件事：权限分级、shell 命令分类、Action Policy 管线、approval 机制，以及为什么工具治理比继续堆 Agent 更重要。
+
+```mermaid
+flowchart LR
+  Agent["Agent 提出动作\nread/write/shell/mcp"]
+  Normalize["动作标准化\n工具名 / target / args"]
+  Classify["权限分类\nread_only / safe_write / risky_write / shell_*"]
+  Guard["路径与工作区防护\npath guard / workspace scope"]
+  Decision{"策略决策"}
+  Execute["执行工具"]
+  Approval["生成审批请求\napproval token"]
+  Reject["拒绝并记录原因"]
+  Evidence["写入 evidence\nEventStore / audit / recovery context"]
+  Recovery["失败恢复\n分类 -> 计划 -> 重试或询问"]
+
+  Agent --> Normalize --> Classify --> Guard --> Decision
+  Decision -->|allow| Execute --> Evidence
+  Decision -->|approval_required| Approval --> Execute
+  Decision -->|deny| Reject --> Evidence
+  Execute -->|failed| Recovery --> Evidence
+```
+
+面试时要强调：工具治理不是“前端弹一个批准按钮”，而是工具调用进入执行前的一整套后端合约。
 
 ## 2. 权限分级
 

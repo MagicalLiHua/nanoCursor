@@ -21,6 +21,7 @@ from src.api.services.conversation_service import (
     link_run_to_conversation,
 )
 from src.api.services.intent_router import classify_user_intent_async
+from src.api.services.intent_runtime_context import context_from_conversation
 from src.api.services.orchestration_service import build_execution_plan_async
 from src.api.services.run_start_service import intent_session_fields, start_standard_run
 
@@ -148,12 +149,24 @@ async def start_conversation_run(
     team = conversation.get("team", {})
     members = list(team.get("members", []))
     runtime_team_source = team.get("source", "conversation")
+    intent_context = context_from_conversation(
+        conversation,
+        prompt=request.prompt,
+        workspace_dir=workspace_dir,
+    )
     intent_decision = await classify_user_intent_async(
         request.prompt,
         conversation_summary=str(conversation.get("conversation_summary") or ""),
+        runtime_context=intent_context,
     )
     is_simple = intent_decision.get("execution_route") == "lead_direct_reply"
-    runtime_composition = await compose_runtime_team_async(request.prompt, workspace_dir, conversation_id)
+    runtime_composition = await compose_runtime_team_async(
+        request.prompt,
+        workspace_dir,
+        conversation_id,
+        intent_decision=intent_decision,
+        runtime_context=intent_context,
+    )
     if is_simple:
         lead_member = next((member for member in members if str(member.get("role", "")).lower() == "lead"), None)
         members = [lead_member or {"name": "Lead", "role": "lead"}]

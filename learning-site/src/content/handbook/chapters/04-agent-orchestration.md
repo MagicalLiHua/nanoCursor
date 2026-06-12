@@ -1,6 +1,6 @@
 # 04. Agent 编排：该少的时候少，该分工的时候分工
 
-最后更新：2026-06-08
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -29,6 +29,27 @@ Lead 根据任务复杂度判断是否需要临时子 Agent。
 ```
 
 这个设计比"一上来就四个 Agent"更像真实产品。Codex/Cursor 也不会对每条消息都展示多个 Agent。
+
+```mermaid
+flowchart LR
+  Prompt["用户请求"]
+  Intent["意图路由\n直接回答 / 只读 / 小改 / 完整开发"]
+  Lead["Lead Agent\n默认唯一常驻 Agent"]
+  NeedTeam{"是否需要分工?"}
+  Direct["直接回答或 Lead 自己处理"]
+  Suggest["建议临时 Agent\nrole / scope / tools / risk"]
+  Spawn["spawn\nactive / working"]
+  Work["执行子任务\n独立上下文"]
+  Evidence["输出 EvidencePack"]
+  Merge["Lead merge_agent_result"]
+  Archive["archive / expire"]
+
+  Prompt --> Intent --> Lead --> NeedTeam
+  NeedTeam -->|否| Direct
+  NeedTeam -->|是| Suggest --> Spawn --> Work --> Evidence --> Merge --> Archive
+```
+
+看这张图时要注意：临时 Agent 是 Lead 的工具，不是和 Lead 平级的长期团队。它被创建出来是为了本轮任务的某个局部目标，完成后要回收。
 
 ### 不同任务的路由策略
 
@@ -161,10 +182,18 @@ def suggest_ephemeral_agents(
 
 完整的生命周期是一个状态机：
 
-```text
-suggested → active → working → completed → archived
-                 ↘       ↘
-                  expired   failed → archived
+```mermaid
+stateDiagram-v2
+  [*] --> suggested
+  suggested --> active: 用户确认或自动采用
+  active --> working: 开始执行
+  working --> completed: 产出结果
+  working --> failed: 执行失败
+  active --> expired: TTL 到期
+  completed --> archived: 保存 evidence
+  failed --> archived: 保存失败原因
+  expired --> archived: 清理投影
+  archived --> [*]
 ```
 
 ### 6.1 创建（spawn）
@@ -228,7 +257,7 @@ def complete_ephemeral_agent(thread_id, agent_id, result, workspace_dir):
     }
 ```
 
-完成和归档是原子操作：一旦完成，状态直接变成 `archived`。这样 Lead 在后续循环中不会看到已完成的历史 Agent。
+完成和归档是原子操作：一旦完成，状态直接变成 `archived`。这样 Lead 在后续循环中不会把已完成的历史 Agent 当成仍在工作的团队成员。真正需要留给 Lead 的不是这个 Agent 本身，而是它产出的 `context_pack_id`、`evidence_pack_id` 和 `merge_record`。
 
 ### 6.4 超时过期
 

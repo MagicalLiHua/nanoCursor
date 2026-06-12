@@ -4,8 +4,8 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
-from src.api.services import runtime_tool_callback_service as service_module
 from src.api.services import runtime_approval_wait_service as approval_wait_module
+from src.api.services import runtime_tool_callback_service as service_module
 from src.api.services.runtime_tool_callback_service import RuntimeToolCallbacks
 from src.runtime.tool_policy_runtime import ToolPolicyDecision
 
@@ -52,7 +52,11 @@ def _callbacks(monkeypatch, policy, *, active_runs=None):
     monkeypatch.setattr(service_module, "check_loop_tool_guard", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_module, "record_tool_call_start", lambda **kwargs: SimpleNamespace(call_id="call-1"))
     monkeypatch.setattr(service_module, "record_tool_call_finish", lambda **kwargs: None)
-    monkeypatch.setattr(service_module, "append_loop_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service_module,
+        "append_loop_step",
+        lambda *args, **kwargs: SimpleNamespace(steps=[SimpleNamespace(id="loop-step-1")]),
+    )
     monkeypatch.setattr(approval_wait_module, "append_loop_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_module, "derive_agenthub_events", lambda **kwargs: [])
     callbacks = RuntimeToolCallbacks(
@@ -150,6 +154,34 @@ def test_completed_write_records_evidence_change_and_stage(monkeypatch):
     assert activities[-1]["input_tokens"] == 12
     tool_event = next(event for event in events if event["event_type"] == "tool_call_finished")
     assert tool_event["payload"]["filetool_evidence"]["path"] == "README.md"
+    assert tool_event["payload"]["ok"] is True
+    assert tool_event["payload"]["loop_step_id"] == "loop-step-1"
+    assert tool_event["payload"]["loop_action_type"] == "call_tool"
+    assert tool_event["payload"]["loop_recorded"] is True
+
+
+def test_test_command_records_run_checks_loop_action(monkeypatch):
+    policy = FakePolicy(
+        {"bash": ToolPolicyDecision(tool="bash", allowed=True, reason="shell allowed")}
+    )
+    actions = []
+
+    def fake_append(*args, **kwargs):
+        actions.append(kwargs["action"])
+        return SimpleNamespace(steps=[SimpleNamespace(id="loop-step-test")])
+
+    monkeypatch.setattr(service_module, "append_loop_step", fake_append)
+    callbacks, events, *_ = _callbacks(monkeypatch, policy)
+    monkeypatch.setattr(service_module, "append_loop_step", fake_append)
+
+    asyncio.run(callbacks.on_tool_check("bash", {"command": "pytest -q"}))
+    callbacks.on_tool_call("bash", {"command": "pytest -q"}, "12 passed")
+
+    tool_event = next(event for event in events if event["event_type"] == "tool_call_finished")
+    assert actions[-1]["type"] == "run_checks"
+    assert actions[-1]["tool_call"] is None
+    assert tool_event["payload"]["loop_step_id"] == "loop-step-test"
+    assert tool_event["payload"]["loop_action_type"] == "run_checks"
 
 
 def test_filetool_evidence_emits_backup_and_rollback_events(monkeypatch):

@@ -16,6 +16,11 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from src.api.services.agent_result_merge_service import (
+    build_agent_evidence_pack,
+    build_child_agent_context_pack,
+    record_agent_result_merge,
+)
 from src.api.services.ephemeral_agent_service import (
     archive_ephemeral_agent,
     complete_ephemeral_agent,
@@ -26,7 +31,6 @@ from src.api.services.ephemeral_agent_service import (
 )
 from src.api.services.event_store import get_event_store
 from src.tools.tool_result import is_tool_error_output, tool_error_message
-
 
 Runner = Callable[..., Awaitable[str]]
 Emitter = Callable[..., Any]
@@ -41,9 +45,7 @@ def should_run_parallel_briefing(execution_plan: dict[str, Any] | None) -> bool:
     if execution_plan.get("strategy") == "lead_direct_reply":
         return False
     stages = execution_plan.get("stages")
-    if not isinstance(stages, list) or len(stages) <= 1:
-        return False
-    return True
+    return isinstance(stages, list) and len(stages) > 1
 
 
 def render_parallel_briefing(contributions: dict[str, Any] | None) -> str:
@@ -424,9 +426,24 @@ async def run_single_ephemeral_agent(
         payload={"agent_id": agent.get("agent_id"), "status": "working", "mode": mode},
         workspace_dir=workspace_dir,
     )
+    child_context_pack = await asyncio.to_thread(
+        _build_child_context_best_effort,
+        thread_id=thread_id,
+        workspace_dir=workspace_dir,
+        prompt=prompt,
+        execution_plan=execution_plan or {},
+        agent=agent,
+        change_context=change_context,
+    )
     try:
         output = await runner(
-            _worker_prompt(prompt, agent, execution_plan or {}, change_context=change_context),
+            _worker_prompt(
+                prompt,
+                agent,
+                execution_plan or {},
+                change_context=change_context,
+                context_pack=child_context_pack,
+            ),
             system=_worker_system(agent, workspace_dir),
             agent_type=agent.get("role") or agent.get("name") or "Worker",
             tools=tools,
@@ -434,6 +451,24 @@ async def run_single_ephemeral_agent(
         if is_tool_error_output(output):
             raise RuntimeError(tool_error_message(output) or "子 Agent 返回错误。")
         result = _normalise_worker_result(agent, output, started_at)
+        evidence_pack = build_agent_evidence_pack(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            agent=agent,
+            result=result,
+            context_pack=child_context_pack,
+            mode=mode,
+        )
+        merge_record = record_agent_result_merge(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            agent=agent,
+            evidence_pack=evidence_pack,
+            mode=mode,
+        )
+        result["context_pack_id"] = evidence_pack.get("context_pack_id", "")
+        result["evidence_pack_id"] = evidence_pack.get("id", "")
+        result["merge_record"] = merge_record
         completed = complete_ephemeral_agent(thread_id, agent["agent_id"], result, workspace_dir)
         emit_event(
             thread_id=thread_id,
@@ -447,6 +482,10 @@ async def run_single_ephemeral_agent(
                 "mode": mode,
                 "result": completed.get("result", result),
                 "agent": completed,
+                "context_pack_id": result.get("context_pack_id", ""),
+                "evidence_pack_id": result.get("evidence_pack_id", ""),
+                "evidence_pack": evidence_pack,
+                "merge_record": merge_record,
             },
             workspace_dir=workspace_dir,
         )
@@ -468,6 +507,37 @@ async def run_single_ephemeral_agent(
             workspace_dir=workspace_dir,
         )
         return {"ok": False, "agent": archived, "error": str(exc)}
+
+
+def _build_child_context_best_effort(
+    *,
+    thread_id: str,
+    workspace_dir: str,
+    prompt: str,
+    execution_plan: dict[str, Any],
+    agent: dict[str, Any],
+    change_context: str = "",
+) -> dict[str, Any]:
+    try:
+        return build_child_agent_context_pack(
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            prompt=prompt,
+            execution_plan=execution_plan,
+            agent=agent,
+            change_context=change_context,
+        )
+    except Exception as exc:
+        get_event_store().append_event(
+            thread_id,
+            "agent_context_pack_failed",
+            title=f"{agent.get('name') or 'Agent'} 独立上下文构建失败",
+            content=str(exc),
+            agent=str(agent.get("name") or "Ephemeral Agent"),
+            payload={"agent_id": agent.get("agent_id"), "error": str(exc)},
+            workspace_dir=workspace_dir,
+        )
+        return {}
 
 
 def _proposal_path(thread_id: str, workspace_dir: str) -> Path:
@@ -611,17 +681,29 @@ def _worker_prompt(
     agent: dict[str, Any],
     execution_plan: dict[str, Any],
     change_context: str = "",
+    context_pack: dict[str, Any] | None = None,
 ) -> str:
     scope = agent.get("task_scope") if isinstance(agent.get("task_scope"), dict) else {}
     include = ", ".join(str(item) for item in scope.get("include", [])[:6]) or "."
     stages = execution_plan.get("stages") if isinstance(execution_plan.get("stages"), list) else []
     stage_text = "; ".join(f"{stage.get('id')}:{stage.get('title')}" for stage in stages[:8] if isinstance(stage, dict))
+    context_pack = context_pack or {}
+    selected_files = [
+        str(item.get("path") or item.get("file") or "")
+        for item in context_pack.get("selected_files", [])
+        if isinstance(item, dict) and (item.get("path") or item.get("file"))
+    ]
     parts = [
         f"用户任务：{prompt}\n",
         f"你的目标：{agent.get('goal')}\n",
         f"建议关注范围：{include}\n",
         f"本轮执行阶段：{stage_text}\n",
+        "上下文隔离：你正在使用独立的 child-agent ContextPack；Lead 只会接收你的摘要、证据、风险和建议，不会接收你的完整工作上下文。\n",
     ]
+    if context_pack.get("id"):
+        parts.append(f"ContextPack ID：{context_pack.get('id')}\n")
+    if selected_files:
+        parts.append("已选上下文文件：\n" + "\n".join(f"- {path}" for path in selected_files[:8]) + "\n")
     if change_context:
         parts.append(f"{change_context}\n")
     parts.append(

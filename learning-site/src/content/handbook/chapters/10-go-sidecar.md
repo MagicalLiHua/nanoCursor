@@ -1,6 +1,6 @@
 # 10. Go Sidecar：不是为了炫技，而是处理工程边界
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -33,6 +33,28 @@ Go 更适合做边界清楚、行为确定、需要长期稳定运行的 sidecar
 | executor | 默认关闭，智能分流可启用 | 命令超时、取消、进程管理 | 适合测试/构建类长命令 |
 | MCP gateway | 默认关闭，可选增强 | 管理 MCP stdio 生命周期 | 适合后续扩展 |
 | eventstore / policy 等 | 实验或候选 | 验证 Go 化边界 | 不是主链路必需 |
+
+```mermaid
+flowchart LR
+  Python["Python 主后端\nFastAPI / Agent Loop / Context / Policy"]
+  Strategy["策略层\n意图 / 工具权限 / 审批 / 恢复"]
+  Adapter["Python client adapter\n超时 / fallback / evidence"]
+  GRPC["gRPC"]
+  GoIndexer["Go Indexer\n项目扫描"]
+  GoFile["Go Filetools\n读写/备份/回滚"]
+  GoExec["Go Executor\n命令执行/取消/超时"]
+  GoMCP["Go MCP Gateway\nstdio 生命周期"]
+  Fallback["Python fallback\n保证可用性"]
+
+  Python --> Strategy --> Adapter --> GRPC
+  GRPC --> GoIndexer
+  GRPC --> GoFile
+  GRPC --> GoExec
+  GRPC --> GoMCP
+  Adapter -->|失败/不可用| Fallback
+```
+
+这张图要讲清楚两个边界：第一，Go 不决定 Agent 应该做什么；第二，Go 服务失败不能让系统整体不可用，Python adapter 必须保留 fallback 和 evidence。
 
 ## 3. 当前 Go filetools 做了什么
 

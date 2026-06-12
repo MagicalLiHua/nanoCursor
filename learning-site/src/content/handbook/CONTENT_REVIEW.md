@@ -40,16 +40,17 @@
 
 不要从最长的章节开始。推荐先按这条线走：
 
-1. 读 `01-project-overview.md`，先建立项目全景。
-2. 读 `02-request-lifecycle.md`，知道一次请求怎么从前端走到后端再回到前端。
-3. 读 `03-agent-loop.md` 和 `04-agent-orchestration.md`，理解为什么不是固定 DAG。
-4. 读 `05-context-management.md` 和 `06-memory-system.md`，理解“聪明程度”主要来自上下文和记忆。
-5. 读 `07-tool-governance.md`、`08-event-store-and-sse.md`、`09-runtime-and-async-boundary.md`，理解系统为什么可控、可观察、不会卡死事件循环。
-6. 最后读 `10-go-sidecar.md`、`11-mcp-and-skills.md`、`13-testing-and-quality.md`、`14-deployment-and-startup.md`，把工程边界、扩展能力和启动测试补齐。
-7. 做 `exercises/02-trace-one-real-run.md`，用问候、只读分析、代码交付三类任务验证链路。
-8. 做 `exercises/03-memory-tool-governance-lab.md`，验证记忆选择、规则记忆、shell 分类和 approval。
-9. 面试前读 `15-project-retrospective.md`、`interview/01-project-pitch.md`、`interview/03-agent-loop-deep-dive.md` 和 `interview/04-context-and-memory.md`。
-10. 临近面试时集中刷 `interview/09-four-day-final-drill.md`，把尖锐追问、源码定位和口述稿练熟。
+1. 读 `00-learning-roadmap.md`，先建立系统总图、学习顺序和验收标准。
+2. 读 `01-project-overview.md`，建立项目全景。
+3. 读 `02-request-lifecycle.md`，知道一次请求怎么从前端走到后端再回到前端。
+4. 读 `03-agent-loop.md` 和 `04-agent-orchestration.md`，理解为什么不是固定 DAG。
+5. 读 `05-context-management.md` 和 `06-memory-system.md`，理解“聪明程度”主要来自上下文和记忆。
+6. 读 `07-tool-governance.md`、`08-event-store-and-sse.md`、`09-runtime-and-async-boundary.md`，理解系统为什么可控、可观察、不会卡死事件循环。
+7. 最后读 `10-go-sidecar.md`、`11-mcp-and-skills.md`、`13-testing-and-quality.md`、`14-deployment-and-startup.md`，把工程边界、扩展能力和启动测试补齐。
+8. 做 `exercises/02-trace-one-real-run.md`，用问候、只读分析、代码交付三类任务验证链路。
+9. 做 `exercises/03-memory-tool-governance-lab.md`，验证记忆选择、规则记忆、shell 分类和 approval。
+10. 面试前读 `15-project-retrospective.md`、`interview/01-project-pitch.md`、`interview/03-agent-loop-deep-dive.md` 和 `interview/04-context-and-memory.md`。
+11. 临近面试时集中刷 `interview/09-four-day-final-drill.md`，把尖锐追问、源码定位和口述稿练熟。
 
 ## 还需要人工深读的地方
 
@@ -173,3 +174,131 @@
 |---|---|
 | `README.md` | 把四天冲刺文档加入最终面试学习顺序 |
 | `CONTENT_REVIEW.md` | 补充第六轮升级记录和临场复习建议 |
+
+## 2026-06-12 第七轮内容升级记录
+
+本轮把学习包从“分模块材料”继续升级成“课程化理解路径”，重点补足结构图和最新实现口径。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `chapters/00-learning-roadmap.md` | 系统总图、请求序列图、四条主线、7 天学习路线和学习验收标准 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `chapters/01-project-overview.md` | 补系统分层图，加入子 Agent 证据合并作为核心亮点 |
+| `chapters/02-request-lifecycle.md` | 补意图分流图，说明 direct/read/edit/delivery/risky 的运行差异 |
+| `chapters/03-agent-loop.md` | 补 Loop 状态机、子 Agent ContextPack/EvidencePack/merge_agent_result 链路，校准 max_steps=40 |
+| `chapters/04-agent-orchestration.md` | 补临时 Agent 编排图和生命周期状态图 |
+| `chapters/05-context-management.md` | 补上下文来源流水线和自动压缩流程图 |
+| `chapters/06-memory-system.md` | 补 MemoryRecord 选择与注入流程图 |
+| `chapters/07-tool-governance.md` | 补工具调用治理管线图 |
+| `chapters/08-event-store-and-sse.md` | 补 EventStore 到前端投影图 |
+| `chapters/09-runtime-and-async-boundary.md` | 补异步边界图，强调阻塞隔离 |
+| `chapters/10-go-sidecar.md` | 补 Python/Go sidecar 边界图 |
+| `chapters/11-mcp-and-skills.md` | 补 MCP 与 Skills 能力接入图 |
+| `chapters/12-frontend-observability.md` | 补 SSE 到前端状态投影图 |
+| `chapters/13-testing-and-quality.md` | 补测试/benchmark/CI 质量链路图 |
+| `interview/07-interview-question-bank.md` | 题库扩展到 90 题，新增子 Agent 独立上下文、EvidencePack、上下文窗口、失败自动处理和收尾口径 |
+
+## 2026-06-12 第八轮内容升级记录
+
+本轮继续补齐“查代码、做练习、准备面试”的部分，避免学习包只停留在主章节阅读。
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `maps/backend-code-map.md` | 增加后端阅读总图和 run 服务调用时序图 |
+| `maps/api-map.md` | 增加 API 使用总图和主链路 API 时序图 |
+| `maps/event-map.md` | 增加事件账本到前端投影图，补充子 Agent 证据合并和上下文压缩相关事件 |
+| `exercises/01-read-the-request-lifecycle.md` | 增加实验总图和证据记录表 |
+| `exercises/02-trace-one-real-run.md` | 增加三类任务对比图和事件证据表 |
+| `exercises/03-memory-tool-governance-lab.md` | 增加记忆、工具治理、失败恢复联动实验图 |
+| `exercises/04-run-benchmark-and-ablation.md` | 增加消融实验流程图和结果记录模板 |
+| `chapters/14-deployment-and-startup.md` | 增加启动拓扑图，明确最小可用和 Go sidecar 增强层 |
+| `chapters/15-project-retrospective.md` | 增加项目演化 timeline，帮助复盘不是乱堆功能 |
+| `interview/01-project-pitch.md` | 增加项目讲述结构图 |
+| `interview/03-agent-loop-deep-dive.md`、`04-context-and-memory.md`、`05-tools-recovery-and-observability.md`、`06-go-mcp-and-project-boundary.md` | 增加面试回答框架图，帮助按“结论-原因-实现-证据-边界”组织回答 |
+| `interview/07-interview-question-bank.md`、`08-testing-benchmark-retrospective.md`、`09-four-day-final-drill.md` | 增加刷题路径、质量证明链路和四天冲刺节奏图，帮助面试前快速建立复习顺序 |
+
+## 2026-06-12 第九轮内容升级记录
+
+本轮补齐“从文档走向源码”和“如何判断自己是否真正掌握”的最后学习闭环。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `maps/source-navigation-index.md` | 从问题反查源码入口、核心 service、验证方式和修改安全流程 |
+| `exercises/05-mastery-audit.md` | 用简单问答、只读分析、小代码修改、上下文压测、失败恢复和口述检查验证最终掌握度 |
+| `maps/concept-glossary.md` | 统一 Run、Conversation、ContextPack、ToolPolicy、EventStore、MCP/Skills 等核心概念，降低读源码时的术语混乱 |
+| `maps/debugging-playbook.md` | 从简单问候误路由、只读任务误写、无 Diff 假完成、连续对话丢历史、Agent 动态碎片、上下文压缩、Go/MCP 接入等真实现象反查源码和证据 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `README.md` | 把正式学习路线改成“路线图 -> 主章节 -> 代码地图 -> 练习 -> 面试”，并把旧计划标为建设记录 |
+| `index.html` | 增加源码定位索引、概念词典、实战排障手册和最终掌握度检查入口 |
+| `check_learning_package.py` | 扩展为覆盖全部主章节、地图、练习和面试文档，并要求学习文档具备结构图 |
+
+## 2026-06-12 第十轮内容升级记录
+
+本轮新增架构决策章节，把项目从“功能列表”进一步整理成“有取舍的工程系统”。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `chapters/16-architecture-decisions.md` | 系统解释为什么从固定 DAG 转向 Agent Loop、为什么 ExecutionPlan 只做边界、为什么默认 Lead、为什么上下文优先于 Agent 数量、为什么 EventStore 不是日志、为什么工具策略独立于模型、为什么 Go 是 sidecar、为什么 MCP/Skills 是扩展层，以及 benchmark/ablation 如何证明组件价值 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `README.md` | 把架构决策章节加入正式学习顺序，放在主章节和源码索引之间 |
+| `index.html` | 增加架构决策入口 |
+| `contentLoader.js` | 增加架构决策的学习目标描述 |
+| `check_learning_package.py` | 将第 16 章纳入强制检查和首页链接检查 |
+
+## 2026-06-12 第十一轮内容升级记录
+
+本轮新增真实 Run walkthrough，把分散知识串成可执行的全链路案例。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `exercises/06-real-run-walkthroughs.md` | 用 direct answer、read-only analysis、small edit 三类任务串起用户消息、意图路由、ContextPack、Agent Loop、ToolPolicy、EventStore、前端投影和最终交付 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `README.md` | 把真实 Run walkthrough 加入正式学习顺序，放在毕业检查之后、面试准备之前 |
+| `index.html` | 增加真实 Run walkthrough 入口 |
+| `contentLoader.js` | 增加真实 Run walkthrough 的学习目标描述 |
+| `check_learning_package.py` | 将第 6 个练习纳入强制检查 |
+
+## 2026-06-13 第十二轮内容升级记录
+
+本轮新增“模块证据矩阵”，把学习站从章节式阅读继续推进到证据链式复盘。
+
+新增文件：
+
+| 文件 | 作用 |
+|---|---|
+| `maps/module-evidence-matrix.md` | 按意图路由、Agent Loop、子 Agent、上下文、记忆、工具治理、失败恢复、EventStore、前端投影、Go sidecar、MCP/Skills、Benchmark/消融等模块，串起痛点、源码入口、运行事件、验证方式和面试表达 |
+
+升级内容：
+
+| 文件 | 升级重点 |
+|---|---|
+| `README.md` | 把模块证据矩阵放到概念词典之后、源码定位之前，作为从“懂概念”走向“能讲证据”的过渡 |
+| `index.html` | 增加模块证据矩阵入口 |
+| `contentLoader.js` | 增加模块证据矩阵的学习目标描述 |
+| `check_learning_package.py` | 将模块证据矩阵纳入强制检查和首页链接检查 |

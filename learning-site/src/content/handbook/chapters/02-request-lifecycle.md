@@ -1,6 +1,6 @@
 # 02. 请求生命周期：从用户消息到一次 run 完成
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -25,6 +25,31 @@
 
 如果用户只是打招呼，这条链路会被压缩成：**意图识别为 direct answer -> Lead 回复 -> 不创建完整任务流**。这正是项目反复打磨的关键体验：不是所有消息都应该跑完整开发流程。
 
+```mermaid
+flowchart TB
+  Input["前端发送消息\nconversation_id + workspace + prompt"]
+  Bind["绑定会话和工作区\n读取历史摘要"]
+  Intent["意图路由\nLLM semantic + hard guard + fallback hints"]
+  Route{"execution_route"}
+  Direct["Lead 直接回答\n不创建任务卡"]
+  Read["只读分析\n项目索引/读文件/总结"]
+  Edit["小改动\nLead + Coder + 写入校验"]
+  Delivery["完整开发\n计划/子 Agent/工具/验证/报告"]
+  Risk["高风险路径\napproval / 降级 / 询问用户"]
+  Events["EventStore + SSE\n前端实时投影"]
+  Finish["完成或失败\n报告/Diff/恢复信息"]
+
+  Input --> Bind --> Intent --> Route
+  Route -->|lead_direct_reply| Direct --> Events
+  Route -->|read_only| Read --> Events
+  Route -->|small_edit| Edit --> Events
+  Route -->|feature/debug/test| Delivery --> Events
+  Route -->|risky| Risk --> Events
+  Events --> Finish
+```
+
+这张图能解释很多前端现象：如果一句问候右侧出现十几个任务，问题通常在 `Intent -> Route`；如果只读分析触发写文件，问题通常在 `align_tool_policy_with_intent`；如果任务结束后 Diff 没更新，问题通常在 `Events -> Finish` 的证据投影。
+
 ## 3. 关键入口代码
 
 ### 3.1 会话级 run 入口
@@ -46,14 +71,50 @@ workspace -> conversations -> runs -> events/artifacts
 
 ```python
 # src/api/services/conversation_run_service.py
+intent_context = context_from_conversation(
+    conversation,
+    prompt=request.prompt,
+    workspace_dir=workspace_dir,
+)
 intent_decision = await classify_user_intent_async(
     request.prompt,
     conversation_summary=str(conversation.get("conversation_summary") or ""),
+    runtime_context=intent_context,
 )
 is_simple = intent_decision.get("execution_route") == "lead_direct_reply"
 ```
 
 `intent_decision` 同时包含“用户想做什么”和“系统该怎么运行”。常见字段有 `route`、`execution_route`、`requires_workspace_read`、`requires_workspace_write`、`requires_shell`、`requires_approval`。这里的设计重点是：**先判断是否需要干活，再决定创建哪些 Agent**。
+
+当前路由已经不是单纯关键词 if/else，而是分成四层：
+
+| 层 | 作用 | 失败时怎么处理 |
+|---|---|---|
+| deterministic fallback | 本地可运行的基础判断，保证没有模型也能用 | 作为兜底结果 |
+| hard guard | 空输入、问候、no-write、高风险、approval 等强约束 | guard 胜过模型 |
+| semantic classifier | 默认启用 LLM 结构化判断 route、confidence、risk、agents | 超时/非法 JSON 回退或澄清 |
+| normalizer | 最终收口权限、Agent、工具策略、低置信澄清 | 输出稳定 `IntentDecision` |
+
+这套设计的关键不是“让模型完全决定路由”，而是让模型只负责语义建议，系统负责安全边界。比如用户说“给我一个登录方案，不要改代码”，语义模型即使命中“登录模块实现”，normalizer 也会因为 explicit no-write 把写权限收掉。
+
+当前默认模式是 `NANOCURSOR_SEMANTIC_INTENT_MODE=enabled`。也就是说，普通复杂请求会先尝试 LLM 语义判断；问候、空输入、高风险等强 guard 会提前结束，不浪费模型调用。如果需要离线调试或回归到确定性路由，可以设置 `NANOCURSOR_SEMANTIC_INTENT_MODE=disabled`。
+
+语义分类器还会收到 deterministic fallback 的 hints。这样做不是让关键词重新主导决策，而是给模型一个“后端已经观察到什么”的上下文。例如 fallback 发现 `code_artifact_hint`、`tooling_hint`，语义模型就不应该轻易把“帮我写 Python 排序算法并比较性能”降级成普通解释。
+
+每次判断还会写入 `router_trace`：
+
+```json
+{
+  "deterministic_hints": ["code_artifact_hint", "tooling_hint"],
+  "semantic_used": true,
+  "semantic_route": "feature_delivery",
+  "fallback_route": "feature_delivery",
+  "final_route": "feature_delivery",
+  "normalization_notes": ["semantic", "semantic_mode=enabled"]
+}
+```
+
+`deterministic_hints` 不是最终决策，只是告诉你 fallback 看到了哪些线索。这样面试时可以讲清楚：项目没有盲目删除规则，而是把语义类关键词改成 `*_HINT_MARKERS`，把安全边界保留为 `*_GUARD_MARKERS`，再用 eval 逐步降低 hint 对最终结果的权重。
 
 ### 3.3 简单任务和复杂任务分流
 

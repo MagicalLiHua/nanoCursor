@@ -14,6 +14,7 @@ const GROUPS = {
 };
 
 const ROADMAP_NOTES = {
+  "00-learning-roadmap": "按系统主线学习项目，建立完整心智地图。",
   "01-project-overview": "建立项目定位和整体架构感。",
   "02-request-lifecycle": "跟踪一次真实请求从前端到后端完成。",
   "03-agent-loop": "理解持续决策、工具调用和停止条件。",
@@ -29,6 +30,13 @@ const ROADMAP_NOTES = {
   "13-testing-and-quality": "理解测试、评估和质量门禁。",
   "14-deployment-and-startup": "理解本地启动、配置和运行边界。",
   "15-project-retrospective": "复盘项目价值、限制和面试表达。",
+  "16-architecture-decisions": "理解 Agent Loop、上下文、工具、事件和 Go sidecar 背后的架构取舍。",
+  "concept-glossary": "统一理解 Run、ContextPack、ToolPolicy、EventStore 等核心概念。",
+  "debugging-playbook": "从真实现象反查 EventStore、路由、上下文、工具和前端投影。",
+  "module-evidence-matrix": "把核心模块、源码入口、运行事件、测试验证和面试表达串成一张证据链。",
+  "source-navigation-index": "从问题反查源码入口、核心 service 和验证方式。",
+  "05-mastery-audit": "用真实任务、源码定位和口述检查验证是否真正掌握项目。",
+  "06-real-run-walkthroughs": "用 direct/read-only/small-edit 三类真实 run 串起完整执行链路。",
 };
 
 function normalizePath(path) {
@@ -45,6 +53,13 @@ function slugify(text = "") {
     .replace(/^-|-$/g, "");
 }
 
+function uniqueSlug(base, counts) {
+  const fallback = base || "section";
+  const seen = counts.get(fallback) || 0;
+  counts.set(fallback, seen + 1);
+  return seen === 0 ? fallback : `${fallback}-${seen + 1}`;
+}
+
 function titleFromMarkdown(markdown = "", fallback = "") {
   const heading = markdown.match(/^#\s+(.+)$/m);
   if (heading) return heading[1].trim();
@@ -57,16 +72,18 @@ function orderFromFile(file = "") {
 }
 
 export function extractHeadings(markdown = "") {
+  const counts = new Map();
   return markdown
     .split(/\r?\n/)
     .map((line) => line.match(/^(#{1,4})\s+(.+)$/))
     .filter(Boolean)
     .map((match) => {
       const text = match[2].replace(/#+$/, "").trim();
+      const baseId = slugify(text);
       return {
         level: match[1].length,
         text,
-        id: slugify(text),
+        id: uniqueSlug(baseId, counts),
       };
     });
 }

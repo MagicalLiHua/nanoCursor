@@ -1,6 +1,6 @@
 # 12. 前端可感知运行：用户需要知道系统正在干什么
 
-最后更新：2026-06-09
+最后更新：2026-06-12
 
 ## 1. 本章目标
 
@@ -27,6 +27,25 @@ nanoCursor 的做法不同——前端是 Agent 系统可观测性的消费端�
   → 前端按类型分发到不同 UI 区域
   → 聊天框 / 右侧进度 / 底部证据 / Agent 动态 / Diff / 审批
 ```
+
+```mermaid
+flowchart TB
+  SSE["EventSource\n/api/runs/{thread_id}/events"]
+  Dispatch["事件分发\nrunActions / eventActions"]
+  Store["前端状态层\nmessages / tasks / evidence / context / agents"]
+  Chat["聊天主区\n用户消息 / Agent 回复 / AgentActivityStream"]
+  Right["右侧 RunInspector\n进度 / 环境 / Go 服务 / 上下文窗口"]
+  Bottom["底部 EvidenceShell\n报告 / Diff / 事件 / 恢复 / 交付物"]
+  Hydrate["刷新恢复\nsession + events + run snapshot"]
+
+  SSE --> Dispatch --> Store
+  Store --> Chat
+  Store --> Right
+  Store --> Bottom
+  Hydrate --> Store
+```
+
+学习前端时不要先纠结 CSS。你要先理解：前端是后端事件账本的投影层，它把同一批事件投影成聊天、任务、证据和上下文窗口。
 
 ## 3. 代码地图
 

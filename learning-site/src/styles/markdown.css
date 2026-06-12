@@ -212,6 +212,43 @@
   line-height: 1.7;
 }
 
+.mermaid-diagram {
+  overflow: auto;
+  margin: 18px 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f6f8fb 100%);
+  padding: 18px;
+}
+
+.mermaid-diagram > div {
+  min-width: 620px;
+}
+
+.mermaid-diagram svg {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-diagram span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.mermaid-diagram--error {
+  background: #fff7f7;
+}
+
+.mermaid-diagram--error strong {
+  color: #b42318;
+}
+
+.mermaid-diagram--error pre {
+  white-space: pre-wrap;
+}
+
 .markdown-document table {
   width: 100%;
   border-collapse: separate;

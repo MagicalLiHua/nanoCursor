@@ -2,6 +2,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Clock3, FileText, Target } from "lucide-react";
+import MermaidDiagram from "./MermaidDiagram.jsx";
 
 function slugify(text = "") {
   return String(text)
@@ -13,16 +14,23 @@ function slugify(text = "") {
     .replace(/^-|-$/g, "");
 }
 
+function uniqueSlug(base, counts) {
+  const fallback = base || "section";
+  const seen = counts.get(fallback) || 0;
+  counts.set(fallback, seen + 1);
+  return seen === 0 ? fallback : `${fallback}-${seen + 1}`;
+}
+
 function textFromChildren(children) {
   return Array.isArray(children)
     ? children.map((child) => (typeof child === "string" ? child : "")).join("")
     : String(children || "");
 }
 
-function heading(level) {
+function heading(level, counts) {
   const Tag = `h${level}`;
   return function Heading({ children }) {
-    const id = slugify(textFromChildren(children));
+    const id = uniqueSlug(slugify(textFromChildren(children)), counts);
     return <Tag id={id}>{children}</Tag>;
   };
 }
@@ -36,6 +44,8 @@ export default function MarkdownViewer({ doc }) {
       </div>
     );
   }
+
+  const headingCounts = new Map();
 
   return (
     <article className="markdown-document">
@@ -60,16 +70,27 @@ export default function MarkdownViewer({ doc }) {
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
         components={{
-          h1: heading(1),
-          h2: heading(2),
-          h3: heading(3),
-          h4: heading(4),
+          h1: heading(1, headingCounts),
+          h2: heading(2, headingCounts),
+          h3: heading(3, headingCounts),
+          h4: heading(4, headingCounts),
           a({ href, children }) {
             const external = href?.startsWith("http");
             return (
               <a href={href} target={external ? "_blank" : undefined} rel={external ? "noreferrer" : undefined}>
                 {children}
               </a>
+            );
+          },
+          code({ inline, className, children, ...props }) {
+            const language = /language-(\w+)/.exec(className || "")?.[1];
+            if (!inline && language === "mermaid") {
+              return <MermaidDiagram chart={String(children)} />;
+            }
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
             );
           },
         }}

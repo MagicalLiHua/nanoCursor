@@ -1,8 +1,24 @@
 # 面试深挖：工具治理、失败恢复与可观测性
 
-最后更新：2026-06-11
+最后更新：2026-06-12
 
 这份材料用于准备 nanoCursor 的第三条工程主线：Agent 能真实执行工具，但执行过程必须安全、可观察、失败后能恢复。
+
+```mermaid
+flowchart LR
+  Action["模型提出动作"]
+  Policy["策略层分类\n权限/风险/路径"]
+  Approval["必要时审批"]
+  Execute["执行工具"]
+  Record["EventStore 记录证据"]
+  Recover["失败分类与恢复"]
+
+  Action --> Policy --> Approval --> Execute --> Record
+  Execute -->|failed| Recover --> Policy
+  Recover --> Record
+```
+
+回答工具和恢复问题时，重点是把“模型想做什么”和“系统允许做什么”分开讲。
 
 ## 1. 一句话版本
 

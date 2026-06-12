@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -21,10 +22,11 @@ from src.api.run_state import (
     set_active_workspace,
     sync_run_context,
 )
-from src.api.services.intent_router import classify_user_intent
+from src.api.services.intent_router import classify_user_intent_async
+from src.api.services.intent_runtime_context import IntentRuntimeContext
 from src.api.services.routing_decision_service import build_routing_decision
-from src.api.services.run_rate_limit_service import check_run_start_rate_limit
 from src.api.services.run_context import RunContext
+from src.api.services.run_rate_limit_service import check_run_start_rate_limit
 from src.api.services.workflow_thread_service import start_workflow_thread
 from src.infra import config as config_module
 from src.infra.messages import AIMessage, HumanMessage
@@ -57,6 +59,35 @@ def intent_session_fields(intent_decision: dict[str, Any] | None) -> dict[str, A
         "intent_guard_hits": intent.get("guard_hits") if isinstance(intent.get("guard_hits"), list) else [],
         "intent_corrections": [],
     }
+
+
+def intent_context_from_run_request(request: RunRequest, workspace_dir: str) -> IntentRuntimeContext:
+    """Build compact intent context for standalone run starts.
+
+    Conversation-scoped runs have richer persisted context. Standalone runs
+    still benefit from recent message history and workspace identity, especially
+    when semantic routing is enabled.
+    """
+
+    last_user = ""
+    last_assistant = ""
+    for message in reversed(request.messages or []):
+        role = str(message.role or "user").lower()
+        content = str(message.content or "").strip()
+        if role == "assistant" and not last_assistant:
+            last_assistant = content
+        elif role == "user" and not last_user and content != request.prompt:
+            last_user = content
+        if last_user and last_assistant:
+            break
+    return IntentRuntimeContext(
+        conversation_id=str(request.conversation_id or ""),
+        thread_id=str(request.thread_id or ""),
+        workspace_dir=workspace_dir,
+        last_user_message=last_user,
+        last_assistant_message=last_assistant,
+        workspace_is_git=(Path(workspace_dir) / ".git").exists() if workspace_dir else False,
+    )
 
 
 async def start_standard_run(
@@ -95,7 +126,10 @@ async def start_standard_run(
     run_team = list(request.team or [])
     run_execution_plan = dict(request.execution_plan or {})
     if "intent_decision" not in run_execution_plan:
-        run_execution_plan["intent_decision"] = classify_user_intent(prompt)
+        run_execution_plan["intent_decision"] = await classify_user_intent_async(
+            prompt,
+            runtime_context=intent_context_from_run_request(request, run_workspace),
+        )
     if "routing_decision" not in run_execution_plan:
         run_execution_plan["routing_decision"] = build_routing_decision(
             prompt,

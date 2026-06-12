@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
+from src.api.services.event_store import get_event_store
 from src.api.services.runtime_evidence_service import collect_runtime_delivery_evidence
 from src.api.services.runtime_turn_service import run_runtime_turn
-
 
 StreamTurn = Callable[[list[dict[str, Any]], dict[str, Any] | None], Awaitable[str]]
 SyncRunContext = Callable[[str, str], Any]
@@ -147,6 +148,36 @@ async def _verify_and_summarize_small_edit(
     )
     sync_run_context(thread_id, workspace_dir)
     if not evidence.ready:
+        if _should_degrade_no_write_small_edit(result, evidence):
+            get_event_store().append_event(
+                thread_id,
+                "small_edit_degraded_to_answer",
+                title="small_edit 已降级为说明回答",
+                content=evidence.reason,
+                agent="lead",
+                payload={
+                    "reason": evidence.reason,
+                    "changed_files": evidence.changed_files,
+                    "diff_source": evidence.diff_source,
+                },
+                workspace_dir=workspace_dir,
+            )
+            await turn_runner(
+                thread_id,
+                workspace_dir,
+                action={
+                    "type": "summarize",
+                    "goal": "Summarize a no-write small_edit turn as a user-facing answer.",
+                    "agent": "Lead",
+                    "final_message": result[:8000],
+                    "context_requirements": {
+                        "degraded_from": "small_edit",
+                        "reason": evidence.reason,
+                        "changed_files": evidence.changed_files,
+                    },
+                },
+            )
+            return
         await turn_runner(
             thread_id,
             workspace_dir,
@@ -197,3 +228,55 @@ async def _verify_and_summarize_small_edit(
             },
         },
     )
+
+
+def _should_degrade_no_write_small_edit(result: str, evidence: Any) -> bool:
+    """Return whether a no-write small_edit should finish as an answer.
+
+    A small-edit turn may be selected too aggressively for inspection-style
+    prompts.  If the model did not actually write, we should not fail the run
+    unless there is a failed write or the model falsely claims it completed a
+    modification.
+    """
+    if bool(getattr(evidence, "has_write_action", False)):
+        return False
+    failed_calls = getattr(evidence, "failed_calls", []) or []
+    failed_writes = [
+        call for call in failed_calls
+        if isinstance(call, dict) and str(call.get("tool") or "") in {"write_file", "edit_file"}
+    ]
+    if failed_writes:
+        return False
+    return not _looks_like_claimed_write(result)
+
+
+def _looks_like_claimed_write(result: str) -> bool:
+    text = str(result or "").lower()
+    if not text.strip():
+        return False
+    claim_markers = [
+        "已修改",
+        "已修复",
+        "已修正",
+        "已更新",
+        "已写入",
+        "已经修改",
+        "已经修复",
+        "已经修正",
+        "已经更新",
+        "修改完成",
+        "修复完成",
+        "更新完成",
+        "写入完成",
+        "完成了修改",
+        "完成了修复",
+        "i modified",
+        "i updated",
+        "i fixed",
+        "changed the file",
+        "updated the file",
+        "fixed the file",
+        "edit is complete",
+        "patch is complete",
+    ]
+    return any(marker in text for marker in claim_markers)

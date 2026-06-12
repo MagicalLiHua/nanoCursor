@@ -1,8 +1,28 @@
 # API 地图
 
-最后更新：2026-06-06
+最后更新：2026-06-12
 
 这份文档记录 nanoCursor 学习时最应该关注的 API。完整接口以代码为准，这里只整理主链路。
+
+## 0. API 使用总图
+
+```mermaid
+flowchart LR
+  UI["前端工作台"]
+  Workspace["工作区 API\n/api/workspace/*"]
+  Conversation["会话 API\n/api/conversations/*"]
+  Run["运行 API\n/api/conversations/{id}/runs\n/api/runs/*"]
+  SSE["事件流\n/api/runs/{thread_id}/events"]
+  Evidence["证据 API\nfiles/tasks/diff/artifacts/recovery"]
+  Capability["能力 API\nmemory / skills / mcp / context"]
+
+  UI --> Workspace
+  UI --> Conversation --> Run --> SSE --> UI
+  UI --> Evidence
+  UI --> Capability
+```
+
+这张图说明前端不是只调一个 `/chat` 接口。它先确认工作区和会话，再创建 run，通过 SSE 获取实时事件，最后通过数据接口读取 Diff、任务、交付物、恢复信息和上下文窗口。
 
 ## 1. 系统状态
 
@@ -32,6 +52,28 @@ POST /api/conversations/{conversation_id}/runs
 ```text
 workspace -> conversation -> run -> events/artifacts
 ```
+
+### 主链路 API 时序
+
+```mermaid
+sequenceDiagram
+  participant F as Frontend
+  participant W as Workspace API
+  participant C as Conversation API
+  participant R as Run API
+  participant S as SSE
+  participant D as Data APIs
+
+  F->>W: GET /api/workspace/settings
+  F->>C: POST/GET /api/conversations
+  F->>R: POST /api/conversations/{conversation_id}/runs
+  R-->>F: thread_id
+  F->>S: GET /api/runs/{thread_id}/events
+  S-->>F: run events
+  F->>D: GET diff/tasks/artifacts/context
+```
+
+学习接口时要记住：`conversation_id` 解决“这是谁的连续对话”，`workspace_dir` 解决“在哪个项目里工作”，`thread_id` 解决“这一次运行的事件和证据在哪里”。
 
 ## 3. 会话
 
@@ -144,4 +186,3 @@ workspace -> conversation -> run -> events/artifacts
 5. 查看事件流
 6. 再发送“帮我用 Python 写排序算法并比较性能”
 7. 对比两次 intent decision 和 execution plan
-
