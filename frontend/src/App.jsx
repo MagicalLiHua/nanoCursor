@@ -80,14 +80,14 @@ export default function App() {
     startNewSession();
   }, [startNewSession]);
 
-  const handleOpenWorkspace = useCallback((e) => {
-    e?.preventDefault();
+  const handleOpenWorkspace = useCallback((eventOrPath) => {
+    if (typeof eventOrPath === "string") {
+      openWorkspace(eventOrPath);
+      return;
+    }
+    eventOrPath?.preventDefault?.();
     openWorkspace();
   }, [openWorkspace]);
-
-  const handleWorkspaceInputChange = useCallback((value) => {
-    setState({ workspaceInput: value });
-  }, []);
 
   const handleOpenSettings = useCallback(() => {
     setState((s) => ({ ui: { ...s.ui, settingsOpen: true } }));
@@ -170,7 +170,6 @@ export default function App() {
           onNewSession={handleNewSession}
           onSelectRun={restoreRun}
           onOpenWorkspace={handleOpenWorkspace}
-          onWorkspaceInputChange={handleWorkspaceInputChange}
           onOpenSettings={handleOpenSettings}
         />
         <ChatPanel

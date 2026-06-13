@@ -1612,7 +1612,7 @@ button.project-mini-item:hover {
 [data-theme="dark"] input,
 [data-theme="dark"] textarea,
 [data-theme="dark"] select,
-[data-theme="dark"] .sidebar-workspace-row input,
+[data-theme="dark"] .sidebar-workspace-current,
 [data-theme="dark"] .prompt-input {
   border-color: var(--line);
   background: var(--surface-soft);

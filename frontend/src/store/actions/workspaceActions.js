@@ -341,16 +341,17 @@ export function createWorkspaceActions(set, get) {
     return false;
   }
 
-  async function openWorkspace() {
+  async function openWorkspace(pathOverride) {
     const state = get();
-    const dir = (state.workspaceInput || "").trim();
+    const explicitPath = typeof pathOverride === "string" ? pathOverride : "";
+    const dir = (explicitPath || state.workspaceInput || "").trim();
     if (!dir) {
       get().addTimelineEvent({
         type: "error",
         title: "工作区路径为空",
         content: "请输入项目目录的绝对路径。",
       });
-      return;
+      return false;
     }
 
     try {
@@ -383,6 +384,7 @@ export function createWorkspaceActions(set, get) {
         loadMcpGatewayStatus(),
         refreshWorkspaceData({ allowEmpty: true }),
       ]);
+      return true;
     } catch (error) {
       get().addTimelineEvent({
         type: "error",
@@ -390,6 +392,7 @@ export function createWorkspaceActions(set, get) {
         content: error.message,
       });
       get().showToast({ kind: "error", title: "打开失败", content: error.message });
+      return false;
     }
   }
 

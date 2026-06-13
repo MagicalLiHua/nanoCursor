@@ -1,7 +1,7 @@
 import React from "react";
 import {
   MessageSquare, FolderOpen, Settings, User,
-  Plus, File, Folder, Search, SquarePen, FolderGit2, Moon, Sun
+  Plus, File, Folder, Search, SquarePen, FolderGit2, Moon, Sun, X
 } from "lucide-react";
 
 function shortPath(path) {
@@ -73,20 +73,67 @@ function RunList({ runs, currentThreadId, currentConversationId, onSelectRun, on
   );
 }
 
-function WorkspaceOpenBox({ workspaceDir, workspaceInput, onWorkspaceInputChange, onOpenWorkspace }) {
+function WorkspaceOpenBox({ workspaceDir, workspaceInput, onOpenWorkspace }) {
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [pathDraft, setPathDraft] = React.useState("");
+  const currentPath = workspaceDir || workspaceInput || "";
+
+  const openDialog = () => {
+    setPathDraft(currentPath);
+    setDialogOpen(true);
+  };
+
+  const submitPath = (event) => {
+    event?.preventDefault();
+    const nextPath = pathDraft.trim();
+    if (!nextPath) return;
+    onOpenWorkspace?.(nextPath);
+    setDialogOpen(false);
+  };
+
   return (
-    <form className="sidebar-workspace-form" onSubmit={onOpenWorkspace}>
-      <label htmlFor="sidebar-workspace-input">工作目录</label>
-      <div className="sidebar-workspace-row">
-        <input
-          id="sidebar-workspace-input"
-          value={workspaceInput || workspaceDir || ""}
-          onChange={(e) => onWorkspaceInputChange?.(e.target.value)}
-          placeholder="/Users/you/project"
-        />
-        <button className="button compact-button" type="submit">打开</button>
+    <section className="sidebar-workspace-form">
+      <label>工作目录</label>
+      <div className="sidebar-workspace-current" title={currentPath || "未设置工作路径"}>
+        {currentPath ? shortPath(currentPath) : "未设置工作路径"}
       </div>
-    </form>
+      <button className="button compact-button sidebar-workspace-set" type="button" onClick={openDialog}>
+        设置工作路径
+      </button>
+
+      {dialogOpen && (
+        <div className="sidebar-path-dialog-backdrop" onClick={() => setDialogOpen(false)}>
+          <form
+            className="sidebar-path-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="设置工作路径"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={submitPath}
+          >
+            <div className="sidebar-path-dialog-header">
+              <div>
+                <strong>设置工作路径</strong>
+                <span>输入项目目录的绝对路径。</span>
+              </div>
+              <button className="icon-button subtle" type="button" aria-label="关闭" onClick={() => setDialogOpen(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={pathDraft}
+              onChange={(event) => setPathDraft(event.target.value)}
+              placeholder="/Users/you/project"
+            />
+            <div className="sidebar-path-dialog-actions">
+              <button className="button secondary compact-button" type="button" onClick={() => setDialogOpen(false)}>取消</button>
+              <button className="button compact-button" type="submit" disabled={!pathDraft.trim()}>确定</button>
+            </div>
+          </form>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -113,7 +160,7 @@ function RecentProjects({ projects = [], onOpenProject }) {
   );
 }
 
-function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects, onWorkspaceInputChange, onOpenWorkspace }) {
+function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects, onOpenWorkspace }) {
   const visibleFiles = (workspaceFiles || []).filter((file) => {
     const parts = String(file.path || "").split("/").filter(Boolean);
     if (!parts.length) return false;
@@ -122,10 +169,7 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects
   });
 
   const openProjectPath = (path) => {
-    onWorkspaceInputChange?.(path);
-    requestAnimationFrame(() => {
-      onOpenWorkspace?.({ preventDefault() {} });
-    });
+    onOpenWorkspace?.(path);
   };
 
   if (!visibleFiles.length) {
@@ -139,7 +183,6 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects
           <WorkspaceOpenBox
             workspaceDir={workspaceDir}
             workspaceInput={workspaceInput}
-            onWorkspaceInputChange={onWorkspaceInputChange}
             onOpenWorkspace={onOpenWorkspace}
           />
           <RecentProjects projects={recentProjects} onOpenProject={openProjectPath} />
@@ -212,7 +255,6 @@ function FileTree({ workspaceFiles, workspaceDir, workspaceInput, recentProjects
         <WorkspaceOpenBox
           workspaceDir={workspaceDir}
           workspaceInput={workspaceInput}
-          onWorkspaceInputChange={onWorkspaceInputChange}
           onOpenWorkspace={onOpenWorkspace}
         />
         <RecentProjects projects={recentProjects} onOpenProject={openProjectPath} />
@@ -348,7 +390,7 @@ function ThemeToggle() {
   );
 }
 
-export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelectRun, onOpenWorkspace, onWorkspaceInputChange, onOpenSettings }) {
+export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelectRun, onOpenWorkspace, onOpenSettings }) {
   const isCollapsed = state.layout?.sidebarCollapsed;
   const [activePanel, setActivePanel] = React.useState(() => (isCollapsed ? null : "sessions"));
   const workspaceDir = state.projectOverview?.workspace_dir || state.workspaceDir || "";
@@ -437,7 +479,6 @@ export default function Sidebar({ state, onToggleSidebar, onNewSession, onSelect
               workspaceDir={workspaceDir}
               workspaceInput={state.workspaceInput}
               recentProjects={state.recentProjects || []}
-              onWorkspaceInputChange={onWorkspaceInputChange}
               onOpenWorkspace={onOpenWorkspace}
             />
           )}

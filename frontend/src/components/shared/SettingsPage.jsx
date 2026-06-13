@@ -100,19 +100,36 @@ function WorkspaceSection() {
   const workspaceInput = useStore((s) => s.workspaceInput);
   const recentProjects = useStore((s) => s.recentProjects);
   const openWorkspace = useStore((s) => s.openWorkspace);
-  const setState = useStore((s) => s.setState);
   const showToast = useStore((s) => s.showToast);
+  const [pathDialogOpen, setPathDialogOpen] = useState(false);
+  const [pathDraft, setPathDraft] = useState("");
 
   useEffect(() => {
     useStore.getState().loadRecentProjects?.();
   }, []);
 
-  const handleOpen = () => {
-    openWorkspace();
+  const handleOpenDialog = () => {
+    setPathDraft(workspaceInput || workspaceDir || "");
+    setPathDialogOpen(true);
   };
+
+  const handleConfirmPath = async (event) => {
+    event?.preventDefault();
+    const nextPath = pathDraft.trim();
+    if (!nextPath) {
+      showToast?.({ title: "路径为空", content: "请输入要打开的项目目录。", kind: "warning" });
+      return;
+    }
+    const opened = await openWorkspace(nextPath);
+    if (opened) {
+      setPathDialogOpen(false);
+    }
+  };
+
   const uniqueRecentProjects = Array.from(
     new Map((recentProjects || []).filter((item) => item?.path).map((item) => [item.path, item])).values()
   );
+  const currentPath = workspaceDir || workspaceInput || "";
 
   return (
     <div className="settings-section-content">
@@ -122,12 +139,10 @@ function WorkspaceSection() {
       <div className="settings-field">
         <label>当前工作路径</label>
         <div className="workspace-path-row">
-          <input
-            value={workspaceInput || workspaceDir || ""}
-            onChange={(e) => setState({ workspaceInput: e.target.value })}
-            placeholder="/Users/you/project"
-          />
-          <button className="button compact-button" onClick={handleOpen} type="button">打开</button>
+          <div className="workspace-path-display" title={currentPath || "未设置工作路径"}>
+            {currentPath || "未设置工作路径"}
+          </div>
+          <button className="button compact-button" onClick={handleOpenDialog} type="button">设置工作路径</button>
         </div>
       </div>
 
@@ -140,8 +155,7 @@ function WorkspaceSection() {
                 key={item.path}
                 className="recent-project-item"
                 onClick={() => {
-                  setState({ workspaceInput: item.path });
-                  showToast?.({ title: "已选择", content: item.path, kind: "info" });
+                  openWorkspace(item.path);
                 }}
                 type="button"
               >
@@ -153,6 +167,39 @@ function WorkspaceSection() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {pathDialogOpen && (
+        <div className="workspace-path-dialog-backdrop" onClick={() => setPathDialogOpen(false)}>
+          <form
+            className="workspace-path-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-path-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={handleConfirmPath}
+          >
+            <div className="workspace-path-dialog-header">
+              <div>
+                <h4 id="workspace-path-dialog-title">设置工作路径</h4>
+                <p>输入项目目录的绝对路径，确认后会切换当前会话的工作区。</p>
+              </div>
+              <button className="icon-button" type="button" aria-label="关闭" onClick={() => setPathDialogOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={pathDraft}
+              onChange={(event) => setPathDraft(event.target.value)}
+              placeholder="/Users/you/project"
+            />
+            <div className="workspace-path-dialog-actions">
+              <button className="button secondary compact-button" type="button" onClick={() => setPathDialogOpen(false)}>取消</button>
+              <button className="button compact-button" type="submit">确定</button>
+            </div>
+          </form>
         </div>
       )}
     </div>

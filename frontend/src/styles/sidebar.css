@@ -704,27 +704,93 @@
   font-weight: 800;
 }
 
-.sidebar-workspace-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 7px;
-}
-
-.sidebar-workspace-row input {
+.sidebar-workspace-current {
   min-width: 0;
-  height: 32px;
-  padding: 0 9px;
+  padding: 8px 9px;
+  overflow: hidden;
   border: 1px solid rgba(216, 226, 234, 0.95);
   border-radius: 8px;
-  outline: none;
   background: #ffffff;
   color: #202329;
   font-size: 12px;
+  font-weight: 720;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.sidebar-workspace-row input:focus {
-  border-color: rgba(37, 99, 235, 0.38);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+.sidebar-workspace-set {
+  justify-self: start;
+}
+
+.sidebar-path-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 610;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.24);
+  backdrop-filter: blur(8px);
+}
+
+.sidebar-path-dialog {
+  width: min(520px, calc(100vw - 44px));
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(31, 35, 40, 0.22);
+}
+
+.sidebar-path-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sidebar-path-dialog-header div {
+  display: grid;
+  gap: 4px;
+}
+
+.sidebar-path-dialog-header strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 820;
+}
+
+.sidebar-path-dialog-header span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sidebar-path-dialog input {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.sidebar-path-dialog input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.sidebar-path-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
 }
 
 .project-card,
