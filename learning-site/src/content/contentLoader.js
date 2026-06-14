@@ -37,6 +37,8 @@ const ROADMAP_NOTES = {
   "source-navigation-index": "从问题反查源码入口、核心 service 和验证方式。",
   "05-mastery-audit": "用真实任务、源码定位和口述检查验证是否真正掌握项目。",
   "06-real-run-walkthroughs": "用 direct/read-only/small-edit 三类真实 run 串起完整执行链路。",
+  "10-resume-core-mastery": "把简历四条主线融成可口述、可追问、可复盘的项目理解。",
+  "11-nanocursor-top-50-qa": "用 50 个高频问题覆盖项目定位、架构、Agent Loop、上下文、工具、Go 和复盘。",
 };
 
 function normalizePath(path) {

@@ -229,3 +229,63 @@ def test_stream_preserves_text_before_tool_use_order():
         assert any(event_type == "done" for event_type, _ in collected)
 
     asyncio.run(run())
+
+
+def test_stream_repairs_text_execute_tags_into_tool_calls(monkeypatch):
+    """Text-only command tags should become governed tool calls, not final prose."""
+
+    async def run():
+        first_events = [
+            MockStreamEvent("message_start", message=MockMessage(MockUsage(100, 0))),
+            MockStreamEvent("content_block_start", content_block=MockContentBlock("text", text="我先检查目录。\n<execute><cmd>ls -la .</cmd></execute>")),
+            MockStreamEvent("content_block_stop"),
+            MockStreamEvent("message_delta", delta=MockDelta("text_delta", stop_reason="end_turn"), usage=MockUsage(0, 20)),
+        ]
+        second_events = [
+            MockStreamEvent("message_start", message=MockMessage(MockUsage(100, 0))),
+            MockStreamEvent("content_block_start", content_block=MockContentBlock("text", text="目录检查完成。")),
+            MockStreamEvent("content_block_stop"),
+            MockStreamEvent("message_delta", delta=MockDelta("text_delta", stop_reason="end_turn"), usage=MockUsage(0, 10)),
+        ]
+
+        async def make_stream(events):
+            for event in events:
+                yield event
+
+        calls = []
+        mock_client = AsyncMock()
+
+        async def mock_create(**kwargs):
+            calls.append(kwargs)
+            return make_stream(first_events if len(calls) == 1 else second_events)
+
+        mock_client.messages.create = mock_create
+        mock_client.close = AsyncMock()
+        monkeypatch.setitem(
+            __import__("src.agent.engine", fromlist=["TOOL_HANDLERS"]).TOOL_HANDLERS,
+            "bash",
+            lambda command: f"ran: {command}",
+        )
+
+        with patch("src.agent.engine.create_client", return_value=mock_client):
+            collected = []
+            async for event_type, *data in agent_loop_stream(
+                messages=[{"role": "user", "content": "inspect"}],
+                system="test",
+                tools=[{"name": "bash"}],
+                max_turns=2,
+            ):
+                collected.append((event_type, data))
+
+        assert ("tool_start", ["bash"]) in collected
+        assert any(event_type == "tool_result" and data[0] == "bash" and "ran: ls -la ." in data[2] for event_type, data in collected)
+        assert any(event_type == "done" and data[0] == "目录检查完成。" for event_type, data in collected)
+
+        second_messages = calls[1]["messages"]
+        assistant = second_messages[1]
+        assert [block["type"] for block in assistant["content"]] == ["text", "tool_use"]
+        assert assistant["content"][0]["text"] == "我先检查目录。"
+        assert assistant["content"][1]["name"] == "bash"
+        assert second_messages[2]["content"][0]["content"] == "ran: ls -la ."
+
+    asyncio.run(run())

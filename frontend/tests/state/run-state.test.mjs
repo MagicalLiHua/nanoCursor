@@ -318,6 +318,7 @@ test("assistant display cleanup removes phase glue and low level runtime noise",
 阶段 1：接收需求与上下文边界
 ## 阶段 2：任务拆解与验收标准
 I0607 16:47:06.372977 11316507 ev_poll_posix.cc:593 FD from fork parent still in poll list
+<execute><cmd>ls -la /tmp/demo</cmd></execute>
 
 完成内容
 - 已创建测试文件
@@ -326,6 +327,8 @@ I0607 16:47:06.372977 11316507 ev_poll_posix.cc:593 FD from fork parent still in
   assert.equal(cleaned.includes("阶段 1"), false);
   assert.equal(cleaned.includes("阶段 2"), false);
   assert.equal(cleaned.includes("ev_poll_posix"), false);
+  assert.equal(cleaned.includes("<execute>"), false);
+  assert.equal(cleaned.includes("ls -la /tmp/demo"), false);
   assert.equal(cleaned.includes("完成内容"), true);
 });
 

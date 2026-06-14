@@ -24,11 +24,13 @@ def test_build_turn_system_adds_controller_and_small_edit_constraints():
         turn_context={"task_summary": "ctx"},
         uses_runtime_turn_loop=True,
         intent_route="small_edit",
+        has_tools=True,
     )
 
     assert "base" in system
     assert "Runtime Step Controller" in system
     assert "受控 small_edit" in system
+    assert "<execute>" in system
     assert "ctx" in system
 
 

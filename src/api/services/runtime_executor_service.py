@@ -38,6 +38,7 @@ from src.api.services.run_finalization_service import (
     persist_terminal_session,
 )
 from src.api.services.runtime_preparation_service import inject_parallel_briefing, prepare_runtime_system
+from src.api.services.runtime_evidence_service import collect_runtime_delivery_evidence
 from src.api.services.runtime_registry_service import get_runtime_registry
 from src.api.services.runtime_routing_service import execute_lightweight_runtime_route, uses_lightweight_runtime
 from src.api.services.runtime_stream_service import make_agent_pool_status_callback, stream_model_response
@@ -432,6 +433,21 @@ async def run_workflow_async(
 
         if is_tool_error_output(result):
             raise RuntimeError(tool_error_message(result))
+        if (
+            not uses_runtime_turn_loop
+            and not is_lead_direct_run
+            and bool(intent_decision.get("requires_workspace_write"))
+        ):
+            deps.sync_run_context(thread_id=thread_id, workspace_dir=workspace_dir)
+            evidence = collect_runtime_delivery_evidence(
+                thread_id,
+                workspace_dir,
+                tool_calls=runtime_tool_evidence,
+            )
+            if not evidence.has_changes:
+                raise RuntimeError(
+                    "本轮任务要求创建或修改工作区文件，但未检测到真实文件变更，不能标记为完成。"
+                )
         complete_workflow_run(
             thread_id=thread_id,
             workspace_dir=workspace_dir,

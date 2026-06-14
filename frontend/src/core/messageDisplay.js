@@ -13,8 +13,15 @@ function stripPhaseMarkers(text) {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+function stripToolProtocolText(text) {
+  return String(text || "")
+    .replace(/\s*<execute\b[^>]*>[\s\S]*?<cmd\b[^>]*>[\s\S]*?<\/cmd>[\s\S]*?<\/execute>\s*/gi, "\n")
+    .replace(/\s*<cmd\b[^>]*>[\s\S]*?<\/cmd>\s*/gi, "\n");
+}
+
 export function cleanAssistantMessageForDisplay(content = "") {
-  const withoutProcessLines = String(content || "")
+  const withoutProtocolText = stripToolProtocolText(content);
+  const withoutProcessLines = withoutProtocolText
     .split(/\r?\n/)
     .filter((line) => !/^\s*(#{1,6}\s*)?阶段\s*\d+\s*[：:]/.test(line))
     .join("\n");

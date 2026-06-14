@@ -13,8 +13,10 @@ nanoCursor Core Engine - 统一 MVP 引擎
 import os
 import asyncio
 import contextvars
+import html
 import inspect
 import json
+import re
 import shlex
 import time
 import uuid
@@ -447,6 +449,55 @@ async def run_subagent(
 # ========== 并行工具执行 ==========
 PARALLEL_TOOLS = {"read_file", "list_directory"}
 WRITE_TOOLS = {"write_file", "edit_file"}
+
+
+def _tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
+    return {str(tool.get("name") or "") for tool in tools or [] if isinstance(tool, dict)}
+
+
+def _extract_text_tool_calls(text: str, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Recover tool calls from text-only model output.
+
+    Some Anthropic-compatible providers occasionally ignore native tool_use
+    blocks and emit XML-ish command tags such as:
+
+        <execute><cmd>ls -la</cmd></execute>
+
+    Treat those as repairable tool calls, but keep them on the normal tool
+    policy path instead of executing anything directly.
+    """
+    available = _tool_names(tools)
+    if "bash" not in available:
+        return []
+    raw = str(text or "")
+    if "<cmd" not in raw.lower() and "<execute" not in raw.lower():
+        return []
+    commands: list[str] = []
+    for match in re.finditer(r"(?is)<execute\b[^>]*>.*?<cmd\b[^>]*>(.*?)</cmd>.*?</execute>", raw):
+        commands.append(html.unescape(match.group(1)).strip())
+    if not commands:
+        for match in re.finditer(r"(?is)<cmd\b[^>]*>(.*?)</cmd>", raw):
+            commands.append(html.unescape(match.group(1)).strip())
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for command in commands:
+        if not command or command in seen:
+            continue
+        seen.add(command)
+        result.append({
+            "id": f"text-tool-{uuid.uuid4().hex[:12]}",
+            "name": "bash",
+            "input": {"command": command},
+            "source": "text_tool_repair",
+        })
+    return result
+
+
+def _strip_text_tool_calls(text: str) -> str:
+    cleaned = re.sub(r"(?is)<execute\b[^>]*>.*?<cmd\b[^>]*>.*?</cmd>.*?</execute>", "", str(text or ""))
+    cleaned = re.sub(r"(?is)<cmd\b[^>]*>.*?</cmd>", "", cleaned)
+    return cleaned.strip()
 
 
 async def _execute_single_tool(
@@ -1295,12 +1346,31 @@ async def agent_loop_stream(
 
                 # Build assistant message for conversation history
                 full_text = "".join(text_blocks)
-                messages.append({"role": "assistant", "content": assistant_content})
 
                 await _raise_if_cancelled(on_cancel_check)
                 if stop_reason != "tool_use":
-                    yield ("done", full_text)
-                    return
+                    repaired_tool_blocks = _extract_text_tool_calls(full_text, tools)
+                    if not repaired_tool_blocks:
+                        messages.append({"role": "assistant", "content": assistant_content})
+                        yield ("done", full_text)
+                        return
+
+                    repaired_text = _strip_text_tool_calls(full_text)
+                    assistant_content = []
+                    if repaired_text:
+                        assistant_content.append({"type": "text", "text": repaired_text})
+                    for tool_block in repaired_tool_blocks:
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": tool_block["id"],
+                            "name": tool_block["name"],
+                            "input": tool_block["input"],
+                        })
+                        yield ("tool_start", tool_block["name"])
+                        yield ("tool_input", tool_block["name"], tool_block["input"])
+                    tool_blocks = repaired_tool_blocks
+
+                messages.append({"role": "assistant", "content": assistant_content})
 
                 # Process tool calls: read-only tools parallel, write tools sequential (with file lock)
                 _ctx = get_runtime_context()

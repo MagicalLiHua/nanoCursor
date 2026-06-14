@@ -35,6 +35,7 @@ def build_turn_system(
     turn_context: dict[str, Any] | None = None,
     uses_runtime_turn_loop: bool = False,
     intent_route: str = "",
+    has_tools: bool = False,
 ) -> str:
     """Build the system prompt for one streamed runtime turn."""
     turn_system = base_system
@@ -45,6 +46,13 @@ def build_turn_system(
             f"{turn_system}\n\n"
             "本轮由 Runtime Step Controller 管理。只执行当前用户请求需要的动作；"
             "不要创建实现任务，不要调用未提供的工具。"
+        )
+    if has_tools:
+        turn_system = (
+            f"{turn_system}\n\n"
+            "工具调用必须使用系统提供的原生 tool_use/tool_call 机制；"
+            "不要在正文中输出 <execute>、<cmd>、JSON 工具片段或 shell 命令伪协议。"
+            "如果需要读写文件或执行命令，必须调用对应工具。"
         )
     if intent_route == "small_edit":
         turn_system = (
@@ -111,6 +119,7 @@ async def stream_model_response(
         turn_context=turn_context,
         uses_runtime_turn_loop=uses_runtime_turn_loop,
         intent_route=intent_route,
+        has_tools=bool(tools),
     )
     async for event_type, *event_data in agent_loop_stream(
         messages=messages,

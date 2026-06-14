@@ -51,6 +51,8 @@ REQUIRED_FILES = [
     "interview/07-interview-question-bank.md",
     "interview/08-testing-benchmark-retrospective.md",
     "interview/09-four-day-final-drill.md",
+    "interview/10-resume-core-mastery.md",
+    "interview/11-nanocursor-top-50-qa.md",
 ]
 
 REQUIRED_DIRS = [

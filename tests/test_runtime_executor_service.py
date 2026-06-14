@@ -112,6 +112,65 @@ def test_standard_workflow_completed_finalizes_run(tmp_path, monkeypatch):
     assert any(event["event_type"] == "metrics_updated" for event in events)
 
 
+def test_standard_write_workflow_rejects_completion_without_changes(tmp_path, monkeypatch):
+    thread_id = "run-no-write-evidence"
+    active_runs = {
+        thread_id: {
+            "workspace_dir": str(tmp_path),
+            "execution_plan": {
+                "intent_decision": {
+                    "route": "feature_delivery",
+                    "execution_route": "agenthub_delivery",
+                    "requires_workspace_write": True,
+                }
+            },
+            "team": [],
+            "conversation_id": "conv-1",
+        }
+    }
+    deps, *_ = _deps(tmp_path, active_runs)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_stream_model_response(**kwargs):
+        return SimpleNamespace(text="已完成。", token_counter=1)
+
+    async def fake_inject_parallel_briefing(**kwargs):
+        return {}
+
+    monkeypatch.setattr(service, "prepare_runtime_system", lambda **kwargs: "system")
+    monkeypatch.setattr(service, "inject_parallel_briefing", fake_inject_parallel_briefing)
+    monkeypatch.setattr(service, "stream_model_response", fake_stream_model_response)
+    monkeypatch.setattr(
+        service,
+        "collect_runtime_delivery_evidence",
+        lambda *args, **kwargs: SimpleNamespace(has_changes=False),
+    )
+    monkeypatch.setattr(service, "complete_workflow_run", lambda **kwargs: calls.append(("complete", kwargs)))
+    monkeypatch.setattr(service, "fail_workflow_run", lambda **kwargs: calls.append(("fail", kwargs)))
+    monkeypatch.setattr(service, "finalize_delivery_best_effort", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "finalize_run_registry", lambda **kwargs: calls.append(("registry", kwargs)))
+    monkeypatch.setattr(service, "_cleanup_agent_pool", lambda thread_id: None)
+
+    asyncio.run(
+        service.run_workflow_async(
+            thread_id,
+            [SimpleNamespace(type="user", content="创建一个课程设计项目")],
+            max_retries=3,
+            max_coder_steps=15,
+            workspace_dir=str(tmp_path),
+            dependencies=deps,
+        )
+    )
+
+    assert not any(call[0] == "complete" for call in calls)
+    assert any(
+        call[0] == "fail"
+        and "未检测到真实文件变更" in call[1]["error_detail"]
+        for call in calls
+    )
+    assert [call[1]["final_status"] for call in calls if call[0] == "registry"] == ["failed"]
+
+
 def test_standard_workflow_parallel_subagent_runner_accepts_positional_prompt(tmp_path, monkeypatch):
     thread_id = "run-parallel-runner-bridge"
     active_runs = {

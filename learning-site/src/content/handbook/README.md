@@ -23,9 +23,11 @@
 15. 做 `exercises/04-run-benchmark-and-ablation.md`，学会用 benchmark 和消融实验证明组件价值。
 16. 做 `exercises/05-mastery-audit.md`，用毕业检查确认自己是否能追链路、定位源码、解释取舍。
 17. 做 `exercises/06-real-run-walkthroughs.md`，用 direct/read-only/small-edit 三类真实任务把链路串起来。
-18. 准备面试时先看 `interview/01-project-pitch.md`，再看 `interview/03-agent-loop-deep-dive.md`、`interview/04-context-and-memory.md`、`interview/05-tools-recovery-and-observability.md`、`interview/06-go-mcp-and-project-boundary.md`、`interview/08-testing-benchmark-retrospective.md`。
-19. 面试前 4 天重点刷 `interview/09-four-day-final-drill.md`，练尖锐追问、源码定位和 1/3/8 分钟口述。
-20. 最后刷 `interview/07-interview-question-bank.md`，按模块快速过一遍高频追问。
+18. 准备面试时先看 `interview/10-resume-core-mastery.md`，把简历四条主线融成一套完整口述。
+19. 然后刷 `interview/11-nanocursor-top-50-qa.md`，用 50 个高频问题覆盖项目定位、架构、Agent Loop、上下文、工具、Go 和复盘。
+20. 再看 `interview/01-project-pitch.md`、`interview/03-agent-loop-deep-dive.md`、`interview/04-context-and-memory.md`、`interview/05-tools-recovery-and-observability.md`、`interview/06-go-mcp-and-project-boundary.md`、`interview/08-testing-benchmark-retrospective.md`。
+21. 面试前 4 天重点刷 `interview/09-four-day-final-drill.md`，练尖锐追问、源码定位和 1/3/8 分钟口述。
+22. 最后刷 `interview/07-interview-question-bank.md`，按模块快速过一遍高频追问。
 
 `LEARNING_PACKAGE_PLAN.md`、`LEARNING_CONTENT_UPGRADE_PLAN.md` 和 `CONTENT_REVIEW.md` 更像建设记录和审校记录，不是正式学习主线。真正学习时优先按上面的顺序走。
 
@@ -65,6 +67,8 @@
 - 本轮校订：压缩低密度列表，校准 Go sidecar 启动命令、Agent Loop、上下文、失败恢复和学习站阅读体验
 - 最新校订：同步默认启用 LLM 语义意图路由，补充 hard guard、deterministic hints、normalizer 和 intent eval 的学习与面试口径
 - 课程化补强：新增 `00-learning-roadmap.md`，补充系统总图、请求序列图、四条主线、7 天学习路线和学习验收标准
+- 面试主线补强：新增 `interview/10-resume-core-mastery.md`，把 Agent Loop、Context Pack、Python + Go 运行时和可观测执行四条简历内容串成可复述、可追问、可复盘的学习材料
+- 高频追问补强：新增 `interview/11-nanocursor-top-50-qa.md`，把原始题库压缩成 50 个口语化问题和回答，用于面试前三天集中复习
 
 ## 文件组织
 
