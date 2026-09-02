@@ -1,0 +1,19 @@
+{
+  "repo": "django/django",
+  "instance_id": "django__django-11141",
+  "base_commit": "5d9cf79baf07fc4aed7ad1b06990532a65378155",
+  "difficulty": "15 min - 1 hour",
+  "FAIL_TO_PASS": "[\"Migration directories without an __init__.py file are loaded.\"]",
+  "PASS_TO_PASS": "[\"test_apply (migrations.test_loader.RecorderTests)\", \"test_invalid (migrations.test_loader.PycLoaderTests)\", \"test_valid (migrations.test_loader.PycLoaderTests)\", \"test_check_consistent_history (migrations.test_loader.LoaderTests)\", \"test_check_consistent_history_squashed (migrations.test_loader.LoaderTests)\", \"test_explicit_missing_module (migrations.test_loader.LoaderTests)\", \"test_first (migrations.test_loader.LoaderTests)\", \"Files prefixed with underscore, tilde, or dot aren't loaded.\", \"test_load (migrations.test_loader.LoaderTests)\", \"test_load_empty_dir (migrations.test_loader.LoaderTests)\", \"test_load_import_error (migrations.test_loader.LoaderTests)\", \"test_load_module_file (migrations.test_loader.LoaderTests)\", \"test_load_unmigrated_dependency (migrations.test_loader.LoaderTests)\", \"Tests loading a squashed migration\", \"Tests loading a complex set of squashed migrations\", \"test_loading_squashed_complex_multi_apps (migrations.test_loader.LoaderTests)\", \"test_loading_squashed_complex_multi_apps_partially_applied (migrations.test_loader.LoaderTests)\", \"Tests loading a complex but erroneous set of squashed migrations\", \"Tests loading a squashed migration with a new migration referencing it\", \"test_marked_as_migrated (migrations.test_loader.LoaderTests)\", \"test_marked_as_unmigrated (migrations.test_loader.LoaderTests)\", \"Tests prefix name matching\", \"test_plan_handles_repeated_migrations (migrations.test_loader.LoaderTests)\", \"test_run_before (migrations.test_loader.LoaderTests)\"]",
+  "created_at": "2019-03-28T20:49:53Z",
+  "version": "3.1",
+  "task_id": "issue-eval-django-11141",
+  "split": "evaluation-core",
+  "image": "logicstar/sweb.eval.x86_64.django_1776_django-11141:latest",
+  "source_parquet": "SWE-bench_Verified parquet snapshot",
+  "sha256": {
+    "issue": "f7a89b6c259b982bea8f5247ea54ad080dd4d3b5a7a559662b13928218ef6d94",
+    "gold_patch": "924503df37ffda93f8c76bb1d615f2c5cd8a16f914bd76d63e9072de676514ee",
+    "test_patch": "2368754a38055f10014bbcf18e23e95bbe26b0785de064f4fc561f6c3a03749f"
+  }
+}

@@ -1,0 +1,216 @@
+{
+  "schemaVersion": "nanocursor-n0.1-attribution-evidence-v1",
+  "generatedAt": "2026-09-01T00:47:21.917Z",
+  "scope": {
+    "deepseekTrialsPerHarness": 36,
+    "tasks": 12,
+    "trialsPerTask": 3,
+    "nominalPairingWarning": "Trial indexes were not randomized paired samples; agreement is descriptive only."
+  },
+  "controlsVerifiedByFullAudit": {
+    "sameModel": true,
+    "sameTaskAssets": true,
+    "sameSystemPrompt": true,
+    "sameBudget": true,
+    "sameContainerLimits": true,
+    "sameGraderAssets": true,
+    "providerRetries": 0,
+    "commandTimeouts": 0,
+    "auditErrors": []
+  },
+  "aggregate": {
+    "nanoCursor": {
+      "trials": 36,
+      "protocolCompleted": 31,
+      "contentPassed": 32,
+      "turns": 1495,
+      "inputTokens": 1097756,
+      "outputTokens": 663132,
+      "totalTokens": 1760888,
+      "toolCalls": 1946,
+      "wallSeconds": 6499.3,
+      "toolErrors": 97
+    },
+    "pi": {
+      "trials": 36,
+      "protocolCompleted": 33,
+      "contentPassed": 33,
+      "turns": 1521,
+      "inputTokens": 1271780,
+      "outputTokens": 654241,
+      "totalTokens": 1926021,
+      "toolCalls": 1982,
+      "wallSeconds": 7341.8
+    },
+    "deltaPercent": {
+      "turns": -1.7,
+      "totalTokens": -8.6,
+      "toolCalls": -1.8,
+      "wallSeconds": -11.5
+    },
+    "functionalContingency": {
+      "bothPass": 32,
+      "bothFail": 3,
+      "nanoOnlyPass": 0,
+      "piOnlyPass": 1
+    },
+    "nominalFunctionalAgreement": {
+      "count": 35,
+      "total": 36,
+      "percent": 97.2
+    },
+    "protocolContingency": {
+      "bothComplete": 31,
+      "bothIncomplete": 3,
+      "nanoOnlyComplete": 0,
+      "piOnlyComplete": 2
+    },
+    "nominalProtocolAgreement": {
+      "count": 34,
+      "total": 36,
+      "percent": 94.4
+    },
+    "taskLevelSameFunctionalPassCount": {
+      "count": 11,
+      "total": 12
+    }
+  },
+  "django11141Triangulation": {
+    "trials": [
+      {
+        "system": "Pi + DeepSeek",
+        "trial": 1,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "Pi + DeepSeek",
+        "trial": 2,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "INFRA_BLOCKED"
+      },
+      {
+        "system": "Pi + DeepSeek",
+        "trial": 3,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "NanoCursor + DeepSeek",
+        "trial": 1,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "NanoCursor + DeepSeek",
+        "trial": 2,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "NanoCursor + DeepSeek",
+        "trial": 3,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "Pi + GLM",
+        "trial": 1,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "Pi + GLM",
+        "trial": 2,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "PARTIAL"
+      },
+      {
+        "system": "Pi + GLM",
+        "trial": 3,
+        "contentPassed": false,
+        "targetPassed": true,
+        "regressionPassed": false,
+        "status": "INFRA_BLOCKED"
+      }
+    ],
+    "totalTrials": 9,
+    "targetPassRegressionFail": 9,
+    "interpretation": "The same semantic reduction recurred across two harnesses and two models."
+  },
+  "toolContract": {
+    "comparisonNote": "Only four identically classified policy rejections are compared. Raw isError totals are not comparable because the adapters encode nonzero project commands differently.",
+    "comparableCategories": [
+      "inline-python",
+      "protected-test-edit",
+      "command-allowlist",
+      "project-command-allowlist"
+    ],
+    "nanoCursor": {
+      "comparablePolicyRejections": 82,
+      "calls": 1946,
+      "comparableRejectionRatePercent": 4.21,
+      "auditedToolErrorsAllCategories": 97,
+      "categories": {
+        "protected-test-edit": 24,
+        "inline-python": 48,
+        "directory-delete": 3,
+        "replace-mismatch": 5,
+        "parameter-validation": 4,
+        "command-allowlist": 4,
+        "absolute-path": 2,
+        "project-command-allowlist": 6,
+        "missing-file-read": 1
+      }
+    },
+    "pi": {
+      "comparablePolicyRejections": 72,
+      "calls": 1982,
+      "comparableRejectionRatePercent": 3.63,
+      "rawToolEventsMarkedError": 136,
+      "categories": {
+        "inline-python": 36,
+        "protected-test-edit": 20,
+        "other": 61,
+        "command-allowlist": 9,
+        "project-command-allowlist": 7,
+        "replace-mismatch": 3
+      }
+    },
+    "nanoCursorMinusPiComparablePercentagePoints": 0.58
+  },
+  "differentialCases": [
+    {
+      "taskId": "issue-eval-sphinx-10449",
+      "observation": "NanoCursor 2/3 functional pass; Pi 3/3.",
+      "directMechanism": "One NanoCursor trajectory overgeneralized an older fix and discounted an observed relevant test failure."
+    },
+    {
+      "taskId": "issue-eval-pytest-8399",
+      "observation": "NanoCursor trial 2 passed every grader check but exhausted 96 turns before a final response; Pi 3/3 completed.",
+      "directMechanism": "Validation scope expanded and no final-response budget was reserved."
+    }
+  ],
+  "sourceArtifacts": {
+    "publicRunRecords": "data/runs.csv",
+    "nanoCursorAudit": "data/full-audit.json",
+    "frozenManifests": "manifests/",
+    "rawModelMessagesPublished": false
+  }
+}

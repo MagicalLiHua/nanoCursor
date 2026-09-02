@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-django-11141",
+  "instanceId": "django__django-11141",
+  "repository": "django/django",
+  "baseCommit": "5d9cf79baf07fc4aed7ad1b06990532a65378155",
+  "image": "logicstar/sweb.eval.x86_64.django_1776_django-11141:latest",
+  "split": "evaluation-core",
+  "hashes": {
+    "issue": "95c5c7b87edc882b63c8f16604daa85b7bd38c3df91ef21f0928135ec36ee185",
+    "prompt": "c4e23ab8203f0fca674811476a5e0b1f2366e0f9c3162c793d03cbb11ab2a260",
+    "goldPatch": "924503df37ffda93f8c76bb1d615f2c5cd8a16f914bd76d63e9072de676514ee",
+    "testPatch": "2368754a38055f10014bbcf18e23e95bbe26b0785de064f4fc561f6c3a03749f",
+    "commands": "d3a2d1530b0e317b0c8dd5074cc2c1efebb3da650b1b031e4a93ed921ace9fef",
+    "taskDefinition": "76c0264bbdd59722773b193dee6038ede18f5d1fafa3211c661ae5a5068bfab9",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

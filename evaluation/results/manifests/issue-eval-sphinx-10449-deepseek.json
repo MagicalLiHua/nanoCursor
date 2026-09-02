@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-sphinx-10449",
+  "instanceId": "sphinx-doc__sphinx-10449",
+  "repository": "sphinx-doc/sphinx",
+  "baseCommit": "36367765fe780f962bba861bf368a765380bbc68",
+  "image": "logicstar/sweb.eval.x86_64.sphinx-doc_1776_sphinx-10449:latest",
+  "split": "evaluation-core",
+  "hashes": {
+    "issue": "bc1d31800b7398b46c931d0805375b60584ce021f7176c3b616156dc7ff32a1a",
+    "prompt": "a8a11e3bfec284aba61d467034d8be3c6f95e1e17abb9e2f1db5bb1b1be19740",
+    "goldPatch": "686d63a8c9b8ee171de780e334fa9ec3a84bbf0d88deb0fa5533cd816282da74",
+    "testPatch": "d91618e097a8fc4fbe5563a018167bb677636de2b3d2d1a5e73912ab06ec68db",
+    "commands": "d5ecc5ddfb2ff6bf6b8d7d2c671c359f630146eb032107c5e96d65a5eeb2ba69",
+    "taskDefinition": "f1edbbc38e38304b6ab237f66a15b09a72939d7bbf967bdde04a97b3e85fcdbc",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

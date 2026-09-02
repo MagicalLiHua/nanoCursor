@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-xarray-3677",
+  "instanceId": "pydata__xarray-3677",
+  "repository": "pydata/xarray",
+  "baseCommit": "ef6e6a7b86f8479b9a1fecf15ad5b88a2326b31e",
+  "image": "logicstar/sweb.eval.x86_64.pydata_1776_xarray-3677:latest",
+  "split": "evaluation-expansion-a",
+  "hashes": {
+    "issue": "4b8a6268c16c6fa330944acb7e6ef5b49928befeb57c6cc0bfdd40f18c714f9a",
+    "prompt": "6e7b3c5b732a57a249db64393307a4ef29ad1a119d09d18c13754c35f2e4d506",
+    "goldPatch": "eb6bc3dcb4a4406f23abc17190cffd828ee58e1948e5621cc75abbd9fae142cd",
+    "testPatch": "378d54dd2ff404fe064e1dff3d69bd6cd2682f33b0e1202c664842b73d3372be",
+    "commands": "6e53a9f2d91282f9ebb5722a5672e79b4c7ed5a1f9b88992bc1e7470ef4a454d",
+    "taskDefinition": "d83f1a478f2213e8732b6685708106b2f7cdcef7db5683d42cbd64b048059263",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

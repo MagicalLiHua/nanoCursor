@@ -1,0 +1,19 @@
+{
+  "repo": "scikit-learn/scikit-learn",
+  "instance_id": "scikit-learn__scikit-learn-13328",
+  "base_commit": "37b0e66c871e8fb032a9c7086b2a1d5419838154",
+  "difficulty": "<15 min fix",
+  "FAIL_TO_PASS": "[\"sklearn/linear_model/tests/test_huber.py::test_huber_bool\"]",
+  "PASS_TO_PASS": "[\"sklearn/linear_model/tests/test_huber.py::test_huber_equals_lr_for_high_epsilon\", \"sklearn/linear_model/tests/test_huber.py::test_huber_max_iter\", \"sklearn/linear_model/tests/test_huber.py::test_huber_gradient\", \"sklearn/linear_model/tests/test_huber.py::test_huber_sample_weights\", \"sklearn/linear_model/tests/test_huber.py::test_huber_sparse\", \"sklearn/linear_model/tests/test_huber.py::test_huber_scaling_invariant\", \"sklearn/linear_model/tests/test_huber.py::test_huber_and_sgd_same_results\", \"sklearn/linear_model/tests/test_huber.py::test_huber_warm_start\", \"sklearn/linear_model/tests/test_huber.py::test_huber_better_r2_score\"]",
+  "created_at": "2019-02-28T12:47:52Z",
+  "version": "0.21",
+  "task_id": "issue-eval-sklearn-13328",
+  "split": "evaluation-expansion-b",
+  "image": "logicstar/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-13328:latest",
+  "source_parquet": "SWE-bench_Verified parquet snapshot",
+  "sha256": {
+    "issue": "625f602b1ea6633ddcfbed3f5064e828335a22e413a7881f66b367bf44b7bd47",
+    "gold_patch": "4d43cadc3e1bd7101beadddb99609e524b44d28394286e7bca67692cd4a14d68",
+    "test_patch": "ea0bc13b412ab4f474800827ddd44eddb8ab926782c7a143c330cb84effeec95"
+  }
+}

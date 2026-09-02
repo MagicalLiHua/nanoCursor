@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-pytest-8399",
+  "instanceId": "pytest-dev__pytest-8399",
+  "repository": "pytest-dev/pytest",
+  "baseCommit": "6e7dc8bac831cd8cf7a53b08efa366bd84f0c0fe",
+  "image": "logicstar/sweb.eval.x86_64.pytest-dev_1776_pytest-8399:latest",
+  "split": "evaluation-expansion-a",
+  "hashes": {
+    "issue": "667676f21779f3a3d854af993004d8e46f9b5f6dde4d7f36803a658f8881c0b9",
+    "prompt": "5bb29c7ed7a7ea9172138caa8815bb7fac2b78e0b361109b1b8124f317355b48",
+    "goldPatch": "fcc0962e001dbc5c6c718a885b0a3369af3b018b942d3574675c51ecdc59eff2",
+    "testPatch": "506cca658cf270e5ef62256ea4261cd6557ed8368317a97d715123486fa1ddd6",
+    "commands": "b3bd8c2abe72b6db62632c014121581fad3b4d7cdbaf7f19b4a5a05e98fe9f3b",
+    "taskDefinition": "697cb0db4541a4aed20b0ccb0601d89bbb4284ac514e9a8f6deffd1c2e929977",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

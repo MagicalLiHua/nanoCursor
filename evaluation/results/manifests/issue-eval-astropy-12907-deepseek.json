@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-astropy-12907",
+  "instanceId": "astropy__astropy-12907",
+  "repository": "astropy/astropy",
+  "baseCommit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+  "image": "logicstar/sweb.eval.x86_64.astropy_1776_astropy-12907:latest",
+  "split": "evaluation-core",
+  "hashes": {
+    "issue": "5b3f9747ba06e1b063280b024b682bccc7a93e7e644b4cc11939c6e1645b54e3",
+    "prompt": "3ce575c2609ccd0f651584758469ee8b8d66f85cb59ef988260e51ba742f2741",
+    "goldPatch": "0f3e44432ed8540e9526edff4f83793948a2f139fc3971b67c30043c1eb7964a",
+    "testPatch": "5ef90b640ffce4590bb61ef2ea0e3256416dddf41b45bf4f2c3610a6e8c53718",
+    "commands": "6898f2a6f8351af3b6219f3d95328dacd9ee024b91bbb57aa84663733b41f3f1",
+    "taskDefinition": "d3ec45238a260fb749cacedef0d953846ca91301669c085fc21a54b44d8bc36a",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

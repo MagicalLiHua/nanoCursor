@@ -1,96 +1,21 @@
-# ==========================================
-# Environment & Secrets
-# ==========================================
-.env
-.env.*
-src/core/.env
-**/.env
-/demo-workspaces/
-/src/nanocursor.db
-
-# ==========================================
-# IDE & Editor
-# ==========================================
+config.yaml
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.artifacts/
+configs/eval.deepseek.yaml
 .idea/
 .vscode/
-**/.idea/
-**/.vscode/
-*.iml
-.DS_Store
+.nanocursor/*
+!.nanocursor/config.yaml.example
+.env
+.env.*
+!.env.example
+evaluation/agent-eval-lab/node_modules/
+evaluation/agent-eval-lab/dist/
 .claude/
-.ruff_cache/
-.mypy_cache/
-/docs
-
-# ==========================================
-# Python
-# ==========================================
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-venv/
-.venv/
-env/
-.env/
-build/
-dist/
-*.egg-info/
-
-# ==========================================
-# Testing
-# ==========================================
-.pytest_cache/
-.coverage
-*.coverage
-htmlcov/
-
-# ==========================================
-# Frontend (node_modules, build)
-# ==========================================
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-frontend/test-results/
-frontend/playwright-report/
-learning-site/node_modules/
-learning-site/dist/
-learning-site/.vite/
-
-# ==========================================
-# nanoCursor Runtime Artifacts
-# (这些是 agent 运行时生成的目录，不应提交)
-# ==========================================
-workspace/
-.workspace/
-.tasks/
-.snapshots/
-.backups/
-.team/
-.worktrees/
-.transcripts/
-.task_outputs/
-skills/
-.nanocursor/
-.nanocursor.db
-*.db
-metrics_history.json
-.nanoCursor
-memory/
-
-# LangGraph checkpointer (旧版兼容)
-.checkpoints/
-
-# 日志
-*.log
-
-# 文档归档
-# 核心 docs 需要进入 GitHub；历史路线和实施记录保留在本地归档即可。
-docs/archive/
-docs/backend-audit-report.md
-
-# 操作系统
-.DS_Store
-Thumbs.db
-audit-results/
+CLAUDE.md

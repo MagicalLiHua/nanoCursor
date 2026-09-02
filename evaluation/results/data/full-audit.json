@@ -1,0 +1,1638 @@
+{
+  "schemaVersion": "nanocursor-n0.1-full-audit-v1",
+  "generatedAt": "2026-08-31T18:47:05.337Z",
+  "candidate": "nanocursor-n0.1",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "candidateHashes": {
+    "candidateUpstreamArchive": "069d49e972c9dd81cdbfe2a527996b19fb0815caa80d895eb71cdeb6ebee2354",
+    "candidateAgentSource": "15075e512d0adc35ddcd25fbbf08c48f4d75f43894ed0df399cbafd70b04d4c4",
+    "candidateClientSource": "f0a59485dd62b3cb107b23cf90d59a5989292ff3a5472fd72961d2960dc36c83",
+    "candidateAdapterSource": "1c668bf1dbfc6bdbcb122723230d3a06405f1a5ab2df9c7500bb3524fedbbd7e",
+    "candidateRunnerSource": "42af1c8cbe6ff8972c653b57dc1897b994f5757226f0566888cdd079867dfbb7",
+    "toolBridgeSource": "dc1493ff6278164e546003d267cb535c8b072428db25b76477c2eb7c5632660c"
+  },
+  "nanoCursorTotals": {
+    "trials": 36,
+    "protocolCompleted": 31,
+    "contentPassed": 32,
+    "turns": 1495,
+    "inputTokens": 1097756,
+    "outputTokens": 663132,
+    "totalTokens": 1760888,
+    "toolCalls": 1946,
+    "wallSeconds": 6499.3,
+    "toolErrors": 97
+  },
+  "piTotals": {
+    "trials": 36,
+    "protocolCompleted": 33,
+    "contentPassed": 33,
+    "turns": 1521,
+    "inputTokens": 1271780,
+    "outputTokens": 654241,
+    "totalTokens": 1926021,
+    "toolCalls": 1982,
+    "wallSeconds": 7341.8
+  },
+  "deltaPercent": {
+    "turns": -1.7,
+    "totalTokens": -8.6,
+    "toolCalls": -1.8,
+    "wallSeconds": -11.5
+  },
+  "statusCounts": {
+    "COMPLETED": 31,
+    "INFRA_BLOCKED": 1,
+    "PARTIAL": 4
+  },
+  "toolErrorCategories": {
+    "protected-test-edit": 24,
+    "inline-python": 48,
+    "directory-delete": 3,
+    "replace-mismatch": 5,
+    "parameter-validation": 4,
+    "command-allowlist": 4,
+    "absolute-path": 2,
+    "project-command-allowlist": 6,
+    "missing-file-read": 1
+  },
+  "badCases": [
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 1,
+      "runId": "issue-eval-django-11141-nanocursor-t1-a1-2ae354f7",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 37,
+      "inputTokens": 34780,
+      "outputTokens": 29315,
+      "toolCalls": 57,
+      "toolErrors": 1,
+      "wallSeconds": 245.4,
+      "changedFiles": [
+        "django/db/migrations/loader.py",
+        "tests/migrations/test_loader_namespace.py"
+      ],
+      "traceEvents": 24491,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 2,
+      "runId": "issue-eval-django-11141-nanocursor-t2-a1-b97e35c7",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 35,
+      "inputTokens": 20527,
+      "outputTokens": 18505,
+      "toolCalls": 53,
+      "toolErrors": 3,
+      "wallSeconds": 163.8,
+      "changedFiles": [
+        "django/db/migrations/loader.py"
+      ],
+      "traceEvents": 14802,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 3,
+      "runId": "issue-eval-django-11141-nanocursor-t3-a1-c05efee3",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 40,
+      "inputTokens": 38612,
+      "outputTokens": 27623,
+      "toolCalls": 56,
+      "toolErrors": 2,
+      "wallSeconds": 230.7,
+      "changedFiles": [
+        "django/db/migrations/loader.py",
+        "tests/migrations/faulty_migrations/namespace_with_migrations/0001_initial.py",
+        "tests/migrations/test_namespace_package.py"
+      ],
+      "traceEvents": 23327,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-pytest-8399",
+      "trial": 2,
+      "runId": "issue-eval-pytest-8399-nanocursor-t2-a1-37902aae",
+      "status": "INFRA_BLOCKED",
+      "termination": "turn-limit",
+      "protocolPassed": false,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 96,
+      "inputTokens": 72027,
+      "outputTokens": 40229,
+      "toolCalls": 135,
+      "toolErrors": 5,
+      "wallSeconds": 375.6,
+      "changedFiles": [
+        "src/_pytest/python.py",
+        "src/_pytest/unittest.py",
+        "changelog/8450.bugfix.rst",
+        "testing/test_unittest_fixture_privacy.py"
+      ],
+      "traceEvents": 26930,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sphinx-10449",
+      "trial": 1,
+      "runId": "issue-eval-sphinx-10449-nanocursor-t1-a1-c8c75aa6",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": false,
+      "regressionPassed": false,
+      "turns": 32,
+      "inputTokens": 35037,
+      "outputTokens": 20531,
+      "toolCalls": 41,
+      "toolErrors": 2,
+      "wallSeconds": 190.2,
+      "changedFiles": [
+        "CHANGES",
+        "sphinx/ext/autodoc/typehints.py"
+      ],
+      "traceEvents": 16401,
+      "traceLastEvent": "run.finished"
+    }
+  ],
+  "byTask": {
+    "issue-eval-astropy-12907": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          39,
+          35,
+          26
+        ],
+        "totalTokens": [
+          40018,
+          34321,
+          23141
+        ],
+        "toolCalls": [
+          48,
+          41,
+          28
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          39,
+          31,
+          23
+        ],
+        "totalTokens": [
+          62481,
+          31967,
+          28158
+        ],
+        "toolCalls": [
+          44,
+          41,
+          29
+        ]
+      }
+    },
+    "issue-eval-astropy-13453": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          54,
+          66,
+          59
+        ],
+        "totalTokens": [
+          57298,
+          70816,
+          61398
+        ],
+        "toolCalls": [
+          62,
+          77,
+          71
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          53,
+          50,
+          53
+        ],
+        "totalTokens": [
+          75165,
+          58232,
+          55530
+        ],
+        "toolCalls": [
+          64,
+          63,
+          58
+        ]
+      }
+    },
+    "issue-eval-django-11133": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          31,
+          30,
+          36
+        ],
+        "totalTokens": [
+          39313,
+          37145,
+          38890
+        ],
+        "toolCalls": [
+          40,
+          39,
+          40
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          53,
+          52,
+          96
+        ],
+        "totalTokens": [
+          44389,
+          63921,
+          56799
+        ],
+        "toolCalls": [
+          68,
+          68,
+          105
+        ]
+      }
+    },
+    "issue-eval-django-11141": {
+      "nanoCursor": {
+        "protocolCompleted": 0,
+        "contentPassed": 0,
+        "statuses": [
+          "PARTIAL",
+          "PARTIAL",
+          "PARTIAL"
+        ],
+        "turns": [
+          37,
+          35,
+          40
+        ],
+        "totalTokens": [
+          64095,
+          39032,
+          66235
+        ],
+        "toolCalls": [
+          57,
+          53,
+          56
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 0,
+        "contentPassed": 0,
+        "statuses": [
+          "PARTIAL",
+          "INFRA_BLOCKED",
+          "PARTIAL"
+        ],
+        "turns": [
+          47,
+          46,
+          62
+        ],
+        "totalTokens": [
+          78612,
+          63531,
+          80282
+        ],
+        "toolCalls": [
+          72,
+          66,
+          91
+        ]
+      }
+    },
+    "issue-eval-matplotlib-23412": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          92,
+          70,
+          86
+        ],
+        "totalTokens": [
+          79729,
+          57397,
+          68377
+        ],
+        "toolCalls": [
+          121,
+          84,
+          120
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          85,
+          54,
+          75
+        ],
+        "totalTokens": [
+          103360,
+          66699,
+          75649
+        ],
+        "toolCalls": [
+          115,
+          72,
+          92
+        ]
+      }
+    },
+    "issue-eval-pytest-8399": {
+      "nanoCursor": {
+        "protocolCompleted": 2,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "INFRA_BLOCKED",
+          "COMPLETED"
+        ],
+        "turns": [
+          51,
+          96,
+          42
+        ],
+        "totalTokens": [
+          61019,
+          112256,
+          58212
+        ],
+        "toolCalls": [
+          69,
+          135,
+          65
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          50,
+          42,
+          45
+        ],
+        "totalTokens": [
+          67133,
+          50811,
+          52691
+        ],
+        "toolCalls": [
+          74,
+          56,
+          63
+        ]
+      }
+    },
+    "issue-eval-requests-1142": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          42,
+          28,
+          36
+        ],
+        "totalTokens": [
+          61942,
+          50298,
+          57231
+        ],
+        "toolCalls": [
+          62,
+          38,
+          50
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          25,
+          18,
+          19
+        ],
+        "totalTokens": [
+          28198,
+          41708,
+          25578
+        ],
+        "toolCalls": [
+          32,
+          25,
+          25
+        ]
+      }
+    },
+    "issue-eval-sklearn-13142": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          16,
+          19,
+          19
+        ],
+        "totalTokens": [
+          20659,
+          16303,
+          23362
+        ],
+        "toolCalls": [
+          22,
+          21,
+          23
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          42,
+          21,
+          24
+        ],
+        "totalTokens": [
+          32827,
+          28669,
+          21967
+        ],
+        "toolCalls": [
+          51,
+          25,
+          30
+        ]
+      }
+    },
+    "issue-eval-sklearn-13328": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          16,
+          24,
+          36
+        ],
+        "totalTokens": [
+          12898,
+          21902,
+          30177
+        ],
+        "toolCalls": [
+          18,
+          32,
+          46
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          16,
+          18,
+          19
+        ],
+        "totalTokens": [
+          20255,
+          17263,
+          18572
+        ],
+        "toolCalls": [
+          20,
+          22,
+          24
+        ]
+      }
+    },
+    "issue-eval-sphinx-10449": {
+      "nanoCursor": {
+        "protocolCompleted": 2,
+        "contentPassed": 2,
+        "statuses": [
+          "PARTIAL",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          32,
+          43,
+          51
+        ],
+        "totalTokens": [
+          55568,
+          71708,
+          72931
+        ],
+        "toolCalls": [
+          41,
+          55,
+          64
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          38,
+          76,
+          52
+        ],
+        "totalTokens": [
+          70524,
+          144653,
+          91749
+        ],
+        "toolCalls": [
+          49,
+          100,
+          70
+        ]
+      }
+    },
+    "issue-eval-sympy-11618": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          48,
+          31,
+          33
+        ],
+        "totalTokens": [
+          72992,
+          38600,
+          37993
+        ],
+        "toolCalls": [
+          58,
+          43,
+          44
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          32,
+          32,
+          35
+        ],
+        "totalTokens": [
+          55565,
+          41320,
+          39607
+        ],
+        "toolCalls": [
+          38,
+          50,
+          45
+        ]
+      }
+    },
+    "issue-eval-xarray-3677": {
+      "nanoCursor": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          27,
+          32,
+          37
+        ],
+        "totalTokens": [
+          31840,
+          36949,
+          38843
+        ],
+        "toolCalls": [
+          34,
+          46,
+          43
+        ]
+      },
+      "pi": {
+        "protocolCompleted": 3,
+        "contentPassed": 3,
+        "statuses": [
+          "COMPLETED",
+          "COMPLETED",
+          "COMPLETED"
+        ],
+        "turns": [
+          31,
+          32,
+          35
+        ],
+        "totalTokens": [
+          56069,
+          37698,
+          38389
+        ],
+        "toolCalls": [
+          46,
+          42,
+          47
+        ]
+      }
+    }
+  },
+  "rows": [
+    {
+      "taskId": "issue-eval-astropy-12907",
+      "trial": 1,
+      "runId": "issue-eval-astropy-12907-nanocursor-t1-a1-fe5787f7",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 39,
+      "inputTokens": 23656,
+      "outputTokens": 16362,
+      "toolCalls": 48,
+      "toolErrors": 2,
+      "wallSeconds": 150.7,
+      "changedFiles": [
+        "astropy/modeling/separable.py",
+        "astropy/modeling/tests/test_separable_nested.py"
+      ],
+      "traceEvents": 10537,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-astropy-12907",
+      "trial": 2,
+      "runId": "issue-eval-astropy-12907-nanocursor-t2-a1-a8fc62dc",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 35,
+      "inputTokens": 21429,
+      "outputTokens": 12892,
+      "toolCalls": 41,
+      "toolErrors": 3,
+      "wallSeconds": 147.1,
+      "changedFiles": [
+        "astropy/modeling/separable.py",
+        "astropy/modeling/tests/test_separable_nested.py",
+        "docs/changes/modeling/12934.bugfix.rst"
+      ],
+      "traceEvents": 8069,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-astropy-12907",
+      "trial": 3,
+      "runId": "issue-eval-astropy-12907-nanocursor-t3-a1-b8afe925",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 26,
+      "inputTokens": 14411,
+      "outputTokens": 8730,
+      "toolCalls": 28,
+      "toolErrors": 2,
+      "wallSeconds": 93.1,
+      "changedFiles": [
+        "astropy/modeling/separable.py",
+        "astropy/modeling/tests/test_separable_regression.py"
+      ],
+      "traceEvents": 5281,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-astropy-13453",
+      "trial": 1,
+      "runId": "issue-eval-astropy-13453-nanocursor-t1-a1-fa191faf",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 54,
+      "inputTokens": 43181,
+      "outputTokens": 14117,
+      "toolCalls": 62,
+      "toolErrors": 2,
+      "wallSeconds": 173.6,
+      "changedFiles": [
+        "astropy/io/ascii/html.py",
+        "astropy/io/ascii/tests/test_html_write_formats.py"
+      ],
+      "traceEvents": 7656,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-astropy-13453",
+      "trial": 2,
+      "runId": "issue-eval-astropy-13453-nanocursor-t2-a1-aec543db",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 66,
+      "inputTokens": 51403,
+      "outputTokens": 19413,
+      "toolCalls": 77,
+      "toolErrors": 3,
+      "wallSeconds": 216.6,
+      "changedFiles": [
+        "astropy/io/ascii/html.py",
+        "astropy/io/ascii/tests/test_html_formats_regression.py"
+      ],
+      "traceEvents": 10606,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-astropy-13453",
+      "trial": 3,
+      "runId": "issue-eval-astropy-13453-nanocursor-t3-a1-488a6b09",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 59,
+      "inputTokens": 45216,
+      "outputTokens": 16182,
+      "toolCalls": 71,
+      "toolErrors": 2,
+      "wallSeconds": 185.4,
+      "changedFiles": [
+        "astropy/io/ascii/html.py",
+        "astropy/io/ascii/tests/test_html_write_formats.py",
+        "docs/changes/io.ascii/13543.bugfix.rst"
+      ],
+      "traceEvents": 8245,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11133",
+      "trial": 1,
+      "runId": "issue-eval-django-11133-nanocursor-t1-a1-ebea41d4",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 31,
+      "inputTokens": 26306,
+      "outputTokens": 13007,
+      "toolCalls": 40,
+      "toolErrors": 1,
+      "wallSeconds": 110.9,
+      "changedFiles": [
+        "django/http/response.py",
+        "tests/httpwrappers/test_memoryview.py"
+      ],
+      "traceEvents": 9813,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11133",
+      "trial": 2,
+      "runId": "issue-eval-django-11133-nanocursor-t2-a1-6ebd3d5b",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 30,
+      "inputTokens": 19935,
+      "outputTokens": 17210,
+      "toolCalls": 39,
+      "toolErrors": 2,
+      "wallSeconds": 138.5,
+      "changedFiles": [
+        "django/http/response.py",
+        "tests/httpwrappers/test_memoryview.py"
+      ],
+      "traceEvents": 13922,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11133",
+      "trial": 3,
+      "runId": "issue-eval-django-11133-nanocursor-t3-a1-d9f0df5d",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 36,
+      "inputTokens": 23916,
+      "outputTokens": 14974,
+      "toolCalls": 40,
+      "toolErrors": 5,
+      "wallSeconds": 126.7,
+      "changedFiles": [
+        "django/http/response.py",
+        "tests/httpwrappers/test_memoryview.py"
+      ],
+      "traceEvents": 11532,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 1,
+      "runId": "issue-eval-django-11141-nanocursor-t1-a1-2ae354f7",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 37,
+      "inputTokens": 34780,
+      "outputTokens": 29315,
+      "toolCalls": 57,
+      "toolErrors": 1,
+      "wallSeconds": 245.4,
+      "changedFiles": [
+        "django/db/migrations/loader.py",
+        "tests/migrations/test_loader_namespace.py"
+      ],
+      "traceEvents": 24491,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 2,
+      "runId": "issue-eval-django-11141-nanocursor-t2-a1-b97e35c7",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 35,
+      "inputTokens": 20527,
+      "outputTokens": 18505,
+      "toolCalls": 53,
+      "toolErrors": 3,
+      "wallSeconds": 163.8,
+      "changedFiles": [
+        "django/db/migrations/loader.py"
+      ],
+      "traceEvents": 14802,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-django-11141",
+      "trial": 3,
+      "runId": "issue-eval-django-11141-nanocursor-t3-a1-c05efee3",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": true,
+      "regressionPassed": false,
+      "turns": 40,
+      "inputTokens": 38612,
+      "outputTokens": 27623,
+      "toolCalls": 56,
+      "toolErrors": 2,
+      "wallSeconds": 230.7,
+      "changedFiles": [
+        "django/db/migrations/loader.py",
+        "tests/migrations/faulty_migrations/namespace_with_migrations/0001_initial.py",
+        "tests/migrations/test_namespace_package.py"
+      ],
+      "traceEvents": 23327,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-matplotlib-23412",
+      "trial": 1,
+      "runId": "issue-eval-matplotlib-23412-nanocursor-t1-a1-689e5a64",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 92,
+      "inputTokens": 54086,
+      "outputTokens": 25643,
+      "toolCalls": 121,
+      "toolErrors": 5,
+      "wallSeconds": 313.3,
+      "changedFiles": [
+        "lib/matplotlib/patches.py",
+        "lib/matplotlib/tests/test_patch_dash_offset.py"
+      ],
+      "traceEvents": 14686,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-matplotlib-23412",
+      "trial": 2,
+      "runId": "issue-eval-matplotlib-23412-nanocursor-t2-a1-3b59ab00",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 70,
+      "inputTokens": 37314,
+      "outputTokens": 20083,
+      "toolCalls": 84,
+      "toolErrors": 5,
+      "wallSeconds": 220.2,
+      "changedFiles": [
+        "lib/matplotlib/patches.py",
+        "lib/matplotlib/tests/test_patch_dash_offset.py"
+      ],
+      "traceEvents": 12300,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-matplotlib-23412",
+      "trial": 3,
+      "runId": "issue-eval-matplotlib-23412-nanocursor-t3-a1-de471e9b",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 86,
+      "inputTokens": 39651,
+      "outputTokens": 28726,
+      "toolCalls": 120,
+      "toolErrors": 5,
+      "wallSeconds": 323.1,
+      "changedFiles": [
+        "lib/matplotlib/patches.py",
+        "doc/users/next_whats_new/patch_dash_offset.rst",
+        "lib/matplotlib/tests/test_patch_dash_offset.py"
+      ],
+      "traceEvents": 15780,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-pytest-8399",
+      "trial": 1,
+      "runId": "issue-eval-pytest-8399-nanocursor-t1-a1-01e09d2f",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 51,
+      "inputTokens": 40079,
+      "outputTokens": 20940,
+      "toolCalls": 69,
+      "toolErrors": 4,
+      "wallSeconds": 222,
+      "changedFiles": [
+        "src/_pytest/unittest.py",
+        "changelog/8083.bugfix.rst",
+        "testing/test_unittest_fixtures_private.py"
+      ],
+      "traceEvents": 15936,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-pytest-8399",
+      "trial": 2,
+      "runId": "issue-eval-pytest-8399-nanocursor-t2-a1-37902aae",
+      "status": "INFRA_BLOCKED",
+      "termination": "turn-limit",
+      "protocolPassed": false,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 96,
+      "inputTokens": 72027,
+      "outputTokens": 40229,
+      "toolCalls": 135,
+      "toolErrors": 5,
+      "wallSeconds": 375.6,
+      "changedFiles": [
+        "src/_pytest/python.py",
+        "src/_pytest/unittest.py",
+        "changelog/8450.bugfix.rst",
+        "testing/test_unittest_fixture_privacy.py"
+      ],
+      "traceEvents": 26930,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-pytest-8399",
+      "trial": 3,
+      "runId": "issue-eval-pytest-8399-nanocursor-t3-a1-fe355cd4",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 42,
+      "inputTokens": 39752,
+      "outputTokens": 18460,
+      "toolCalls": 65,
+      "toolErrors": 2,
+      "wallSeconds": 189.6,
+      "changedFiles": [
+        "src/_pytest/python.py",
+        "src/_pytest/unittest.py",
+        "changelog/8259.bugfix.rst",
+        "testing/test_private_fixtures.py"
+      ],
+      "traceEvents": 12754,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-requests-1142",
+      "trial": 1,
+      "runId": "issue-eval-requests-1142-nanocursor-t1-a1-051ef9b1",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 42,
+      "inputTokens": 34007,
+      "outputTokens": 27935,
+      "toolCalls": 62,
+      "toolErrors": 4,
+      "wallSeconds": 226.9,
+      "changedFiles": [
+        "requests/models.py",
+        "test_content_length.py"
+      ],
+      "traceEvents": 21292,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-requests-1142",
+      "trial": 2,
+      "runId": "issue-eval-requests-1142-nanocursor-t2-a1-b8d9588a",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 28,
+      "inputTokens": 33128,
+      "outputTokens": 17170,
+      "toolCalls": 38,
+      "toolErrors": 1,
+      "wallSeconds": 147.4,
+      "changedFiles": [
+        "requests/models.py",
+        "test_content_length.py"
+      ],
+      "traceEvents": 13647,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-requests-1142",
+      "trial": 3,
+      "runId": "issue-eval-requests-1142-nanocursor-t3-a1-16522636",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 36,
+      "inputTokens": 29743,
+      "outputTokens": 27488,
+      "toolCalls": 50,
+      "toolErrors": 3,
+      "wallSeconds": 228.2,
+      "changedFiles": [
+        "requests/models.py",
+        "test_content_length.py"
+      ],
+      "traceEvents": 22811,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13142",
+      "trial": 1,
+      "runId": "issue-eval-sklearn-13142-nanocursor-t1-a1-377bb239",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 16,
+      "inputTokens": 10710,
+      "outputTokens": 9949,
+      "toolCalls": 22,
+      "toolErrors": 1,
+      "wallSeconds": 88.5,
+      "changedFiles": [
+        "sklearn/mixture/base.py",
+        "sklearn/mixture/tests/test_fit_predict_n_init.py"
+      ],
+      "traceEvents": 7500,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13142",
+      "trial": 2,
+      "runId": "issue-eval-sklearn-13142-nanocursor-t2-a1-40d19e62",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 19,
+      "inputTokens": 9247,
+      "outputTokens": 7056,
+      "toolCalls": 21,
+      "toolErrors": 3,
+      "wallSeconds": 73.8,
+      "changedFiles": [
+        "sklearn/mixture/base.py",
+        "sklearn/mixture/tests/test_fit_predict_n_init.py"
+      ],
+      "traceEvents": 3633,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13142",
+      "trial": 3,
+      "runId": "issue-eval-sklearn-13142-nanocursor-t3-a1-a68fbe28",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 19,
+      "inputTokens": 10105,
+      "outputTokens": 13257,
+      "toolCalls": 23,
+      "toolErrors": 3,
+      "wallSeconds": 152.7,
+      "changedFiles": [
+        "sklearn/mixture/base.py",
+        "sklearn/mixture/tests/test_fit_predict_consistency.py"
+      ],
+      "traceEvents": 10186,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13328",
+      "trial": 1,
+      "runId": "issue-eval-sklearn-13328-nanocursor-t1-a1-c6876bd4",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 16,
+      "inputTokens": 8758,
+      "outputTokens": 4140,
+      "toolCalls": 18,
+      "toolErrors": 2,
+      "wallSeconds": 78.2,
+      "changedFiles": [
+        "sklearn/linear_model/huber.py",
+        "sklearn/linear_model/tests/test_huber_bool.py"
+      ],
+      "traceEvents": 2099,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13328",
+      "trial": 2,
+      "runId": "issue-eval-sklearn-13328-nanocursor-t2-a1-d526acac",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 24,
+      "inputTokens": 15650,
+      "outputTokens": 6252,
+      "toolCalls": 32,
+      "toolErrors": 3,
+      "wallSeconds": 70.8,
+      "changedFiles": [
+        "sklearn/linear_model/huber.py",
+        "sklearn/linear_model/tests/test_huber_bool_input.py"
+      ],
+      "traceEvents": 3182,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sklearn-13328",
+      "trial": 3,
+      "runId": "issue-eval-sklearn-13328-nanocursor-t3-a1-1310dce9",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 36,
+      "inputTokens": 21755,
+      "outputTokens": 8422,
+      "toolCalls": 46,
+      "toolErrors": 2,
+      "wallSeconds": 112,
+      "changedFiles": [
+        "doc/whats_new/v0.21.rst",
+        "sklearn/linear_model/huber.py",
+        "sklearn/linear_model/tests/test_huber_bool.py"
+      ],
+      "traceEvents": 3768,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sphinx-10449",
+      "trial": 1,
+      "runId": "issue-eval-sphinx-10449-nanocursor-t1-a1-c8c75aa6",
+      "status": "PARTIAL",
+      "termination": "completed",
+      "protocolPassed": false,
+      "contentPassed": false,
+      "targetPassed": false,
+      "regressionPassed": false,
+      "turns": 32,
+      "inputTokens": 35037,
+      "outputTokens": 20531,
+      "toolCalls": 41,
+      "toolErrors": 2,
+      "wallSeconds": 190.2,
+      "changedFiles": [
+        "CHANGES",
+        "sphinx/ext/autodoc/typehints.py"
+      ],
+      "traceEvents": 16401,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sphinx-10449",
+      "trial": 2,
+      "runId": "issue-eval-sphinx-10449-nanocursor-t2-a1-4dcb838f",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 43,
+      "inputTokens": 34252,
+      "outputTokens": 37456,
+      "toolCalls": 55,
+      "toolErrors": 2,
+      "wallSeconds": 300.5,
+      "changedFiles": [
+        "sphinx/ext/autodoc/typehints.py",
+        "tests/test_issue_9575.py"
+      ],
+      "traceEvents": 31081,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sphinx-10449",
+      "trial": 3,
+      "runId": "issue-eval-sphinx-10449-nanocursor-t3-a1-b0041ac3",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 51,
+      "inputTokens": 43543,
+      "outputTokens": 29388,
+      "toolCalls": 64,
+      "toolErrors": 3,
+      "wallSeconds": 277.1,
+      "changedFiles": [
+        "CHANGES",
+        "sphinx/ext/autodoc/typehints.py",
+        "tests/test_ext_autodoc_typehints_class.py"
+      ],
+      "traceEvents": 22086,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sympy-11618",
+      "trial": 1,
+      "runId": "issue-eval-sympy-11618-nanocursor-t1-a1-fc9aa9fd",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 48,
+      "inputTokens": 38277,
+      "outputTokens": 34715,
+      "toolCalls": 58,
+      "toolErrors": 2,
+      "wallSeconds": 306.8,
+      "changedFiles": [
+        "sympy/geometry/point.py",
+        "sympy/geometry/tests/test_point_distance_issue.py"
+      ],
+      "traceEvents": 29215,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sympy-11618",
+      "trial": 2,
+      "runId": "issue-eval-sympy-11618-nanocursor-t2-a1-922fb4cd",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 31,
+      "inputTokens": 24528,
+      "outputTokens": 14072,
+      "toolCalls": 43,
+      "toolErrors": 2,
+      "wallSeconds": 124.9,
+      "changedFiles": [
+        "sympy/geometry/point.py",
+        "sympy/geometry/tests/test_point_distance_dimensions.py"
+      ],
+      "traceEvents": 10320,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-sympy-11618",
+      "trial": 3,
+      "runId": "issue-eval-sympy-11618-nanocursor-t3-a1-03bff72a",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 33,
+      "inputTokens": 26097,
+      "outputTokens": 11896,
+      "toolCalls": 44,
+      "toolErrors": 2,
+      "wallSeconds": 119.3,
+      "changedFiles": [
+        "sympy/geometry/point.py",
+        "sympy/geometry/tests/test_issue_point_distance.py"
+      ],
+      "traceEvents": 8170,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-xarray-3677",
+      "trial": 1,
+      "runId": "issue-eval-xarray-3677-nanocursor-t1-a1-8ce88cdf",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 27,
+      "inputTokens": 23355,
+      "outputTokens": 8485,
+      "toolCalls": 34,
+      "toolErrors": 2,
+      "wallSeconds": 109.1,
+      "changedFiles": [
+        "xarray/core/merge.py",
+        "xarray/tests/test_merge_dataarray_method.py"
+      ],
+      "traceEvents": 5190,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-xarray-3677",
+      "trial": 2,
+      "runId": "issue-eval-xarray-3677-nanocursor-t2-a1-f72e048e",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 32,
+      "inputTokens": 25180,
+      "outputTokens": 11769,
+      "toolCalls": 46,
+      "toolErrors": 4,
+      "wallSeconds": 129.8,
+      "changedFiles": [
+        "xarray/core/merge.py",
+        "xarray/tests/test_dataset_merge_dataarray.py"
+      ],
+      "traceEvents": 7169,
+      "traceLastEvent": "run.finished"
+    },
+    {
+      "taskId": "issue-eval-xarray-3677",
+      "trial": 3,
+      "runId": "issue-eval-xarray-3677-nanocursor-t3-a1-f148dc55",
+      "status": "COMPLETED",
+      "termination": "completed",
+      "protocolPassed": true,
+      "contentPassed": true,
+      "targetPassed": true,
+      "regressionPassed": true,
+      "turns": 37,
+      "inputTokens": 28103,
+      "outputTokens": 10740,
+      "toolCalls": 43,
+      "toolErrors": 2,
+      "wallSeconds": 136.8,
+      "changedFiles": [
+        "xarray/core/merge.py",
+        "xarray/tests/test_merge_method_dataarray.py"
+      ],
+      "traceEvents": 6173,
+      "traceLastEvent": "run.finished"
+    }
+  ],
+  "audit": {
+    "formalResults": 36,
+    "expectedResults": 36,
+    "allTaskTrialsUnique": true,
+    "formalSummaryFiles": 36,
+    "formalTraceFiles": 36,
+    "expansionSmokeFiles": 8,
+    "expansionPreflightFiles": 8,
+    "expansionLogFiles": 24,
+    "frozenManifestFiles": 12,
+    "allFoundationalGradeChecksPassed": true,
+    "noCommandTimeouts": true,
+    "summariesMatched": true,
+    "tracesMatchedAndParseable": true,
+    "manifestsMatched": true,
+    "errors": []
+  }
+}

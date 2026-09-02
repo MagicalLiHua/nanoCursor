@@ -1,0 +1,38 @@
+{
+  "schema_version": "nanocursor-public-results-v1",
+  "harnesses": {
+    "nanoCursor": {
+      "runs": 36,
+      "content_passed": 32,
+      "protocol_completed": 31,
+      "status_counts": {
+        "COMPLETED": 31,
+        "INFRA_BLOCKED": 1,
+        "PARTIAL": 4
+      },
+      "turns": 1495,
+      "total_tokens": 1760888,
+      "tool_calls": 1946,
+      "wall_seconds": 6499.2
+    },
+    "Pi": {
+      "runs": 36,
+      "content_passed": 33,
+      "protocol_completed": 33,
+      "status_counts": {
+        "COMPLETED": 33,
+        "INFRA_BLOCKED": 1,
+        "PARTIAL": 2
+      },
+      "turns": 1521,
+      "total_tokens": 1926021,
+      "tool_calls": 1982,
+      "wall_seconds": 7341.7
+    }
+  },
+  "nominal_functional_agreement": {
+    "count": 35,
+    "total": 36,
+    "percent": 97.2
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-astropy-13453",
+  "instanceId": "astropy__astropy-13453",
+  "repository": "astropy/astropy",
+  "baseCommit": "19cc80471739bcb67b7e8099246b391c355023ee",
+  "image": "logicstar/sweb.eval.x86_64.astropy_1776_astropy-13453:latest",
+  "split": "evaluation-expansion-b",
+  "hashes": {
+    "issue": "205fd71bbfd7ed745bac1d53b800b3594f186ac3ad2f48e1a1c9fe3ef112a122",
+    "prompt": "f1d71cd884fa5d7799dc8394e8faafc94c120b62d41d56dc1175067f19865b0e",
+    "goldPatch": "7f579408e4ad94b129886283f9c6df7d27d3965e2aaaa88141045515dd4710d9",
+    "testPatch": "be7129ea12a3abcbf2b09882ef29e32376c84c7b2e94a08664df0e87a3b88597",
+    "commands": "02e702589a26c132685d7ed648f49cb6d81a553de6734d69a45d621dea08fc6e",
+    "taskDefinition": "d37209fd6d033cc60282050f858a352dc4661994a8b80518fcdb99f6e49f8836",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}

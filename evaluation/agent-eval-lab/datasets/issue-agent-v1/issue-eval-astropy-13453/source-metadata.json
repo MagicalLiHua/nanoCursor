@@ -1,0 +1,19 @@
+{
+  "repo": "astropy/astropy",
+  "instance_id": "astropy__astropy-13453",
+  "base_commit": "19cc80471739bcb67b7e8099246b391c355023ee",
+  "difficulty": "15 min - 1 hour",
+  "FAIL_TO_PASS": "[\"astropy/io/ascii/tests/test_html.py::test_write_table_formatted_columns\"]",
+  "PASS_TO_PASS": "[\"astropy/io/ascii/tests/test_html.py::test_listwriter\", \"astropy/io/ascii/tests/test_html.py::test_htmlinputter_no_bs4\", \"astropy/io/ascii/tests/test_html.py::test_multicolumn_write\", \"astropy/io/ascii/tests/test_html.py::test_write_no_multicols\", \"astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values\", \"astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values_optional_columns\", \"astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values_masked\", \"astropy/io/ascii/tests/test_html.py::test_multicolumn_table_html_fill_values\", \"astropy/io/ascii/tests/test_html.py::test_multi_column_write_table_html_fill_values_masked\"]",
+  "created_at": "2022-07-14T10:04:40Z",
+  "version": "5.0",
+  "task_id": "issue-eval-astropy-13453",
+  "split": "evaluation-expansion-b",
+  "image": "logicstar/sweb.eval.x86_64.astropy_1776_astropy-13453:latest",
+  "source_parquet": "SWE-bench_Verified parquet snapshot",
+  "sha256": {
+    "issue": "c95de552c4c269b07ca57ce63f0cceed542ce222c47efae567bbc6c69b58b477",
+    "gold_patch": "7f579408e4ad94b129886283f9c6df7d27d3965e2aaaa88141045515dd4710d9",
+    "test_patch": "be7129ea12a3abcbf2b09882ef29e32376c84c7b2e94a08664df0e87a3b88597"
+  }
+}

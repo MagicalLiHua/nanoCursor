@@ -1,0 +1,18 @@
+providers:
+  - name: deepseek-agent-eval
+    protocol: openai-compat
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    thinking: false
+    context_window: 1000000
+    max_output_tokens: 32768
+
+# The evaluation entrypoint does not load MCP, hooks, skills, memory, teams, or
+# NanoCursor's native filesystem/shell tools. The fields below are kept explicit so
+# this file cannot accidentally enable them when reused elsewhere.
+permission_mode: default
+mcp_servers: []
+hooks: []
+enable_fork: false
+enable_verification_agent: false
+enable_coordinator_mode: false

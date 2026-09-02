@@ -1,9 +1,0 @@
-[project]
-name = "tiny-python-pkg"
-version = "0.1.0"
-description = "Tiny fixture for nanoCursor real task smoke checks."
-requires-python = ">=3.10"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-

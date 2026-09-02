@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "issue-agent-eval-v1.1-model-comparison",
+  "taskId": "issue-eval-matplotlib-23412",
+  "instanceId": "matplotlib__matplotlib-23412",
+  "repository": "matplotlib/matplotlib",
+  "baseCommit": "f06c2c3abdaf4b90285ce5ca7fedbb8ace715911",
+  "image": "logicstar/sweb.eval.x86_64.matplotlib_1776_matplotlib-23412:latest",
+  "split": "evaluation-expansion-a",
+  "hashes": {
+    "issue": "6bf634cec5a7a68c9e94ede6b0d233575ba9968a2ca92bc816ee92d2a6af66e5",
+    "prompt": "26b6e7bbd0db5b0a38e2ae2441770d9fb73eb61fbd638f5920e31057fb2da1de",
+    "goldPatch": "3352ca35f5f8e588f75b3a826f7e4f6f858fdad6abc7f6f74618d38f4ebdf51b",
+    "testPatch": "ce66c257f0b0a1493b8aec1ebd595deb57a38a1b4ddbdc92d40d34c05b2140eb",
+    "commands": "8338c493477054ca33db267ee38fc5e86271b885cf31f48c2e033c43b132dba8",
+    "taskDefinition": "650e9a9e0b5003ec85a0ac01d6d7ad2875bcb4229efacad5d65f17d72d347ac5",
+    "systemPrompt": "bfb2a96c90899afa8d9f191c89a798009bb2c1576c41180422a88957b2673028",
+    "issueToolsSource": "71e9b6bea14725aea1ebdb0d3bfd163740329af7ad8b2096da805469175db063",
+    "dockerSandboxSource": "75f64be1dededf97cc69fdabf25c6d6a45207431fc1b3a39ddef085faf30809a",
+    "issueRunnerSource": "61534698797519a9e04387b950d5a1a6f8ab9b950677aac64a3ae6ae0018a495",
+    "issueProtocolSource": "79a108fd67ea3a32ee61d692b3fb112b117a3f267ccab908d72377ed5fed0658",
+    "modelRuntimeSource": "1eb31cac4a5bb29e7e055eca4968161c2ac8e76488d99551057d72246177cb72",
+    "modelConfigSource": "33ed0b5571c2c70ab5bfb24d683c1c6423daf95e13858ba54489e8c3b93523a7"
+  },
+  "experiment": {
+    "maxTurns": 96,
+    "maxWallTimeMs": 1200000,
+    "commandTimeoutMs": 180000,
+    "containerCpus": 2,
+    "containerMemoryMiB": 4096,
+    "containerPidsLimit": 512,
+    "containerNetwork": "none",
+    "toolExecution": "sequential",
+    "modelProvider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "modelApi": "openai-completions",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "modelContextWindow": 1000000,
+    "modelMaxOutputTokens": 32768
+  }
+}
