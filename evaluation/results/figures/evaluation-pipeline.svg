@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="360" viewBox="0 0 1180 360">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+.title { font-size: 24px; font-weight: 700; } .subtitle { font-size: 13px; fill: #737373; }
+.label { font-size: 13px; } .small { font-size: 11px; fill: #737373; } .value { font-size: 12px; font-weight: 650; }
+.axis { stroke: #cbd5e1; stroke-width: 1; } .grid { stroke: #e2e8f0; stroke-width: 1; }
+</style>
+<text x="45" y="42" class="title">Controlled evaluation pipeline</text>
+<text x="45" y="66" class="subtitle">The harness changes; task assets, model, budget, sandbox and grader remain fixed.</text>
+<rect x="45" y="120" width="185" height="125" rx="10" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.5"/>
+<rect x="45" y="120" width="185" height="7" rx="4" fill="#60a5fa"/>
+<text x="137.5" y="153" text-anchor="middle" class="value">Frozen task</text>
+<text x="137.5" y="183" text-anchor="middle" class="small">issue + base commit</text>
+<text x="137.5" y="207" text-anchor="middle" class="small">tests + hashes</text>
+<line x1="230" y1="182" x2="263" y2="182" stroke="#2563eb" stroke-width="2"/>
+<path d="M 257 176 L 265 182 L 257 188" fill="none" stroke="#2563eb" stroke-width="2"/>
+<rect x="270" y="120" width="185" height="125" rx="10" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<rect x="270" y="120" width="185" height="7" rx="4" fill="#818cf8"/>
+<text x="362.5" y="153" text-anchor="middle" class="value">Harness adapter</text>
+<text x="362.5" y="183" text-anchor="middle" class="small">nanoCursor / Pi</text>
+<text x="362.5" y="207" text-anchor="middle" class="small">same prompt &amp; budget</text>
+<line x1="455" y1="182" x2="488" y2="182" stroke="#2563eb" stroke-width="2"/>
+<path d="M 482 176 L 490 182 L 482 188" fill="none" stroke="#2563eb" stroke-width="2"/>
+<rect x="495" y="120" width="185" height="125" rx="10" fill="#ecfeff" stroke="#22d3ee" stroke-width="1.5"/>
+<rect x="495" y="120" width="185" height="7" rx="4" fill="#22d3ee"/>
+<text x="587.5" y="153" text-anchor="middle" class="value">Docker sandbox</text>
+<text x="587.5" y="183" text-anchor="middle" class="small">2 CPU · 4 GiB</text>
+<text x="587.5" y="207" text-anchor="middle" class="small">network disabled</text>
+<line x1="680" y1="182" x2="713" y2="182" stroke="#2563eb" stroke-width="2"/>
+<path d="M 707 176 L 715 182 L 707 188" fill="none" stroke="#2563eb" stroke-width="2"/>
+<rect x="720" y="120" width="185" height="125" rx="10" fill="#f0fdf4" stroke="#4ade80" stroke-width="1.5"/>
+<rect x="720" y="120" width="185" height="7" rx="4" fill="#4ade80"/>
+<text x="812.5" y="153" text-anchor="middle" class="value">Deterministic grader</text>
+<text x="812.5" y="183" text-anchor="middle" class="small">target + regression</text>
+<text x="812.5" y="207" text-anchor="middle" class="small">protected-file checks</text>
+<line x1="905" y1="182" x2="938" y2="182" stroke="#2563eb" stroke-width="2"/>
+<path d="M 932 176 L 940 182 L 932 188" fill="none" stroke="#2563eb" stroke-width="2"/>
+<rect x="945" y="120" width="185" height="125" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5"/>
+<rect x="945" y="120" width="185" height="7" rx="4" fill="#fb923c"/>
+<text x="1037.5" y="153" text-anchor="middle" class="value">Run artifacts</text>
+<text x="1037.5" y="183" text-anchor="middle" class="small">status + metrics</text>
+<text x="1037.5" y="207" text-anchor="middle" class="small">trace + attribution</text>
+<text x="45" y="304" class="label">2 harnesses × 12 tasks × 3 trials = 72 recorded runs</text>
+<text x="45" y="330" class="small">Two result layers are retained: code acceptance and Agent protocol completion.</text></svg>

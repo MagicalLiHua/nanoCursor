@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="540" viewBox="0 0 720 540">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+.title { font-size: 24px; font-weight: 700; } .subtitle { font-size: 13px; fill: #737373; }
+.label { font-size: 13px; } .small { font-size: 11px; fill: #737373; } .value { font-size: 12px; font-weight: 650; }
+.axis { stroke: #cbd5e1; stroke-width: 1; } .grid { stroke: #e2e8f0; stroke-width: 1; }
+</style>
+<text x="45" y="42" class="title">Nominal functional agreement</text>
+<text x="45" y="66" class="subtitle">Same task and trial index; descriptive pairing, not shared randomness.</text>
+<text x="355" y="100" text-anchor="middle" class="value">Pi result</text>
+<text x="82" y="255" text-anchor="middle" transform="rotate(-90 82 255)" class="value">nanoCursor result</text>
+<text x="287.5" y="108" text-anchor="middle" class="label">Fail</text>
+<text x="422.5" y="108" text-anchor="middle" class="label">Pass</text>
+<text x="202" y="192.5" text-anchor="end" class="label">Pass</text>
+<rect x="220" y="120" width="131" height="131" rx="8" fill="#7c3aed"/>
+<text x="285.5" y="195.5" text-anchor="middle" style="font-size:28px;font-weight:700;fill:#ffffff">0</text>
+<rect x="355" y="120" width="131" height="131" rx="8" fill="#16a34a"/>
+<text x="420.5" y="195.5" text-anchor="middle" style="font-size:28px;font-weight:700;fill:#ffffff">32</text>
+<text x="202" y="327.5" text-anchor="end" class="label">Fail</text>
+<rect x="220" y="255" width="131" height="131" rx="8" fill="#475569"/>
+<text x="285.5" y="330.5" text-anchor="middle" style="font-size:28px;font-weight:700;fill:#ffffff">3</text>
+<rect x="355" y="255" width="131" height="131" rx="8" fill="#f59e0b"/>
+<text x="420.5" y="330.5" text-anchor="middle" style="font-size:28px;font-weight:700;fill:#0f172a">1</text>
+<text x="220" y="435" class="label">Agreement: 35/36 (97.2%)</text>
+<text x="220" y="461" class="small">32 both pass · 3 both fail · 1 Pi-only pass · 0 nanoCursor-only pass</text></svg>

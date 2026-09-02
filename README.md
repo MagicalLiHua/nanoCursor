@@ -1,15 +1,40 @@
 # nanoCursor
 
-nanoCursor 是一个 Python 终端 Coding Agent，也是一套可以在真实代码仓库任务上验证 Agent 行为的实验项目。仓库包含 Agent 本体、确定性验收工具 AgentEval，以及经过脱敏的逐次实验数据、分析报告和可复算图表。
+nanoCursor 是一个用 Python 实现的终端 Coding Agent。它能读取和修改仓库、执行命令、调用子 Agent，并在长任务中维护上下文和会话状态。项目同时包含 AgentEval：一套用于冻结真实代码任务、隔离运行环境、记录执行过程并自动验收补丁的评测工具。
 
-这个版本关注两个问题：
+这个仓库不是只展示一次成功 Demo。为了判断 Agent 到底完成了任务，项目把“运行 Agent”和“验收结果”拆开：Agent 在隔离容器里工作，外部 grader 再检查目标测试、回归测试和受保护文件。实验保留每次运行的通过状态、Turns、Token、工具调用和耗时，用来分析同一个模型为什么会走出不同的执行路径。
 
-- Coding Agent 能否完成真实仓库中的缺陷修复任务；
-- 在模型、任务、预算和验收规则一致时，Agent harness 会如何影响执行路径与最终结果。
+## 为什么做这个项目
 
-## 项目结果
+Coding Agent 的进程结束，并不能说明代码已经修好；只看最终回答，也无法区分模型问题、Agent 编排问题、环境问题和判分问题。nanoCursor 因此围绕三个具体问题展开：
 
-我们从 SWE-bench 任务中选取 12 个 Python 真实仓库 Issue，覆盖 9 个开源项目。nanoCursor 与 Pi 参考 harness 均使用同一 DeepSeek 模型、同一任务描述、96 turn 上限、20 分钟墙钟预算、相同容器限制和确定性 grader；每题分别运行 3 次，共形成 72 次对照记录。
+1. Agent 能不能在真实仓库 Issue 上完成代码修改，而不是只解独立代码题；
+2. 模型和任务不变时，不同 harness 是否会明显改变功能结果与执行成本；
+3. 失败发生后，能不能根据 grader、运行指标和轨迹把原因定位到任务理解、模型行为、Agent 编排或评测器。
+
+## 项目由什么组成
+
+| 模块 | 作用 | 主要实现 |
+|---|---|---|
+| nanoCursor Agent | 完成仓库检索、修改、执行与多轮推理 | Python、流式模型接口、工具循环、上下文压缩、Hook、权限与会话恢复 |
+| 评测适配层 | 让 nanoCursor 和参考 harness 接受一致的任务与工具约束 | 统一 system prompt、预算、工具合同、事件字段和终止状态 |
+| AgentEval | 组织任务并在 Agent 外部判定代码是否通过 | TypeScript、冻结 manifest、Docker 沙箱、目标/回归测试、轨迹与结果审计 |
+| 分析工具 | 从运行产物生成可核验的统计结果 | 72 条脱敏记录、JSON 汇总、Bad Case 归因和标准库 SVG 绘图脚本 |
+
+![受控评测流程](evaluation/results/figures/evaluation-pipeline.svg)
+
+## 实验怎么做
+
+从 SWE-bench 中选取 12 个 Python 真实仓库 Issue，覆盖 9 个开源项目。nanoCursor 与 Pi 参考 harness 使用同一 DeepSeek 模型、同一任务描述、96 turn 上限、20 分钟墙钟预算、相同容器资源和同一套确定性 grader。每题、每套 harness 各运行 3 次，共记录 72 次运行。
+
+评测保留两个结果口径：
+
+- `content_passed`：代码通过目标测试、回归测试及保护检查；
+- `protocol_completed`：Agent 在预算内正常收尾并产出最终结果。
+
+二者不能混为一谈：其中一次 nanoCursor 运行已经通过全部代码验收，但在第 96 turn 触顶，没有生成最终回答。如果只看运行状态，它会被误判成代码修复失败。
+
+## 主要结果
 
 | 指标 | nanoCursor | Pi 参考组 |
 |---|---:|---:|
@@ -23,7 +48,19 @@ nanoCursor 是一个 Python 终端 Coding Agent，也是一套可以在真实代
 
 ![逐任务通过次数](evaluation/results/figures/pass-rate-by-task.svg)
 
-详细证据见 [实验结果与复算说明](evaluation/results/README.md) 和 [Bad Case 归因报告](evaluation/results/CAUSAL_ANALYSIS.md)。
+## 从 72 次运行中看到了什么
+
+- **总体通过率接近，但运行路径并不相同。** nanoCursor 与 Pi 的功能结果在 35/36 个名义配对上相同，逐任务 Token 差异却从 `-34.8%` 到 `+77.5%`。只比较最终通过率会漏掉执行过程的差别。
+- **同题重复运行仍有明显波动。** 例如 nanoCursor 在 sklearn `13328` 的三次 Token 最大值是最小值的 `2.34` 倍；Pi 在 astropy `12907` 上为 `2.22` 倍。单跑一次不足以代表稳定成本。
+- **双方共同失败比单边失败更值得检查任务语义。** Django `11141` 在 nanoCursor、Pi 以及额外模型对照中都遗漏同一个空 namespace 边界，共 9 次出现相同模式；证据不支持把它简单归为某个 harness 的故障。
+- **成本总量不能直接写成效率优势。** nanoCursor 总 Token 少 `8.6%`、总耗时少 `11.5%`，但逐题并非同方向，因此这里只报告当前样本的描述性统计。
+- **功能结果和协议结果必须分开。** pytest 的一次运行完成了正确补丁却耗尽 turn budget，这暴露的是收尾与预算管理问题，不是代码能力失败。
+
+![逐任务执行曲线](evaluation/results/figures/task-metric-profiles.svg)
+
+![36 次运行 Token 折线](evaluation/results/figures/trial-token-lines.svg)
+
+完整的 12 张图表、逐次数据和复算方法见 [实验结果与图表](evaluation/results/README.md)，具体失败链见 [Bad Case 归因报告](evaluation/results/CAUSAL_ANALYSIS.md)。
 
 ## Agent 能力
 

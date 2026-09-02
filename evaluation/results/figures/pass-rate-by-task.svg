@@ -1,9 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1180" height="620" viewBox="0 0 1180 620">
 <rect width="100%" height="100%" fill="#ffffff"/>
 <style>
-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #171717; }
-.title { font-size: 24px; font-weight: 700; } .label { font-size: 13px; } .value { font-size: 12px; font-weight: 650; }
-.axis { stroke: #d4d4d4; stroke-width: 1; } .grid { stroke: #ececec; stroke-width: 1; }
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+.title { font-size: 24px; font-weight: 700; } .subtitle { font-size: 13px; fill: #737373; }
+.label { font-size: 13px; } .small { font-size: 11px; fill: #737373; } .value { font-size: 12px; font-weight: 650; }
+.axis { stroke: #cbd5e1; stroke-width: 1; } .grid { stroke: #e2e8f0; stroke-width: 1; }
 </style>
 <text x="70" y="42" class="title">Functional passes by task (3 trials each)</text>
 <line x1="70" y1="480.0" x2="1110" y2="480.0" class="grid"/>
@@ -14,65 +15,65 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-s
 <text x="48" y="218.33333333333331" class="label">2</text>
 <line x1="70" y1="80.0" x2="1110" y2="80.0" class="grid"/>
 <text x="48" y="85.0" class="label">3</text>
-<rect x="86" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="86" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="97" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="113" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="113" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="124" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="110" y="502" transform="rotate(45 110 502)" class="label">astropy-12907</text>
-<rect x="170" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="170" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="181" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="197" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="197" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="208" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="194" y="502" transform="rotate(45 194 502)" class="label">astropy-13453</text>
-<rect x="254" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="254" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="265" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="281" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="281" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="292" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="278" y="502" transform="rotate(45 278 502)" class="label">django-11133</text>
-<rect x="338" y="480.0" width="22" height="0.0" rx="3" fill="#171717"/>
+<rect x="338" y="480.0" width="22" height="0.0" rx="3" fill="#2563eb"/>
 <text x="349" y="473.0" text-anchor="middle" class="value">0</text>
-<rect x="365" y="480.0" width="22" height="0.0" rx="3" fill="#a3a3a3"/>
+<rect x="365" y="480.0" width="22" height="0.0" rx="3" fill="#f97316"/>
 <text x="376" y="473.0" text-anchor="middle" class="value">0</text>
 <text x="362" y="502" transform="rotate(45 362 502)" class="label">django-11141</text>
-<rect x="422" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="422" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="433" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="449" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="449" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="460" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="446" y="502" transform="rotate(45 446 502)" class="label">matplotlib-23412</text>
-<rect x="506" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="506" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="517" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="533" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="533" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="544" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="530" y="502" transform="rotate(45 530 502)" class="label">pytest-8399</text>
-<rect x="590" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="590" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="601" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="617" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="617" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="628" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="614" y="502" transform="rotate(45 614 502)" class="label">requests-1142</text>
-<rect x="674" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="674" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="685" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="701" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="701" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="712" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="698" y="502" transform="rotate(45 698 502)" class="label">sklearn-13142</text>
-<rect x="758" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="758" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="769" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="785" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="785" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="796" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="782" y="502" transform="rotate(45 782 502)" class="label">sklearn-13328</text>
-<rect x="842" y="213.33333333333331" width="22" height="266.6666666666667" rx="3" fill="#171717"/>
+<rect x="842" y="213.33333333333331" width="22" height="266.6666666666667" rx="3" fill="#2563eb"/>
 <text x="853" y="206.33333333333331" text-anchor="middle" class="value">2</text>
-<rect x="869" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="869" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="880" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="866" y="502" transform="rotate(45 866 502)" class="label">sphinx-10449</text>
-<rect x="926" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="926" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="937" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="953" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="953" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="964" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="950" y="502" transform="rotate(45 950 502)" class="label">sympy-11618</text>
-<rect x="1010" y="80.0" width="22" height="400.0" rx="3" fill="#171717"/>
+<rect x="1010" y="80.0" width="22" height="400.0" rx="3" fill="#2563eb"/>
 <text x="1021" y="73.0" text-anchor="middle" class="value">3</text>
-<rect x="1037" y="80.0" width="22" height="400.0" rx="3" fill="#a3a3a3"/>
+<rect x="1037" y="80.0" width="22" height="400.0" rx="3" fill="#f97316"/>
 <text x="1048" y="73.0" text-anchor="middle" class="value">3</text>
 <text x="1034" y="502" transform="rotate(45 1034 502)" class="label">xarray-3677</text>
-<rect x="850" y="30" width="13" height="13" rx="2" fill="#171717"/><text x="870" y="42" class="label">nanoCursor</text>
-<rect x="960" y="30" width="13" height="13" rx="2" fill="#a3a3a3"/><text x="980" y="42" class="label">Pi reference</text></svg>
+<rect x="850" y="30" width="13" height="13" rx="2" fill="#2563eb"/><text x="870" y="42" class="label">nanoCursor</text>
+<rect x="960" y="30" width="13" height="13" rx="2" fill="#f97316"/><text x="980" y="42" class="label">Pi reference</text></svg>

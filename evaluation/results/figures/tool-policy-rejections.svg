@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="500" viewBox="0 0 940 500">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+.title { font-size: 24px; font-weight: 700; } .subtitle { font-size: 13px; fill: #737373; }
+.label { font-size: 13px; } .small { font-size: 11px; fill: #737373; } .value { font-size: 12px; font-weight: 650; }
+.axis { stroke: #cbd5e1; stroke-width: 1; } .grid { stroke: #e2e8f0; stroke-width: 1; }
+</style>
+<text x="45" y="42" class="title">Comparable tool-policy rejections</text>
+<text x="45" y="66" class="subtitle">Only categories encoded consistently by both adapters are compared.</text>
+<text x="190" y="137" text-anchor="end" class="label">inline Python</text>
+<rect x="210" y="115" width="536.4" height="21" rx="3" fill="#2563eb"/>
+<text x="754.4" y="130" class="value">48</text>
+<rect x="210" y="144" width="402.3" height="21" rx="3" fill="#f97316"/>
+<text x="620.3" y="159" class="value">36</text>
+<text x="190" y="219" text-anchor="end" class="label">protected test edit</text>
+<rect x="210" y="197" width="268.2" height="21" rx="3" fill="#2563eb"/>
+<text x="486.2" y="212" class="value">24</text>
+<rect x="210" y="226" width="223.5" height="21" rx="3" fill="#f97316"/>
+<text x="441.5" y="241" class="value">20</text>
+<text x="190" y="301" text-anchor="end" class="label">command allowlist</text>
+<rect x="210" y="279" width="44.7" height="21" rx="3" fill="#2563eb"/>
+<text x="262.7" y="294" class="value">4</text>
+<rect x="210" y="308" width="100.6" height="21" rx="3" fill="#f97316"/>
+<text x="318.6" y="323" class="value">9</text>
+<text x="190" y="383" text-anchor="end" class="label">project command allowlist</text>
+<rect x="210" y="361" width="67.0" height="21" rx="3" fill="#2563eb"/>
+<text x="285.0" y="376" class="value">6</text>
+<rect x="210" y="390" width="78.2" height="21" rx="3" fill="#f97316"/>
+<text x="296.2" y="405" class="value">7</text>
+<text x="210" y="464" class="small">Comparable rejection rate: nanoCursor 4.21% · Pi 3.63%</text></svg>

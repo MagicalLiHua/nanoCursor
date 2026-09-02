@@ -1,5 +1,5 @@
 {
-  "schema_version": "nanocursor-public-results-v1",
+  "schema_version": "nanocursor-public-results-v2",
   "harnesses": {
     "nanoCursor": {
       "runs": 36,
@@ -13,7 +13,37 @@
       "turns": 1495,
       "total_tokens": 1760888,
       "tool_calls": 1946,
-      "wall_seconds": 6499.2
+      "wall_seconds": 6499.2,
+      "distribution": {
+        "turns": {
+          "mean": 41.5,
+          "median": 36.0,
+          "standard_deviation": 19.8,
+          "minimum": 16.0,
+          "maximum": 96.0
+        },
+        "total_tokens": {
+          "mean": 48913.6,
+          "median": 45158.0,
+          "standard_deviation": 21302.3,
+          "minimum": 12898.0,
+          "maximum": 112256.0
+        },
+        "tool_calls": {
+          "mean": 54.1,
+          "median": 47.0,
+          "standard_deviation": 26.9,
+          "minimum": 18.0,
+          "maximum": 135.0
+        },
+        "wall_seconds": {
+          "mean": 180.5,
+          "median": 158.2,
+          "standard_deviation": 78.6,
+          "minimum": 70.8,
+          "maximum": 375.6
+        }
+      }
     },
     "Pi": {
       "runs": 36,
@@ -27,12 +57,260 @@
       "turns": 1521,
       "total_tokens": 1926021,
       "tool_calls": 1982,
-      "wall_seconds": 7341.7
+      "wall_seconds": 7341.7,
+      "distribution": {
+        "turns": {
+          "mean": 42.2,
+          "median": 40.5,
+          "standard_deviation": 19.5,
+          "minimum": 16.0,
+          "maximum": 96.0
+        },
+        "total_tokens": {
+          "mean": 53500.6,
+          "median": 54110.5,
+          "standard_deviation": 26621.9,
+          "minimum": 17263.0,
+          "maximum": 144653.0
+        },
+        "tool_calls": {
+          "mean": 55.1,
+          "median": 50.5,
+          "standard_deviation": 24.8,
+          "minimum": 20.0,
+          "maximum": 115.0
+        },
+        "wall_seconds": {
+          "mean": 203.9,
+          "median": 164.9,
+          "standard_deviation": 120.5,
+          "minimum": 59.2,
+          "maximum": 617.4
+        }
+      }
     }
   },
   "nominal_functional_agreement": {
     "count": 35,
     "total": 36,
     "percent": 97.2
+  },
+  "per_task": {
+    "issue-eval-astropy-12907": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 33.3,
+        "mean_total_tokens": 32493.3,
+        "mean_tool_calls": 39,
+        "mean_wall_seconds": 130.3
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 31,
+        "mean_total_tokens": 40868.7,
+        "mean_tool_calls": 38,
+        "mean_wall_seconds": 148.5
+      }
+    },
+    "issue-eval-astropy-13453": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 59.7,
+        "mean_total_tokens": 63170.7,
+        "mean_tool_calls": 70,
+        "mean_wall_seconds": 191.9
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 52,
+        "mean_total_tokens": 62975.7,
+        "mean_tool_calls": 61.7,
+        "mean_wall_seconds": 173.3
+      }
+    },
+    "issue-eval-django-11133": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 32.3,
+        "mean_total_tokens": 38449.3,
+        "mean_tool_calls": 39.7,
+        "mean_wall_seconds": 125.4
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 67,
+        "mean_total_tokens": 55036.3,
+        "mean_tool_calls": 80.3,
+        "mean_wall_seconds": 265.7
+      }
+    },
+    "issue-eval-django-11141": {
+      "nanoCursor": {
+        "content_passed": 0,
+        "protocol_completed": 0,
+        "mean_turns": 37.3,
+        "mean_total_tokens": 56454,
+        "mean_tool_calls": 55.3,
+        "mean_wall_seconds": 213.3
+      },
+      "Pi": {
+        "content_passed": 0,
+        "protocol_completed": 0,
+        "mean_turns": 51.7,
+        "mean_total_tokens": 74141.7,
+        "mean_tool_calls": 76.3,
+        "mean_wall_seconds": 340.8
+      }
+    },
+    "issue-eval-matplotlib-23412": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 82.7,
+        "mean_total_tokens": 68501,
+        "mean_tool_calls": 108.3,
+        "mean_wall_seconds": 285.5
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 71.3,
+        "mean_total_tokens": 81902.7,
+        "mean_tool_calls": 93,
+        "mean_wall_seconds": 302.6
+      }
+    },
+    "issue-eval-pytest-8399": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 2,
+        "mean_turns": 63,
+        "mean_total_tokens": 77162.3,
+        "mean_tool_calls": 89.7,
+        "mean_wall_seconds": 262.4
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 45.7,
+        "mean_total_tokens": 56878.3,
+        "mean_tool_calls": 64.3,
+        "mean_wall_seconds": 148.3
+      }
+    },
+    "issue-eval-requests-1142": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 35.3,
+        "mean_total_tokens": 56490.3,
+        "mean_tool_calls": 50,
+        "mean_wall_seconds": 200.8
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 20.7,
+        "mean_total_tokens": 31828,
+        "mean_tool_calls": 27.3,
+        "mean_wall_seconds": 90.1
+      }
+    },
+    "issue-eval-sklearn-13142": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 18,
+        "mean_total_tokens": 20108,
+        "mean_tool_calls": 22,
+        "mean_wall_seconds": 105.0
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 29,
+        "mean_total_tokens": 27821,
+        "mean_tool_calls": 35.3,
+        "mean_wall_seconds": 162.1
+      }
+    },
+    "issue-eval-sklearn-13328": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 25.3,
+        "mean_total_tokens": 21659,
+        "mean_tool_calls": 32,
+        "mean_wall_seconds": 87.0
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 17.7,
+        "mean_total_tokens": 18696.7,
+        "mean_tool_calls": 22,
+        "mean_wall_seconds": 64.4
+      }
+    },
+    "issue-eval-sphinx-10449": {
+      "nanoCursor": {
+        "content_passed": 2,
+        "protocol_completed": 2,
+        "mean_turns": 42,
+        "mean_total_tokens": 66735.7,
+        "mean_tool_calls": 53.3,
+        "mean_wall_seconds": 255.9
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 55.3,
+        "mean_total_tokens": 102308.7,
+        "mean_tool_calls": 73,
+        "mean_wall_seconds": 458.5
+      }
+    },
+    "issue-eval-sympy-11618": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 37.3,
+        "mean_total_tokens": 49861.7,
+        "mean_tool_calls": 48.3,
+        "mean_wall_seconds": 183.7
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 33,
+        "mean_total_tokens": 45497.3,
+        "mean_tool_calls": 44.3,
+        "mean_wall_seconds": 142.9
+      }
+    },
+    "issue-eval-xarray-3677": {
+      "nanoCursor": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 32,
+        "mean_total_tokens": 35877.3,
+        "mean_tool_calls": 41,
+        "mean_wall_seconds": 125.2
+      },
+      "Pi": {
+        "content_passed": 3,
+        "protocol_completed": 3,
+        "mean_turns": 32.7,
+        "mean_total_tokens": 44052,
+        "mean_tool_calls": 45,
+        "mean_wall_seconds": 150.2
+      }
+    }
   }
 }
