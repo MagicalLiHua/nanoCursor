@@ -20,7 +20,7 @@
 
 ## 我是怎么测的
 
-我从 SWE-bench 里选了 12 个 Python 仓库的真实 Issue，涉及 Astropy、Django、Matplotlib、pytest、Requests、scikit-learn、Sphinx、SymPy 和 Xarray。
+我从 SWE-bench 里选了 9 个 Python 开源仓库的 12 个真实 Issue，涉及 Astropy、Django、Matplotlib、pytest、Requests、scikit-learn、Sphinx、SymPy 和 Xarray。
 
 nanoCursor 和 Pi 使用同一个 DeepSeek 模型，拿到相同的任务描述、system prompt、工具和运行预算，也在相同的 Docker 环境里接受同一套测试。每个任务各跑 3 次：
 
