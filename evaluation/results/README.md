@@ -30,7 +30,7 @@
 
 12 个任务中有 10 个在两套 harness 上均为 3/3 通过；Django `11141` 两边均为 0/3，Sphinx `10449` 出现唯一一组功能差异：nanoCursor 为 2/3，Pi 为 3/3。柱状图刻意保留三次重复，而不是把任务压缩成一个二值结果。
 
-![逐任务通过次数](figures/pass-rate-by-task.svg)
+![逐任务通过次数](figures/task-pass-counts.svg)
 
 这一分布支持“当前样本没有出现 nanoCursor 的系统性功能退化”，但不能证明 harness 等价。Django 的共同失败和 Sphinx 的单次差异需要分别分析，不能用总体通过率替代 Bad Case 归因。
 
@@ -92,7 +92,7 @@
 | `evaluation-pipeline.svg` | 实验控制了哪些变量，结果如何产生 |
 | `overall-outcomes.svg` | 两套 harness 的功能与协议结果分别是多少 |
 | `functional-agreement.svg` | 36 组名义对照中，结果有多少一致/不一致 |
-| `pass-rate-by-task.svg` | 差异集中在哪些任务 |
+| `task-pass-counts.svg` | 差异集中在哪些任务 |
 | `task-metric-profiles.svg` | Turns、Token、工具调用和耗时如何随任务变化 |
 | `trial-token-lines.svg` | 72 次运行的 Token 路径如何波动 |
 | `token-variability.svg` | 同题三次运行的最小值、中位数和最大值差多少 |

@@ -609,7 +609,7 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     figure_dir = args.output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
-    task_chart(rows, figure_dir / "pass-rate-by-task.svg")
+    task_chart(rows, figure_dir / "task-pass-counts.svg")
     outcome_chart(summary, figure_dir / "overall-outcomes.svg")
     cost_chart(summary, figure_dir / "cost-comparison.svg")
     task_metric_profiles(rows, figure_dir / "task-metric-profiles.svg")
