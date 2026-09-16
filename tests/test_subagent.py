@@ -506,6 +506,7 @@ class TestTaskManager:
         # notify_queue.put，poll_completed 便收不到完成通知。
         agent.team_name = ""
         agent._team_manager = None
+        agent.worktree_cleanup = None
         return agent
 
     @pytest.mark.asyncio

@@ -72,7 +72,7 @@ async def _handle_create(
     try:
         session = await manager.enter(name)
         if ctx.agent:
-            ctx.agent.work_dir = wt.path
+            ctx.agent.set_work_dir(wt.path, isolated=True)
     except Exception as e:
         ctx.ui.add_system_message(
             f"Worktree 已创建但进入失败: {e}\n路径: {wt.path}"
@@ -119,7 +119,7 @@ async def _handle_enter(
     try:
         session = await manager.enter(name)
         if ctx.agent:
-            ctx.agent.work_dir = session.worktree_path
+            ctx.agent.set_work_dir(session.worktree_path, isolated=True)
         ctx.ui.add_system_message(f"已进入 worktree: {name}\n路径: {session.worktree_path}")
     except Exception as e:
         ctx.ui.add_system_message(f"进入 worktree 失败: {e}")
@@ -142,7 +142,7 @@ async def _handle_exit(
     try:
         await manager.exit(session.worktree_name, action=action, discard_changes=discard)
         if ctx.agent:
-            ctx.agent.work_dir = session.original_cwd
+            ctx.agent.set_work_dir(session.original_cwd)
         msg = f"已退出 worktree: {session.worktree_name}"
         if remove:
             msg += "（已删除）"

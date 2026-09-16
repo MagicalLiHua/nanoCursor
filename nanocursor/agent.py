@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
-
-from pydantic import ValidationError
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from nanocursor.client import LLMClient
 from nanocursor.context import (
@@ -31,14 +30,14 @@ from nanocursor.conversation import ConversationManager, ToolResultBlock, ToolUs
 from nanocursor.conversation import ThinkingBlock as ConvThinkingBlock
 from nanocursor.memory.auto_memory import MemoryManager
 from nanocursor.permissions import (
-    Decision,
     PermissionChecker,
     PermissionMode,
 )
-from nanocursor.hooks import HookContext, HookEngine, ToolRejectedError
+from nanocursor.hooks import HookContext, HookEngine
 from nanocursor.hooks.engine import HookNotification
 from nanocursor.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from nanocursor.tools import ToolRegistry
+from nanocursor.tools.runtime import ToolRuntimeContext, bind_runtime, normalize_local_arguments
 from nanocursor.tools.base import (
     MAX_OUTPUT_CHARS,
     StreamEnd,
@@ -260,36 +259,74 @@ class _ToolExecResult:
 
 
 class StreamingExecutor:
+    """Ordered safety barriers, permission events, and owned cancellation."""
     def __init__(self) -> None:
-        self._tasks: list[tuple[int, asyncio.Task[_ToolExecResult]]] = []
-        self._order = 0
+        self._tasks: list[tuple[ToolCallComplete, asyncio.Task[_ToolExecResult]]] = []
+        self._barrier: asyncio.Task | None = None
+        self._permissions: asyncio.Queue[PermissionRequest] = asyncio.Queue()
+        self._approval_lock = asyncio.Lock()
 
-    def submit(
-        self,
-        coro: Any,
-    ) -> None:
-        task = asyncio.create_task(coro)
-        self._tasks.append((self._order, task))
-        self._order += 1
+    def submit(self, call: ToolCallComplete, run: Callable[[], Awaitable[_ToolExecResult]],
+               concurrent: bool = False) -> None:
+        dependencies = ([self._barrier] if self._barrier else []) if concurrent else [t for _, t in self._tasks]
 
-    async def collect_results(self) -> list[_ToolExecResult]:
-        if not self._tasks:
-            return []
-        tasks = [t for _, t in sorted(self._tasks, key=lambda x: x[0])]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out: list[_ToolExecResult] = []
-        for r in results:
-            if isinstance(r, Exception):
-                out.append(_ToolExecResult(
-                    tool_id="",
-                    tool_name="",
-                    result=ToolResult(output=f"Tool execution error: {r}", is_error=True),
-                    elapsed=0.0,
-                    is_unknown=False,
-                ))
-            else:
-                out.append(r)
-        return out
+        async def execute() -> _ToolExecResult:
+            if dependencies:
+                await asyncio.gather(*(asyncio.shield(t) for t in dependencies))
+            return await run()
+
+        task = asyncio.create_task(execute())
+        self._tasks.append((call, task))
+        if not concurrent:
+            self._barrier = task
+
+    async def request_permission(self, call: ToolCallComplete) -> PermissionResponse:
+        async with self._approval_lock:
+            future = asyncio.get_running_loop().create_future()
+            await self._permissions.put(PermissionRequest(
+                call.tool_name, PermissionChecker.describe_tool_action(call.tool_name, call.arguments), future))
+            return await future
+
+    async def iter_results(self) -> AsyncIterator[PermissionRequest | _ToolExecResult]:
+        for call, task in self._tasks:
+            while not task.done():
+                waiter = asyncio.create_task(self._permissions.get())
+                try:
+                    await asyncio.wait((task, waiter), return_when=asyncio.FIRST_COMPLETED)
+                    if waiter.done():
+                        request = waiter.result()
+                        if not request.future.done():
+                            yield request
+                finally:
+                    if not waiter.done():
+                        waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+            yield self._result(call, task)
+
+    @staticmethod
+    def _result(call: ToolCallComplete, task: asyncio.Task) -> _ToolExecResult:
+        if task.cancelled():
+            result = ToolResult("Tool execution cancelled; any completed side effects were not rolled back.", True)
+        elif task.exception() is not None:
+            result = ToolResult(f"Tool execution error: {task.exception()}", True)
+        else:
+            return task.result()
+        return _ToolExecResult(call.tool_id, call.tool_name, result, 0.0, False)
+
+    async def cancel_and_wait(self) -> list[_ToolExecResult]:
+        for _, task in self._tasks:
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*(task for _, task in self._tasks), return_exceptions=True)
+        return [self._result(call, task) for call, task in self._tasks]
+
+
+@dataclass
+class PendingToolTurn:
+    collector: StreamCollector
+    executor: StreamingExecutor
+    committed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +348,19 @@ class Agent:
         hook_engine: HookEngine | None = None,
         system_prompt_override: str | None = None,
         inject_environment_context: bool = True,
+        spawn_allowed: bool = True,
+        sandbox_root: str | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
         self.protocol = protocol
-        self.work_dir = work_dir
+        self.work_dir = str(Path(work_dir).resolve())
+        self._spawn_allowed = spawn_allowed
+        self.sandbox_root = str(Path(sandbox_root).resolve()) if sandbox_root else None
+        self._file_versions: dict[str, Any] = {}
+        self._turn_expected_versions: dict[str, Any] | None = None
+        self._pending_tool_turn: PendingToolTurn | None = None
+        self.worktree_cleanup: Callable[[], Awaitable[str]] | None = None
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker
         self.permission_mode: PermissionMode = (
@@ -440,7 +485,51 @@ class Agent:
             for n in self.hook_engine.drain_notifications()
         ]
 
-    async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
+    @property
+    def spawn_allowed(self) -> bool:
+        return self._spawn_allowed
+
+    def set_work_dir(self, work_dir: str, *, isolated: bool = False) -> None:
+        from nanocursor.permissions import PathSandbox
+        self.work_dir = str(Path(work_dir).resolve())
+        self.sandbox_root = self.work_dir if isolated else None
+        self._file_versions.clear()
+        if self.permission_checker:
+            self.permission_checker.sandbox = PathSandbox(self.work_dir)
+
+    async def run(self, conversation: ConversationManager, *, interactive: bool = True) -> AsyncIterator[AgentEvent]:
+        try:
+            async for event in self._run(conversation, interactive=interactive):
+                yield event
+        finally:
+            # Also runs for provider failures and generator close, not only UI cancel.
+            cleanup = asyncio.create_task(self._close_pending_tool_turn(conversation))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            self._turn_expected_versions = None
+
+    async def _close_pending_tool_turn(self, conversation: ConversationManager) -> None:
+        pending = self._pending_tool_turn
+        if pending is None:
+            return
+        results = await pending.executor.cancel_and_wait()
+        response = pending.collector.response
+        if response.tool_calls:
+            if not pending.committed:
+                conversation.add_assistant_message(response.text, [
+                    ToolUseBlock(tc.tool_id, tc.tool_name, tc.arguments) for tc in response.tool_calls
+                ], thinking_blocks=[ConvThinkingBlock(tb.thinking, tb.signature) for tb in response.thinking_blocks])
+            conversation.add_tool_results_message([
+                ToolResultBlock(r.tool_id, self._maybe_persist_or_truncate(r.tool_id, r.result.output), r.result.is_error)
+                for r in results
+            ])
+        self._pending_tool_turn = None
+
+    async def _run(self, conversation: ConversationManager, *, interactive: bool) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
         env_context = ""
         if self.inject_environment_context:
@@ -460,6 +549,7 @@ class Agent:
 
         iteration = 0
         consecutive_unknown = 0
+        parameter_error_turns = 0
         max_tokens_escalated = False
         output_recoveries = 0
 
@@ -566,22 +656,16 @@ class Agent:
 
             collector = StreamCollector()
             executor = StreamingExecutor()
-            deferred_tool_calls: list[ToolCallComplete] = []
+            self._pending_tool_turn = PendingToolTurn(collector, executor)
+            self._turn_expected_versions = dict(self._file_versions)
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
             async for event in collector.consume(llm_stream):
-                # 流式工具执行：收到完整 tool_use 就立刻提交执行，不等整个响应结束
                 if isinstance(event, ToolUseEvent):
                     tc = collector.response.tool_calls[-1]
-                    # 需要交互式权限确认的工具延迟到流结束后顺序执行
                     tool = self.registry.get(tc.tool_name)
-                    needs_ask = False
-                    if tool and self.permission_checker:
-                        decision = self.permission_checker.check(tool, tc.arguments)
-                        needs_ask = decision.effect == "ask"
-                    if needs_ask:
-                        deferred_tool_calls.append(tc)
-                    else:
-                        executor.submit(self._execute_single_tool_direct(tc))
+                    approval = executor.request_permission if interactive else None
+                    executor.submit(tc, lambda tc=tc: self._execute_single_tool_direct(tc, approval),
+                                    concurrent=bool(tool and tool.is_concurrency_safe and tool.is_read_only))
                 yield event
 
             response = collector.response
@@ -604,7 +688,7 @@ class Agent:
                 for tb in response.thinking_blocks
             ]
 
-            if response.stop_reason == "max_tokens":
+            if response.stop_reason == "max_tokens" and not response.tool_calls:
                 if not max_tokens_escalated:
                     self.client.set_max_output_tokens(MAX_TOKENS_CEILING)
                     max_tokens_escalated = True
@@ -635,6 +719,7 @@ class Agent:
                 output_recoveries = 0
 
             if not response.tool_calls:
+                self._pending_tool_turn = None
                 conversation.add_assistant_message(
                     response.text, thinking_blocks=conv_thinking
                 )
@@ -672,6 +757,7 @@ class Agent:
             conversation.add_assistant_message(
                 response.text, tool_uses, thinking_blocks=conv_thinking
             )
+            self._pending_tool_turn.committed = True
             # 在 assistant 回复加入历史后锚定实际用量：基线（input + cache + output）
             # 覆盖到当前位置，因此下一轮迭代顶部的 auto-compact 检查只需对
             # 接下来追加的 tool results 做字符估算。
@@ -684,67 +770,25 @@ class Agent:
 
             # 收集流式执行器中已提交的工具结果（工具在 LLM 流式输出期间已开始执行）
             tool_results: list[ToolResultBlock] = []
-            streaming_results = await executor.collect_results()
+            async for item in executor.iter_results():
+                if isinstance(item, PermissionRequest):
+                    yield item
+                    continue
+                br = item
+                consecutive_unknown = consecutive_unknown + 1 if br.is_unknown else 0
+                content = self._maybe_persist_or_truncate(br.tool_id, br.result.output)
+                tool_results.append(ToolResultBlock(br.tool_id, content, br.result.is_error))
+                yield ToolResultEvent(br.tool_id, br.tool_name, br.result.output, br.result.is_error, br.elapsed)
 
-            for br in streaming_results:
-                if br.is_unknown:
-                    consecutive_unknown += 1
-                else:
-                    consecutive_unknown = 0
-                content = self._maybe_persist_or_truncate(
-                    br.tool_id, br.result.output
-                )
-                tool_results.append(
-                    ToolResultBlock(
-                        tool_use_id=br.tool_id,
-                        content=content,
-                        is_error=br.result.is_error,
-                    )
-                )
-                yield ToolResultEvent(
-                    tool_id=br.tool_id,
-                    tool_name=br.tool_name,
-                    output=br.result.output,
-                    is_error=br.result.is_error,
-                    elapsed=br.elapsed,
-                )
-
-            # 需要交互式权限确认的工具，在流结束后顺序执行
-            for tc in deferred_tool_calls:
-                result: ToolResult | None = None
-                elapsed = 0.0
-                is_unknown = False
-
-                async for item in self._execute_tool(tc):
-                    if isinstance(item, PermissionRequest):
-                        yield item
-                    else:
-                        result, elapsed, is_unknown = item
-
-                if result is None:
-                    result = ToolResult(output="Error: no result from tool", is_error=True)
-
-                if is_unknown:
-                    consecutive_unknown += 1
-                else:
-                    consecutive_unknown = 0
-
-                content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
-                tool_results.append(
-                    ToolResultBlock(
-                        tool_use_id=tc.tool_id,
-                        content=content,
-                        is_error=result.is_error,
-                    )
-                )
-                yield ToolResultEvent(
-                    tool_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    output=result.output,
-                    is_error=result.is_error,
-                    elapsed=elapsed,
-                )
-
+            conversation.add_tool_results_message(tool_results)
+            self._pending_tool_turn = None
+            parameter_error_turns = parameter_error_turns + 1 if any(
+                r.is_error and r.content.startswith(("Parameter JSON error:", "Parameter validation error:"))
+                for r in tool_results
+            ) else 0
+            if parameter_error_turns >= 3:
+                yield ErrorEvent(message="Agent stopped after three consecutive turns with invalid tool arguments")
+                break
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
                     message="Agent terminated: too many consecutive unknown tool calls"
@@ -754,8 +798,6 @@ class Agent:
             exit_plan_called = any(
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
-            conversation.add_tool_results_message(tool_results)
-
             # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
             if self.memory_recall_task and not self._memory_recall_consumed:
                 if self.memory_recall_task.done():
@@ -802,186 +844,107 @@ class Agent:
         return PermissionChecker.describe_tool_action(tc.tool_name, tc.arguments)
 
     async def _execute_single_tool_direct(
-        self, tc: ToolCallComplete
+        self, tc: ToolCallComplete,
+        approval: Callable[[ToolCallComplete], Awaitable[PermissionResponse]] | None = None,
     ) -> _ToolExecResult:
-        tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
-
-        if tool is None:
-            return _ToolExecResult(
-                tool_id=tc.tool_id,
-                tool_name=tc.tool_name,
-                result=ToolResult(output=f"Error: unknown tool '{tc.tool_name}'", is_error=True),
-                elapsed=time.monotonic() - start,
-                is_unknown=True,
-            )
-
-        if not self.registry.is_enabled(tc.tool_name):
-            return _ToolExecResult(
-                tool_id=tc.tool_id,
-                tool_name=tc.tool_name,
-                result=ToolResult(output=f"Error: tool '{tc.tool_name}' is disabled", is_error=True),
-                elapsed=time.monotonic() - start,
-                is_unknown=False,
-            )
-
-        # Streaming tool calls use this direct execution path.  Keep hook
-        # enforcement here as well as in the deferred/non-interactive paths;
-        # otherwise a pre_tool_use rejection can be bypassed simply because
-        # the permission checker did not require an interactive prompt.
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "pre_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-            )
-            rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
-            if rejection is not None:
-                return _ToolExecResult(
-                    tool_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    result=ToolResult(
-                        output=f"Hook rejected: {rejection.reason}",
-                        is_error=True,
-                    ),
-                    elapsed=time.monotonic() - start,
-                    is_unknown=False,
-                )
-
-        if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
-            if decision.effect == "deny":
-                return _ToolExecResult(
-                    tool_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    result=ToolResult(output=f"Permission denied: {decision.reason}", is_error=True),
-                    elapsed=time.monotonic() - start,
-                    is_unknown=False,
-                )
-
-        try:
-            params = tool.params_model.model_validate(tc.arguments)
-            result = await tool.execute(params)
-        except ValidationError as e:
-            result = ToolResult(output=f"Parameter validation error: {e}", is_error=True)
-        except Exception as e:
-            result = ToolResult(output=f"Tool execution error: {e}", is_error=True)
-
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "post_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-                error=result.output if result.is_error else "",
-            )
-            await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
-
-        self._snapshot_for_recovery(tc, result)
-
-        return _ToolExecResult(
-            tool_id=tc.tool_id,
-            tool_name=tc.tool_name,
-            result=result,
-            elapsed=time.monotonic() - start,
-            is_unknown=False,
+        context = ToolRuntimeContext(
+            cwd=Path(self.work_dir).resolve(), agent_id=self.agent_id,
+            sandbox_root=Path(self.sandbox_root) if self.sandbox_root else None,
+            spawn_allowed=self.spawn_allowed, file_versions=self._file_versions,
+            expected_versions=self._turn_expected_versions if self._turn_expected_versions is not None else dict(self._file_versions),
         )
+        with bind_runtime(context):
+            result = await self._execute_tool_core(tc, approval)
+        return _ToolExecResult(tc.tool_id, tc.tool_name, result, time.monotonic() - start,
+                               self.registry.get(tc.tool_name) is None)
 
-
-    async def _execute_batch_parallel(
-        self, calls: list[ToolCallComplete]
-    ) -> list[_ToolExecResult]:
-        tasks = [self._execute_single_tool_direct(tc) for tc in calls]
-        return list(await asyncio.gather(*tasks))
-
-    async def _execute_tool(
-        self, tc: ToolCallComplete
-    ) -> AsyncIterator[tuple[ToolResult, float, bool]]:
+    async def _execute_tool_core(
+        self, tc: ToolCallComplete,
+        approval: Callable[[ToolCallComplete], Awaitable[PermissionResponse]] | None,
+    ) -> ToolResult:
         tool = self.registry.get(tc.tool_name)
-        start = time.monotonic()
-        is_unknown = False
-
         if tool is None:
-            result = ToolResult(
-                output=f"Error: unknown tool '{tc.tool_name}'", is_error=True
-            )
-            is_unknown = True
-            elapsed = time.monotonic() - start
-            yield result, elapsed, is_unknown
-            return
-
+            return ToolResult(f"Error: unknown tool '{tc.tool_name}'", True)
         if not self.registry.is_enabled(tc.tool_name):
-            result = ToolResult(
-                output=f"Error: tool '{tc.tool_name}' is disabled in current mode",
-                is_error=True,
-            )
-            elapsed = time.monotonic() - start
-            yield result, elapsed, is_unknown
-            return
-
-        # 权限检查
+            return ToolResult(f"Error: tool '{tc.tool_name}' is disabled", True)
+        if tc.arguments_error:
+            return ToolResult(f"Parameter JSON error: {tc.arguments_error}\nRaw arguments: {tc.raw_arguments}", True)
+        try:
+            params = tool.validate_arguments(tc.arguments)
+            arguments = normalize_local_arguments(tc.tool_name, params.model_dump(exclude_unset=False))
+            params = tool.validate_arguments(arguments)
+        except Exception as e:
+            return ToolResult(f"Parameter validation error: {e}", True)
+        tc = replace(tc, arguments=arguments)
+        file_path = self._infer_file_path(arguments)
+        if self.hook_engine:
+            ctx = self._build_hook_context("pre_tool_use", tool_name=tc.tool_name,
+                                           tool_args=arguments, file_path=file_path)
+            rejection = await self.hook_engine.run_pre_tool_hooks(ctx)
+            if rejection is not None:
+                return ToolResult(f"Hook rejected [{rejection.hook_id}]: {rejection.reason}", True)
         if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
-
+            decision = self.permission_checker.check(tool, arguments)
             if decision.effect == "deny":
-                result = ToolResult(
-                    output=f"Permission denied: {decision.reason}",
-                    is_error=True,
-                )
-                elapsed = time.monotonic() - start
-                yield result, elapsed, is_unknown
-                return
-
+                return ToolResult(f"Permission denied: {decision.reason}", True)
             if decision.effect == "ask":
-                loop = asyncio.get_running_loop()
-                future: asyncio.Future[PermissionResponse] = loop.create_future()
-                desc = self._build_permission_description(tc)
-                # 向调用方 yield 权限请求事件，由调用方处理
-                yield PermissionRequest(
-                    tool_name=tc.tool_name,
-                    description=desc,
-                    future=future,
-                )
-                response = await future
-
+                if approval is None:
+                    return ToolResult("Permission denied: non-interactive agent cannot prompt user", True)
+                response = await approval(tc)
                 if response == PermissionResponse.DENY:
-                    result = ToolResult(
-                        output="Permission denied: 用户拒绝了此操作",
-                        is_error=True,
-                    )
-                    elapsed = time.monotonic() - start
-                    yield result, elapsed, is_unknown
-                    return
-
+                    return ToolResult("Permission denied: 用户拒绝了此操作", True)
                 if response == PermissionResponse.ALLOW_ALWAYS:
                     from nanocursor.permissions.rules import Rule, extract_content
-                    content = extract_content(tc.tool_name, tc.arguments)
-                    pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
-                    # 持久化规则写入本地文件
-                    rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
-                    self.permission_checker.rule_engine.append_local_rule(rule)
-                    # 同时加入会话级放行集合，本轮立即生效无需磁盘读取
+                    content = extract_content(tc.tool_name, arguments)
+                    self.permission_checker.rule_engine.append_local_rule(Rule(tc.tool_name, content, "allow"))
                     self.permission_checker.add_session_allow(tc.tool_name, content)
-
+        result = ToolResult("Tool execution cancelled; side effects may already have occurred.", True)
+        old_session = None
+        if tc.tool_name in ("EnterWorktree", "ExitWorktree"):
+            if not self.spawn_allowed:
+                return ToolResult("Sub-agents cannot change the parent worktree session.", True)
+            old_session = tool._manager.get_current_session()
         try:
-            params = tool.params_model.model_validate(tc.arguments)
             result = await tool.execute(params)
-        except ValidationError as e:
-            result = ToolResult(
-                output=f"Parameter validation error: {e}", is_error=True
-            )
+            if not result.is_error and tc.tool_name == "EnterWorktree":
+                session = tool._manager.get_current_session()
+                self.set_work_dir(session.worktree_path, isolated=True)
+            elif not result.is_error and tc.tool_name == "ExitWorktree" and old_session:
+                self.set_work_dir(old_session.original_cwd)
         except Exception as e:
-            result = ToolResult(
-                output=f"Tool execution error: {e}", is_error=True
-            )
-
+            result = ToolResult(f"Tool execution error: {e}", True)
+        finally:
+            if self.hook_engine:
+                ctx = self._build_hook_context("post_tool_use", tool_name=tc.tool_name,
+                                               tool_args=arguments, file_path=file_path,
+                                               error=result.output if result.is_error else "")
+                await self.hook_engine.run_hooks("post_tool_use", ctx)
         self._snapshot_for_recovery(tc, result)
+        return result
 
-        elapsed = time.monotonic() - start
-        yield result, elapsed, is_unknown
+    async def _execute_batch_parallel(self, calls: list[ToolCallComplete]) -> list[_ToolExecResult]:
+        executor = StreamingExecutor()
+        for tc in calls:
+            tool = self.registry.get(tc.tool_name)
+            executor.submit(tc, lambda tc=tc: self._execute_single_tool_direct(tc),
+                            concurrent=bool(tool and tool.is_concurrency_safe and tool.is_read_only))
+        try:
+            return [item async for item in executor.iter_results() if isinstance(item, _ToolExecResult)]
+        finally:
+            await executor.cancel_and_wait()
+
+    async def _execute_tool(self, tc: ToolCallComplete) -> AsyncIterator[Any]:
+        executor = StreamingExecutor()
+        executor.submit(tc, lambda: self._execute_single_tool_direct(tc, executor.request_permission))
+        try:
+            async for item in executor.iter_results():
+                if isinstance(item, PermissionRequest):
+                    yield item
+                else:
+                    yield item.result, item.elapsed, item.is_unknown
+        finally:
+            await executor.cancel_and_wait()
 
     def _snapshot_for_recovery(
         self, tc: ToolCallComplete, result: ToolResult
@@ -1076,250 +1039,29 @@ class Agent:
         self, task: str, conversation: ConversationManager | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
-        env_context = ""
-        if conversation is None:
-            conversation = ConversationManager()
-
-            if self.inject_environment_context:
-                env_context = build_environment_context(
-                    self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
-                )
-                conversation.inject_environment(env_context)
-
-            if self.instructions_content:
-                memory_content = self.memory_manager.load() if self.memory_manager else ""
-                conversation.inject_long_term_memory(
-                    self.instructions_content, memory_content
-                )
-
+        conversation = conversation if conversation is not None else ConversationManager()
         if task:
             conversation.add_user_message(task)
-
-        hook_prompts = (
-            self.hook_engine.get_prompt_messages() if self.hook_engine else None
-        )
-        system = self.system_prompt_override or build_system_prompt(
-            hook_prompts=hook_prompts,
-            coordinator_mode=self.coordinator_mode,
-        )
-
-        tools = self.registry.get_all_schemas(self.protocol)
-
-        log.info(
-            "[run_to_completion] agent=%s tools=%d names=%s coordinator=%s",
-            self.agent_id,
-            len(tools),
-            [t["name"] for t in tools][:10],
-            self.coordinator_mode,
-        )
-
+        response_text = ""
         last_text = ""
-
-        iteration = 0
-        while True:
-            iteration += 1
-            if self.max_iterations > 0 and iteration > self.max_iterations:
-                break
-            if self.hook_engine:
-                ctx = self._build_hook_context("turn_start")
-                await self.hook_engine.run_hooks("turn_start", ctx)
-
-            self._consume_mailbox(conversation)
-            if self.notification_fn:
-                for note in self.notification_fn():
-                    conversation.add_system_reminder(note)
-
-            # 先应用 tool-result budget（就地修改），再做 auto-compact，确保预算内的结果不会被误压缩
-            pre_compact_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
-            )
-            if pre_compact_records:
-                append_replacement_records(self.session_dir, pre_compact_records)
-
-            compact_result = await auto_compact(
-                conversation,
-                self.client,
-                self.context_window,
-                self.session_dir,
-                protocol=self.protocol,
-                breaker=self.compact_breaker,
-                recovery=self.recovery_state,
-                tool_schemas=self.registry.get_all_schemas(self.protocol),
-                transcript_path=self._transcript_path,
-            )
-            if isinstance(compact_result, CompactEvent):
-                if env_context:
-                    conversation.inject_environment(env_context)
-
-            deferred_names = self.registry.get_deferred_tool_names()
-            if deferred_names:
-                conversation.add_system_reminder(
-                    "The following deferred tools are available via ToolSearch. "
-                    "Their schemas are NOT loaded - use ToolSearch with "
-                    'query "select:<name>[,<name>...]" to load tool schemas before calling them:\n'
-                    + "\n".join(deferred_names)
-                )
-
-            # 压缩后或追加 deferred 提示后重新应用 budget（就地修改）
-            _new_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
-            )
-            if _new_records:
-                append_replacement_records(self.session_dir, _new_records)
-
-            collector = StreamCollector()
-            llm_stream = self.client.stream(conversation, system=system, tools=tools)
-            async for _event in collector.consume(llm_stream):
-                pass
-
-            response = collector.response
-            self.total_input_tokens += response.input_tokens
-            self.total_output_tokens += response.output_tokens
-
-            if event_callback:
-                event_callback({
-                    "type": "usage",
-                    "usage": {
-                        "inputTokens": self.total_input_tokens,
-                        "outputTokens": self.total_output_tokens,
-                    },
-                })
-
-            if response.text:
-                last_text = response.text
-                if event_callback:
-                    event_callback({
-                        "type": "stream_text",
-                        "text": response.text,
-                    })
-
-            log.info(
-                "[run_to_completion] agent=%s iter=%d tool_calls=%d text_len=%d stop=%s",
-                self.agent_id, iteration, len(response.tool_calls),
-                len(response.text), response.stop_reason,
-            )
-
-            if not response.tool_calls:
-                conversation.add_assistant_message(response.text)
-                if self.file_history is not None:
-                    summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
-                    self.file_history.make_snapshot(len(conversation.history), summary)
-                break
-
-            tool_uses = [
-                ToolUseBlock(
-                    tool_use_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    arguments=tc.arguments,
-                )
-                for tc in response.tool_calls
-            ]
-            conversation.add_assistant_message(response.text, tool_uses)
-            # assistant 回复已在历史中，锚定实际用量；下一轮迭代只需对
-            # 下方追加的 tool results 做字符估算。
-            conversation.record_usage_anchor(
-                response.input_tokens,
-                response.output_tokens,
-                response.cache_read,
-                response.cache_creation,
-            )
-
-            tool_results: list[ToolResultBlock] = []
-            for tc in response.tool_calls:
-                if event_callback:
-                    event_callback({
-                        "type": "tool_use",
-                        "toolName": tc.tool_name,
-                        "args": tc.arguments,
-                    })
-                result = await self._execute_tool_noninteractive(tc)
-                content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
-                tool_results.append(
-                    ToolResultBlock(
-                        tool_use_id=tc.tool_id,
-                        content=content,
-                        is_error=result.is_error,
-                    )
-                )
-
-            conversation.add_tool_results_message(tool_results)
-
-            if self.hook_engine:
-                ctx = self._build_hook_context("turn_end")
-                await self.hook_engine.run_hooks("turn_end", ctx)
-
+        async with aclosing(self.run(conversation, interactive=False)) as events:
+            async for event in events:
+                if isinstance(event, StreamText):
+                    response_text += event.text
+                    last_text = response_text
+                    if event_callback:
+                        event_callback({"type": "stream_text", "text": event.text})
+                elif isinstance(event, TurnComplete):
+                    response_text = ""
+                elif isinstance(event, ToolUseEvent) and event_callback:
+                    event_callback({"type": "tool_use", "toolName": event.tool_name, "args": event.arguments})
+                elif isinstance(event, UsageEvent) and event_callback:
+                    event_callback({"type": "usage", "usage": {
+                        "inputTokens": event.input_tokens, "outputTokens": event.output_tokens}})
         return last_text
 
-    async def _execute_tool_noninteractive(
-        self, tc: ToolCallComplete
-    ) -> ToolResult:
-        tool = self.registry.get(tc.tool_name)
-
-        if tool is None:
-            return ToolResult(
-                output=f"Error: unknown tool '{tc.tool_name}'", is_error=True
-            )
-
-        if not self.registry.is_enabled(tc.tool_name):
-            return ToolResult(
-                output=f"Error: tool '{tc.tool_name}' is disabled",
-                is_error=True,
-            )
-
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "pre_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-            )
-            rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
-            if rejection is not None:
-                return ToolResult(
-                    output=f"Hook rejected: {rejection.reason}",
-                    is_error=True,
-                )
-
-        if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
-            if decision.effect == "deny":
-                return ToolResult(
-                    output=f"Permission denied: {decision.reason}",
-                    is_error=True,
-                )
-            if decision.effect == "ask":
-                if self.permission_mode == PermissionMode.BYPASS:
-                    pass  # BYPASS 模式自动批准
-                else:
-                    return ToolResult(
-                        output="Permission denied: non-interactive agent cannot prompt user",
-                        is_error=True,
-                    )
-
-        try:
-            params = tool.params_model.model_validate(tc.arguments)
-            result = await tool.execute(params)
-        except ValidationError as e:
-            result = ToolResult(
-                output=f"Parameter validation error: {e}", is_error=True
-            )
-        except Exception as e:
-            result = ToolResult(
-                output=f"Tool execution error: {e}", is_error=True
-            )
-
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "post_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-            )
-            await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
-
-        return result
+    async def _execute_tool_noninteractive(self, tc: ToolCallComplete) -> ToolResult:
+        return (await self._execute_single_tool_direct(tc)).result
 
     def _maybe_persist_or_truncate(self, tool_use_id: str, text: str) -> str:
         from nanocursor.context.manager import (

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
 from nanocursor.tools.base import Tool, ToolResult
+from nanocursor.tools.runtime import current_runtime
 
 if TYPE_CHECKING:
     from nanocursor.agent import Agent
@@ -24,7 +26,9 @@ class AgentToolParams(BaseModel):
     model: str | None = None
     run_in_background: bool = False
     name: str | None = None
-    isolation: str | None = None
+    isolation: Literal["none", "worktree", "auto"] | None = Field(
+        default=None, description="Explicit isolation overrides the agent definition. Auto isolates writable background agents."
+    )
     team_name: str | None = Field(
         default=None,
         description=(
@@ -96,17 +100,16 @@ class AgentTool(Tool):
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]
 
+        context = current_runtime()
+        if (self.query_source == FORK_QUERY_SOURCE
+                or (context is not None and not context.spawn_allowed)
+                or not getattr(self._parent_agent, "spawn_allowed", True)):
+            return ToolResult("Permission denied: sub-agents cannot create any further agents.", True)
+
         if p.team_name:
+            if p.isolation == "none":
+                return ToolResult("Team members require worktree isolation.", True)
             return await self._execute_as_teammate(p)
-
-        isolation = ""
-        if p.subagent_type:
-            defn = self._agent_loader.get(p.subagent_type)
-            if defn and defn.isolation:
-                isolation = defn.isolation
-
-        if isolation == "worktree":
-            return await self._execute_with_worktree(p)
 
         from nanocursor.agents.fork import ForkError, build_forked_messages
         from nanocursor.agents.parser import AgentDef
@@ -139,13 +142,6 @@ class AgentTool(Tool):
                     output="Fork mode is not enabled. "
                     "Set 'enable_fork: true' in config.yaml to use fork, "
                     "or specify a subagent_type parameter.",
-                    is_error=True,
-                )
-            # fork 子 Agent 不允许再次 fork，防止无限嵌套
-            if self.query_source == FORK_QUERY_SOURCE:
-                return ToolResult(
-                    output="Error: cannot fork from a forked agent. "
-                    "Use subagent_type to spawn a definition-based agent instead.",
                     is_error=True,
                 )
             try:
@@ -190,91 +186,140 @@ class AgentTool(Tool):
                 _base_registry, definition, is_background
             )
 
-        # 为子 agent 创建权限检查器
-        pm_str = definition.permission_mode
-        pm_enum = getattr(
-            PermissionMode,
-            PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
-            PermissionMode.DEFAULT,
-        )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(self._parent_agent.work_dir),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
-        )
-
-        # 创建子 agent
-        sub_agent = AgentClass(
-            client=client,
-            registry=filtered_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=self._parent_agent.work_dir,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
-
-        # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
-        # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
-        if p.subagent_type is None:
-            from nanocursor.context import clone_replacement_state
-            sub_agent.replacement_state = clone_replacement_state(
-                self._parent_agent.replacement_state
-            )
-
-        # 注册追踪节点
-        trace_node = self._trace_manager.create(
-            agent_type=definition.agent_type,
-            parent_id=self._parent_agent.agent_id,
-            trace_id=sub_agent.trace_id,
-        )
-        sub_agent.agent_id = trace_node.agent_id
-
-        agent_name = p.name or p.subagent_type or f"agent-{trace_node.agent_id}"
-
-        if is_background:
+        isolation = p.isolation or definition.isolation or "auto"
+        if isolation == "auto":
+            writable = any(t.category in ("write", "command") and filtered_registry.is_enabled(t.name)
+                           for t in filtered_registry.list_tools())
+            isolation = "worktree" if is_background and writable else "none"
+        work_dir = self._parent_agent.work_dir
+        wt = None
+        if isolation == "worktree":
+            if self._worktree_manager is None:
+                return ToolResult("Worktree isolation requested but WorktreeManager is not configured.", True)
+            from nanocursor.worktree.integration import generate_worktree_name, build_worktree_notice
+            try:
+                wt = await self._worktree_manager.create(generate_worktree_name(), "HEAD")
+            except Exception as e:
+                return ToolResult(f"Failed to create worktree: {e}", True)
+            work_dir = wt.path
+            notice = build_worktree_notice(self._parent_agent.work_dir, wt.path)
             if is_fork:
-                sub_agent._fork_conversation = conversation
-            task_id = self._task_manager.launch(
-                agent=sub_agent,
-                task="" if is_fork else p.prompt,
-                name=agent_name,
-                fork_conversation=conversation if is_fork else None,
-            )
-            return ToolResult(
-                output=f"Sub-agent launched in background.\n"
-                f"Task ID: {task_id}\n"
-                f"Agent: {agent_name}\n"
-                f"Type: {definition.agent_type}\n"
-                f"The system will notify automatically when it completes.\n"
-                f"Do NOT wait, sleep, or poll. Report the task ID to the user and move on.",
-            )
-
-        # 前台同步执行
-        try:
-            if is_fork:
-                result_text = await sub_agent.run_to_completion("", conversation)
+                conversation.add_user_message(notice)
             else:
-                result_text = await sub_agent.run_to_completion(p.prompt)
+                p = p.model_copy(update={"prompt": notice + "\n\n" + p.prompt})
+
+        async def cleanup_worktree() -> str:
+            if wt is None:
+                return ""
+            try:
+                cleanup = await self._worktree_manager.auto_cleanup(wt.name, wt.head_commit)
+            except Exception as exc:
+                log.warning("Worktree cleanup failed at %s: %s", wt.path, exc)
+                return f"\n[Worktree cleanup failed at {wt.path}: {exc}]"
+            return f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]" if cleanup.kept else ""
+
+        trace_node = None
+        try:
+            # 为子 agent 创建权限检查器
+            pm_str = definition.permission_mode
+            pm_enum = getattr(
+                PermissionMode,
+                PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
+                PermissionMode.DEFAULT,
+            )
+            checker = PermissionChecker(
+                detector=DangerousCommandDetector(),
+                sandbox=PathSandbox(work_dir),
+                rule_engine=(self._parent_agent.permission_checker.rule_engine
+                             if self._parent_agent.permission_checker else RuleEngine()),
+                mode=pm_enum,
+            )
+
+            # 创建子 agent
+            sub_agent = AgentClass(
+                client=client,
+                registry=filtered_registry,
+                protocol=self._parent_agent.protocol,
+                work_dir=work_dir,
+                spawn_allowed=False,
+                sandbox_root=work_dir if wt else self._parent_agent.sandbox_root,
+                max_iterations=definition.max_turns,
+                permission_checker=checker,
+                context_window=self._parent_agent.context_window,
+                instructions_content=definition.system_prompt,
+                hook_engine=self._parent_agent.hook_engine,
+            )
+            sub_agent.parent_id = self._parent_agent.agent_id
+            sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+
+            # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
+            # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
+            if p.subagent_type is None:
+                from nanocursor.context import clone_replacement_state
+                sub_agent.replacement_state = clone_replacement_state(
+                    self._parent_agent.replacement_state
+                )
+
+            # 注册追踪节点
+            trace_node = self._trace_manager.create(
+                agent_type=definition.agent_type,
+                parent_id=self._parent_agent.agent_id,
+                trace_id=sub_agent.trace_id,
+            )
+            sub_agent.agent_id = trace_node.agent_id
+            trace_node.isolation = isolation
+            trace_node.work_dir = work_dir
+
+            sub_agent.worktree_cleanup = cleanup_worktree
+
+            agent_name = p.name or p.subagent_type or f"agent-{trace_node.agent_id}"
+
+            if is_background:
+                if is_fork:
+                    sub_agent._fork_conversation = conversation
+                task_id = self._task_manager.launch(
+                    agent=sub_agent,
+                    task="" if is_fork else p.prompt,
+                    name=agent_name,
+                    fork_conversation=conversation if is_fork else None,
+                )
+                return ToolResult(
+                    output=f"Sub-agent launched in background.\n"
+                    f"Task ID: {task_id}\n"
+                    f"Agent: {agent_name}\n"
+                    f"Type: {definition.agent_type}\n"
+                    f"Isolation: {isolation}\nWorking directory: {work_dir}\n"
+                    f"The system will notify automatically when it completes.\n"
+                    f"Do NOT wait, sleep, or poll. Report the task ID to the user and move on.",
+                )
+
+        except asyncio.CancelledError:
+            await cleanup_worktree()
+            if trace_node is not None:
+                self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            raise
+        except Exception as exc:
+            note = await cleanup_worktree()
+            if trace_node is not None:
+                self._trace_manager.complete(trace_node.agent_id, "failed")
+            return ToolResult(f"Failed to start sub-agent: {exc}{note}", True)
+
+        result_text = ""
+        error = False
+        try:
+            result_text = await sub_agent.run_to_completion("" if is_fork else p.prompt, conversation if is_fork else None)
+            self._trace_manager.complete(trace_node.agent_id, "completed")
+        except asyncio.CancelledError:
+            self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            raise
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
-            return ToolResult(
-                output=f"Sub-agent failed: {e}", is_error=True
-            )
-
-        self._trace_manager.update(
-            trace_node.agent_id,
-            input_tokens=sub_agent.total_input_tokens,
-            output_tokens=sub_agent.total_output_tokens,
-        )
-        self._trace_manager.complete(trace_node.agent_id, "completed")
-
-        return ToolResult(output=result_text or "(sub-agent returned no output)")
+            result_text, error = f"Sub-agent failed: {e}", True
+        finally:
+            self._trace_manager.update(trace_node.agent_id, input_tokens=sub_agent.total_input_tokens,
+                                       output_tokens=sub_agent.total_output_tokens)
+            result_text += await cleanup_worktree()
+        return ToolResult(result_text or "(sub-agent returned no output)", error)
 
     async def _execute_as_teammate(self, p: AgentToolParams) -> ToolResult:
         if self._team_manager is None:
@@ -404,6 +449,8 @@ class AgentTool(Tool):
             registry=teammate_registry,
             protocol=self._parent_agent.protocol,
             work_dir=wt.path,
+            sandbox_root=wt.path,
+            spawn_allowed=False,
             max_iterations=definition.max_turns,
             permission_checker=checker,
             context_window=self._parent_agent.context_window,
@@ -527,126 +574,7 @@ class AgentTool(Tool):
 
 
     async def _execute_with_worktree(self, p: AgentToolParams) -> ToolResult:
-        if self._worktree_manager is None:
-            return ToolResult(
-                output="Worktree isolation is not available: WorktreeManager not configured.",
-                is_error=True,
-            )
-
-        from nanocursor.agents.parser import AgentDef
-        from nanocursor.agents.tool_filter import resolve_agent_tools
-        from nanocursor.agent import Agent as AgentClass
-        from nanocursor.conversation import ConversationManager
-        from nanocursor.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
-        from nanocursor.worktree.integration import (
-            build_worktree_notice,
-            generate_worktree_name,
-        )
-
-        definition: AgentDef | None = None
-        if p.subagent_type:
-            definition = self._agent_loader.get(p.subagent_type)
-            if definition is None:
-                return ToolResult(
-                    output=f"Unknown agent type: '{p.subagent_type}'. "
-                    f"Available types: {', '.join(t for t, _ in self._agent_loader.list_agents())}",
-                    is_error=True,
-                )
-        else:
-            definition = AgentDef(
-                agent_type="worktree-agent",
-                when_to_use="Isolated worktree agent",
-                system_prompt="",
-                disallowed_tools=[],
-                model="inherit",
-                max_turns=self._parent_agent.max_iterations,
-                permission_mode="bypassPermissions",
-                source="builtin",
-            )
-
-        wt_name = generate_worktree_name()
-        try:
-            wt = await self._worktree_manager.create(wt_name, "HEAD")
-        except Exception as e:
-            return ToolResult(
-                output=f"Failed to create worktree: {e}",
-                is_error=True,
-            )
-
-        notice = build_worktree_notice(self._parent_agent.work_dir, wt.path)
-        task = notice + "\n\n" + p.prompt
-
-        client = self._select_llm(p, definition)
-
-        _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
-        filtered_registry = resolve_agent_tools(
-            _base_registry, definition, False
-        )
-
-        pm_str = definition.permission_mode
-        pm_enum = getattr(
-            PermissionMode,
-            PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
-            PermissionMode.DEFAULT,
-        )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
-        )
-
-        sub_agent = AgentClass(
-            client=client,
-            registry=filtered_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=wt.path,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
-
-        trace_node = self._trace_manager.create(
-            agent_type=definition.agent_type,
-            parent_id=self._parent_agent.agent_id,
-            trace_id=sub_agent.trace_id,
-        )
-        sub_agent.agent_id = trace_node.agent_id
-
-        try:
-            result_text = await sub_agent.run_to_completion(task)
-        except Exception as e:
-            self._trace_manager.complete(trace_node.agent_id, "failed")
-            return ToolResult(
-                output=f"Sub-agent in worktree failed: {e}",
-                is_error=True,
-            )
-
-        self._trace_manager.update(
-            trace_node.agent_id,
-            input_tokens=sub_agent.total_input_tokens,
-            output_tokens=sub_agent.total_output_tokens,
-        )
-        self._trace_manager.complete(trace_node.agent_id, "completed")
-
-        cleanup = await self._worktree_manager.auto_cleanup(wt_name, wt.head_commit)
-        if cleanup.kept:
-            result_text = (result_text or "") + (
-                f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
-            )
-
-        return ToolResult(output=result_text or "(sub-agent returned no output)")
-
+        return await self.execute(p.model_copy(update={"isolation": "worktree"}))
 
     def _create_client_for_model(self, model_alias: str) -> LLMClient | None:
         if self._provider_config is None:

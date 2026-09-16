@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from nanocursor.tools.runtime import resolve_workspace_path
 from nanocursor.tools.base import SKIP_DIRS, Tool, ToolResult
 
 
@@ -23,7 +24,7 @@ class Grep(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        base = Path(params.path)
+        base = resolve_workspace_path(params.path)
         if not base.exists():
             return ToolResult(output=f"Error: path not found: {params.path}", is_error=True)
 
@@ -38,7 +39,7 @@ class Grep(Tool):
 
         results: list[str] = []
         for file_path in sorted(base.glob(glob_pattern)):
-            if not file_path.is_file():
+            if not file_path.resolve().is_relative_to(base) or not file_path.is_file():
                 continue
             if any(part in SKIP_DIRS for part in file_path.parts):
                 continue

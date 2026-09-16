@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from nanocursor.tools.file_io import path_lock, read_snapshot
+from nanocursor.tools.runtime import resolve_workspace_path
 from nanocursor.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ class ReadFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        path = Path(params.file_path)
+        path = resolve_workspace_path(params.file_path)
         if not path.exists():
             return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
         if not path.is_file():
@@ -41,20 +42,12 @@ class ReadFile(Tool):
         resolved = str(path.resolve())
 
         try:
-            text = self._cache.get(resolved) if self._cache else None
-            if text is None:
-                text = path.read_text(encoding="utf-8")
-                if self._cache:
-                    self._cache.put(resolved, text)
+            with path_lock(path):
+                text, version = read_snapshot(path, self._cache)
+                if self._state_cache is not None:
+                    self._state_cache.record_version(resolved, version)
         except Exception as e:
             return ToolResult(output=f"Error reading file: {e}", is_error=True)
-
-        if self._state_cache:
-            try:
-                mtime_ns = path.stat().st_mtime_ns
-                self._state_cache.record(resolved, text, mtime_ns)
-            except OSError:
-                pass
 
         lines = text.splitlines()
         selected = lines[params.offset : params.offset + params.limit]

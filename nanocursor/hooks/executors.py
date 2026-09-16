@@ -2,35 +2,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 from nanocursor.hooks.models import Action, ActionResult, HookContext
+from nanocursor.tools.bash import _spawn_owned_shell, _terminate_process_group
+from nanocursor.tools.runtime import current_runtime
 
 log = logging.getLogger(__name__)
 
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
     command = ctx.expand(action.command)
+    context = current_runtime()
+    proc = None
     try:
-        proc = await asyncio.create_subprocess_shell(
+        proc = await _spawn_owned_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=str(context.cwd) if context else None,
+            start_new_session=os.name == "posix",
         )
         try:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=action.timeout
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _terminate_process_group(proc)
             return ActionResult(
                 output=f"Command timed out after {action.timeout}s: {command}",
                 success=False,
             )
         output = stdout.decode(errors="replace").strip() if stdout else ""
         return ActionResult(output=output, success=proc.returncode == 0)
+    except asyncio.CancelledError:
+        if proc is not None:
+            await _terminate_process_group(proc)
+        raise
     except Exception as e:
         return ActionResult(output=f"Command execution error: {e}", success=False)
 

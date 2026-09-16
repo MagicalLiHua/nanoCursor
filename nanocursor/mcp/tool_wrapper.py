@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from mcp import types as mcp_types
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, RootModel, model_validator
+from jsonschema.validators import validator_for
+from referencing import Registry
 
 from nanocursor.mcp.client import MCPClient
 from nanocursor.tools.base import Tool, ToolResult
@@ -12,30 +14,23 @@ from nanocursor.tools.base import Tool, ToolResult
 def _build_params_model(
     tool_name: str, input_schema: dict[str, Any]
 ) -> type[BaseModel]:
-    properties = input_schema.get("properties", {})
-    required = set(input_schema.get("required", []))
+    validator_type = validator_for(input_schema)
+    validator_type.check_schema(input_schema)
+    validator = validator_type(input_schema, registry=Registry(), format_checker=validator_type.FORMAT_CHECKER)
 
-    field_definitions: dict[str, Any] = {}
-    for name, prop in properties.items():
-        py_type = _json_type_to_python(prop.get("type", "string"))
-        if name in required:
-            field_definitions[name] = (py_type, ...)
-        else:
-            field_definitions[name] = (py_type | None, None)
+    class Params(RootModel[dict[str, Any]]):
+        @model_validator(mode="before")
+        @classmethod
+        def validate_schema(cls, value: Any) -> Any:
+            errors = list(validator.iter_errors(value))
+            if errors:
+                error = errors[0]
+                location = ".".join(map(str, error.absolute_path)) or "$"
+                raise ValueError(f"{location}: {error.message}")
+            return value
 
-    return create_model(f"{tool_name}Params", **field_definitions)
-
-
-def _json_type_to_python(json_type: str) -> type:
-    mapping: dict[str, type] = {
-        "string": str,
-        "integer": int,
-        "number": float,
-        "boolean": bool,
-        "object": dict,
-        "array": list,
-    }
-    return mapping.get(json_type, str)
+    Params.__name__ = f"{tool_name}Params"
+    return Params
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -98,7 +93,7 @@ class MCPToolWrapper(Tool):
 
         try:
             result = await self._client.call_tool(
-                self._tool_def.name, params.model_dump(exclude_none=True)
+                self._tool_def.name, params.model_dump()
             )
         except Exception as e:
             self._client._alive = False

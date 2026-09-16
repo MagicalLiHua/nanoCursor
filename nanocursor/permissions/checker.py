@@ -82,6 +82,17 @@ class PermissionChecker:
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
         content = extract_content(tool.name, arguments)
 
+        # Explicit restrictions precede convenience shortcuts and permission modes.
+        rule_result = self.rule_engine.evaluate(tool.name, content)
+        if rule_result == "deny":
+            return Decision(effect="deny", reason="权限规则拒绝")
+        if tool.name == "Bash":
+            hit, reason = self.detector.detect(content)
+            if hit:
+                return Decision(effect="deny", reason=f"危险命令拦截: {reason}")
+        if rule_result == "ask":
+            return Decision(effect="ask", reason="权限规则要求确认")
+
         # Layer 0: Plan 模式例外放行
         if self.mode == PermissionMode.PLAN:
             if tool.name in _PLAN_MODE_ALLOWED_TOOLS:
@@ -91,23 +102,17 @@ class PermissionChecker:
                     return Decision(effect="allow", reason="Plan mode: plan file write")
 
         # Layer 1: 安全的只读命令（自动放行）
-        if tool.category == "command" and is_safe_command(content or ""):
+        if tool.name == "Bash" and is_safe_command(content or ""):
             return Decision(effect="allow", reason="Safe read-only command")
-
-        # Layer 1b: 危险命令黑名单（仅 Bash）
-        if tool.category == "command":
-            hit, reason = self.detector.detect(content)
-            if hit:
-                return Decision(effect="deny", reason=f"危险命令拦截: {reason}")
 
         # Layer 1c: OS 沙箱自动放行
         # 沙箱开启时，命令类工具通过了危险命令检查后直接放行——
         # 内核级隔离会阻止越权写入，无需再弹确认。
         # 拆分复合命令逐条检查，防止通过命令拼接绕过权限检查，
         # deny 规则和 ask 规则不受沙箱影响。
-        if self.sandbox_enabled and tool.category == "command":
+        if self.sandbox_enabled and tool.name == "Bash":
             import re
-            subcommands = [s.strip() for s in re.split(r'\s*(?:&&|\|\||[;|])\s*', content) if s.strip()]
+            subcommands = [s.strip() for s in re.split(r'\s*(?:&&|\|\||[;|&\n\r])\s*', content) if s.strip()]
             if not subcommands:
                 subcommands = [content]
             has_ask = False
@@ -119,11 +124,14 @@ class PermissionChecker:
                     has_ask = True
             if has_ask:
                 return Decision(effect="ask", reason="权限规则要求确认")
+            if any(ch in content for ch in "\n\r|;&<>$`(){}\\"):
+                return Decision(effect="ask", reason="复合 Shell 语法需要确认")
             return Decision(effect="allow", reason="OS 沙箱自动放行")
 
         # Layer 2: 路径沙箱（仅文件类工具）
-        if tool.category in ("read", "write") and content:
-            ok, reason = self.sandbox.check(content)
+        path_content = arguments.get("path", ".") if tool.name in ("Glob", "Grep") else content
+        if tool.category in ("read", "write") and path_content:
+            ok, reason = self.sandbox.check(str(path_content))
             if not ok and self.mode != PermissionMode.BYPASS:
                 return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}")
 

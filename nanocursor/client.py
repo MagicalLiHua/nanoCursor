@@ -26,6 +26,16 @@ from nanocursor.tools.base import (
 )
 
 
+def _complete_tool_call(tool_id: str, name: str, raw: str) -> ToolCallComplete:
+    try:
+        arguments = json.loads(raw)
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must be a JSON object")
+        return ToolCallComplete(tool_id, name, arguments, raw_arguments=raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return ToolCallComplete(tool_id, name, {}, raw_arguments=raw, arguments_error=str(exc))
+
+
 # 限制自动拉取模型元数据的超时时间，防止慢响应或挂起的
 # /v1/models 端点拖延启动。超时后降级为 None（即"未知"），
 # 由下一层 context window 解析逻辑接管。
@@ -197,12 +207,7 @@ class AnthropicClient(LLMClient):
                     "budget_tokens": max(self.max_output_tokens - 1, 1024),
                 }
 
-        current_tool_name = ""
-        current_tool_id = ""
-        json_accum = ""
-        in_thinking = False
-        thinking_accum = ""
-        thinking_signature = ""
+        blocks: dict[int, dict[str, str]] = {}
 
         # MiniMax 等 Anthropic 兼容 provider 会在 message_start 里返回
         # input_tokens=0，而把真实的 input_tokens / cache_read_input_tokens /
@@ -217,52 +222,35 @@ class AnthropicClient(LLMClient):
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 async for event in stream:
+                    index = getattr(event, "index", 0)
                     if event.type == "content_block_start":
                         block = event.content_block
-                        if block.type == "thinking":
-                            in_thinking = True
-                            thinking_accum = ""
-                            thinking_signature = ""
-                        elif block.type == "tool_use":
-                            current_tool_name = block.name
-                            current_tool_id = block.id
-                            json_accum = ""
-                            yield ToolCallStart(
-                                tool_name=current_tool_name,
-                                tool_id=current_tool_id,
-                            )
+                        blocks[index] = {"type": block.type, "text": "", "signature": ""}
+                        if block.type == "tool_use":
+                            blocks[index].update(name=block.name, id=block.id, args="",
+                                                 initial=json.dumps(getattr(block, "input", {}) or {}))
+                            yield ToolCallStart(tool_name=block.name, tool_id=block.id)
                     elif event.type == "content_block_delta":
                         delta = event.delta
+                        block = blocks.get(index)
                         if delta.type == "text_delta":
                             yield TextDelta(text=delta.text)
-                        elif delta.type == "thinking_delta":
-                            thinking_accum += delta.thinking
+                        elif delta.type == "thinking_delta" and block is not None:
+                            block["text"] += delta.thinking
                             yield ThinkingDelta(text=delta.thinking)
-                        elif delta.type == "signature_delta":
-                            thinking_signature = delta.signature
+                        elif delta.type == "signature_delta" and block is not None:
+                            block["signature"] += delta.signature
                         elif delta.type == "input_json_delta":
-                            json_accum += delta.partial_json
+                            if block is None or block["type"] != "tool_use":
+                                raise LLMError("Tool argument delta has no matching content block")
+                            block["args"] += delta.partial_json
                             yield ToolCallDelta(text=delta.partial_json)
                     elif event.type == "content_block_stop":
-                        if in_thinking:
-                            yield ThinkingComplete(
-                                thinking=thinking_accum,
-                                signature=thinking_signature,
-                            )
-                            in_thinking = False
-                        if current_tool_name:
-                            try:
-                                args = json.loads(json_accum) if json_accum else {}
-                            except json.JSONDecodeError:
-                                args = {}
-                            yield ToolCallComplete(
-                                tool_id=current_tool_id,
-                                tool_name=current_tool_name,
-                                arguments=args,
-                            )
-                            current_tool_name = ""
-                            current_tool_id = ""
-                            json_accum = ""
+                        block = blocks.pop(index, None)
+                        if block and block["type"] == "thinking":
+                            yield ThinkingComplete(thinking=block["text"], signature=block["signature"])
+                        elif block and block["type"] == "tool_use":
+                            yield _complete_tool_call(block["id"], block["name"], block["args"] or block["initial"])
                     elif event.type == "message_delta":
                         # 捕获 message_delta 中的 usage 信息（MiniMax 兼容）。
                         delta_usage = getattr(event, "usage", None)
@@ -279,6 +267,8 @@ class AnthropicClient(LLMClient):
                     elif event.type == "message_stop":
                         pass
 
+                if any(block["type"] == "tool_use" for block in blocks.values()):
+                    raise LLMError("Stream ended before tool arguments completed")
                 final = await stream.get_final_message()
                 usage = final.usage
                 input_tokens = usage.input_tokens
@@ -353,9 +343,8 @@ class OpenAIClient(LLMClient):
         if tools:
             kwargs["tools"] = tools
 
-        current_tool_name = ""
-        current_call_id = ""
-        json_accum = ""
+        calls: dict[str | int, dict[str, Any]] = {}
+        indices: dict[int, str | int] = {}
         reasoning_id = ""
         reasoning_text = ""
 
@@ -369,46 +358,36 @@ class OpenAIClient(LLMClient):
                     yield ThinkingDelta(text=event.delta)
                 elif event.type == "response.reasoning_summary_text.done":
                     yield ThinkingComplete(thinking=reasoning_text, signature=reasoning_id)
-                elif event.type == "response.function_call_arguments.delta":
-                    if not current_tool_name:
-                        current_tool_name = getattr(event, "name", "") or ""
-                        current_call_id = getattr(event, "call_id", "") or ""
-                        if current_tool_name:
-                            yield ToolCallStart(
-                                tool_name=current_tool_name,
-                                tool_id=current_call_id,
-                            )
-                    json_accum += event.delta
-                    yield ToolCallDelta(text=event.delta)
-                elif event.type == "response.function_call_arguments.done":
-                    if not current_tool_name:
-                        current_tool_name = getattr(event, "name", "") or ""
-                        current_call_id = getattr(event, "call_id", "") or ""
-                    try:
-                        args = json.loads(json_accum) if json_accum else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                    yield ToolCallComplete(
-                        tool_id=current_call_id,
-                        tool_name=current_tool_name,
-                        arguments=args,
-                    )
-                    current_tool_name = ""
-                    current_call_id = ""
-                    json_accum = ""
                 elif event.type == "response.output_item.added":
                     item = getattr(event, "item", None)
                     if item and getattr(item, "type", "") == "function_call":
-                        current_tool_name = getattr(item, "name", "")
-                        current_call_id = getattr(item, "call_id", "")
-                        json_accum = ""
-                        yield ToolCallStart(
-                            tool_name=current_tool_name,
-                            tool_id=current_call_id,
-                        )
+                        index = getattr(event, "output_index", 0)
+                        key = getattr(item, "id", None) or index
+                        indices[index] = key
+                        calls[key] = {"name": item.name, "id": item.call_id, "args": "", "done": False}
+                        yield ToolCallStart(tool_name=item.name, tool_id=item.call_id)
                     elif item and getattr(item, "type", "") == "reasoning":
                         reasoning_id = getattr(item, "id", "")
                         reasoning_text = ""
+                elif event.type in ("response.function_call_arguments.delta", "response.function_call_arguments.done"):
+                    index = getattr(event, "output_index", 0)
+                    key = getattr(event, "item_id", None) or indices.get(index, index)
+                    call = calls.get(key)
+                    if call is None:
+                        # Some compatible servers put identity on the done event.
+                        call_id, name = getattr(event, "call_id", ""), getattr(event, "name", "")
+                        if not call_id or not name:
+                            raise LLMError("Tool arguments have no matching output item/call ID")
+                        call = calls[key] = {"name": name, "id": call_id, "args": "", "done": False}
+                    if call["done"]:
+                        continue
+                    if event.type.endswith(".delta"):
+                        call["args"] += event.delta
+                        yield ToolCallDelta(text=event.delta)
+                    else:
+                        raw = getattr(event, "arguments", None)
+                        yield _complete_tool_call(call["id"], call["name"], raw if raw is not None else call["args"])
+                        call["done"] = True
                 elif event.type == "response.completed":
                     resp = getattr(event, "response", None)
                     usage = getattr(resp, "usage", None) if resp else None
@@ -426,6 +405,9 @@ class OpenAIClient(LLMClient):
                         cache_read=cache_read,
                         cache_creation=0,
                     )
+
+            if any(not call["done"] for call in calls.values()):
+                raise LLMError("Stream ended before tool arguments completed")
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -587,16 +569,11 @@ class OpenAICompatClient(LLMClient):
                         reasoning_accum = ""
                     if choice.finish_reason == "tool_calls":
                         for _idx, call in sorted(active_calls.items()):
-                            try:
-                                args = json.loads(call["args"]) if call["args"] else {}
-                            except json.JSONDecodeError:
-                                args = {}
-                            yield ToolCallComplete(
-                                tool_id=call["id"],
-                                tool_name=call["name"],
-                                arguments=args,
-                            )
+                            yield _complete_tool_call(call["id"], call["name"], call["args"])
                         active_calls.clear()
+
+            if active_calls:
+                raise LLMError("Stream ended before tool arguments completed")
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e

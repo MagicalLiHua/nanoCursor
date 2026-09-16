@@ -2,52 +2,55 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from nanocursor.tools.file_io import FileVersion, read_snapshot
+from nanocursor.tools.runtime import current_runtime
+
 
 class FileStateCache:
-    """Tracks which files have been read, enforcing read-before-edit.
+    """Versions belong to the observing agent, not a shared tool instance.
 
-    Stores { absolute_path: (content, mtime_ns) } after each ReadFile call.
-    EditFile and WriteFile check the cache before proceeding:
-      - Gate 1: file must have been read (present in cache).
-      - Gate 2: file must not have been modified since the read (mtime_ns matches).
+    Each model response uses a frozen expectation snapshot. Another write cannot
+    bless a stale edit. Tools hold a path lock across compare-and-write; external
+    editors do not participate in that lock.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[str, int]] = {}
+        self._cache: dict[str, FileVersion] = {}
+
+    def _entries(self) -> dict[str, FileVersion]:
+        context = current_runtime()
+        return context.file_versions if context is not None else self._cache
+
+    def record_version(self, path: str, version: FileVersion) -> None:
+        self._entries()[path] = version
 
     def record(self, path: str, content: str, mtime_ns: int) -> None:
-        """Record a file's content and mtime after a successful read."""
-        self._cache[path] = (content, mtime_ns)
+        text, version = read_snapshot(Path(path))
+        if text != content or version.stat[3] != mtime_ns:
+            self._entries().pop(path, None)
+            return
+        self.record_version(path, version)
 
     def check(self, path: str) -> tuple[bool, str]:
-        """Check whether the file is safe to edit/write.
-
-        Returns (ok, error_message). If ok is True, error_message is empty.
-        """
-        entry = self._cache.get(path)
-        if entry is None:
+        context = current_runtime()
+        entries = context.expected_versions if context and context.expected_versions is not None else self._entries()
+        expected = entries.get(path)
+        if expected is None:
             return False, "Error: file has not been read yet. Read it first before editing."
-
-        _, cached_mtime_ns = entry
         try:
-            current_mtime_ns = Path(path).stat().st_mtime_ns
+            _, current = read_snapshot(Path(path))
         except OSError:
-            # File may have been deleted; allow the write to proceed
-            # (WriteFile will create it, EditFile will fail on its own).
-            return True, ""
-
-        if current_mtime_ns != cached_mtime_ns:
+            return False, "Error: file changed or was deleted since last read. Read it again before editing."
+        if current != expected:
             return False, "Error: file has been modified since last read. Read it again before editing."
-
         return True, ""
 
+    def has_read(self, path: str) -> bool:
+        return path in self._entries()
+
     def update(self, path: str) -> None:
-        """Update the cache entry after a successful edit/write."""
         try:
-            p = Path(path)
-            content = p.read_text(encoding="utf-8")
-            mtime_ns = p.stat().st_mtime_ns
-            self._cache[path] = (content, mtime_ns)
+            _, version = read_snapshot(Path(path))
+            self.record_version(path, version)
         except OSError:
-            # If we can't read it back, just remove the stale entry.
-            self._cache.pop(path, None)
+            self._entries().pop(path, None)

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shlex
+import signal
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from nanocursor.tools.base import Tool, ToolResult
+from nanocursor.tools.runtime import current_runtime
 
 if TYPE_CHECKING:
     from nanocursor.sandbox import Sandbox, SandboxConfig
@@ -105,7 +109,7 @@ def _exit_code_hint(command: str, exit_code: int) -> str:
 
 class Params(BaseModel):
     command: str = Field(description="Shell command to execute")
-    timeout: int = Field(default=120, description="Timeout in seconds (max 600)")
+    timeout: int = Field(default=120, ge=1, le=MAX_TIMEOUT, description="Timeout in seconds (max 600)")
 
 
 class Bash(Tool):
@@ -126,21 +130,34 @@ class Bash(Tool):
 
         # 如果启用了 OS 沙箱，将命令包装为沙箱内执行
         actual_command = params.command
+        context = current_runtime()
+        config = self.sandbox_config
+        if config and context and context.sandbox_root:
+            config = replace(config, allow_write=[str(context.sandbox_root), "/tmp"],
+                             deny_write=[*config.deny_write,
+                                         str(context.sandbox_root / ".nanocursor/config.yaml"),
+                                         str(context.sandbox_root / ".nanocursor/permissions.local.yaml")])
         if self.sandbox and self.sandbox_config and self.sandbox.available():
-            actual_command = self.sandbox.wrap(params.command, self.sandbox_config)
+            actual_command = self.sandbox.wrap(params.command, config)
 
+        proc = None
         try:
-            proc = await asyncio.create_subprocess_shell(
+            proc = await _spawn_owned_shell(
                 actual_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # 合并 stderr 到 stdout
-                cwd=self.work_dir,
+                cwd=str(context.cwd) if context else self.work_dir,
+                start_new_session=os.name == "posix",
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            if proc is not None:
+                await _terminate_process_group(proc)
             return ToolResult(output=f"Error: command timed out after {timeout}s", is_error=True)
+        except asyncio.CancelledError:
+            if proc is not None:
+                await _terminate_process_group(proc)
+            raise
         except Exception as e:
             return ToolResult(output=f"Error executing command: {e}", is_error=True)
 
@@ -161,3 +178,38 @@ class Bash(Tool):
             output = "(no output)"
 
         return ToolResult(output=output, is_error=False)
+
+
+async def _spawn_owned_shell(command: str, **kwargs: object) -> asyncio.subprocess.Process:
+    creation = asyncio.create_task(asyncio.create_subprocess_shell(command, **kwargs))
+    try:
+        return await asyncio.shield(creation)
+    except asyncio.CancelledError:
+        # Cancellation can arrive after fork but before the Process is returned.
+        # Finish acquiring ownership before terminating the new process group.
+        try:
+            proc = await creation
+        except Exception:
+            raise asyncio.CancelledError from None
+        await _terminate_process_group(proc)
+        raise
+
+
+async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
+    def stop(sig: int) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            elif proc.returncode is None:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+    stop(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        # Descendants may outlive the shell or ignore SIGTERM.
+        stop(signal.SIGKILL)
+        await proc.wait()

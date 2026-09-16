@@ -20,7 +20,7 @@ class AgentParseError(Exception):
     pass
 
 
-VALID_ISOLATION_MODES = {"", "worktree"}
+VALID_ISOLATION_MODES = {"", "none", "auto", "worktree"}
 
 
 @dataclass

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from contextlib import aclosing
 import logging
 from typing import TYPE_CHECKING
 
@@ -64,18 +66,22 @@ class SkillExecutor:
             protocol=self.protocol,
             work_dir=self.agent.work_dir,
             max_iterations=self.agent.max_iterations,
-            permission_checker=None,
+            permission_checker=copy.copy(self.agent.permission_checker),
+            hook_engine=self.agent.hook_engine,
+            spawn_allowed=False,
+            sandbox_root=self.agent.sandbox_root,
             context_window=self.agent.context_window,
         )
 
         result_parts: list[str] = []
-        async for event in fork_agent.run(fork_conv):
-            if isinstance(event, StreamText):
-                result_parts.append(event.text)
-            elif isinstance(event, ErrorEvent):
-                result_parts.append(f"\n[Error: {event.message}]")
-            elif isinstance(event, LoopComplete):
-                break
+        async with aclosing(fork_agent.run(fork_conv, interactive=False)) as events:
+            async for event in events:
+                if isinstance(event, StreamText):
+                    result_parts.append(event.text)
+                elif isinstance(event, ErrorEvent):
+                    result_parts.append(f"\n[Error: {event.message}]")
+                elif isinstance(event, LoopComplete):
+                    break
 
         return "".join(result_parts)
 

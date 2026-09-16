@@ -17,6 +17,8 @@ class TraceNode:
     start_time: float = field(default_factory=time.monotonic)
     end_time: float | None = None
     status: str = "running"
+    isolation: str = "none"
+    work_dir: str = ""
 
 
 class TraceManager:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/\s*$"), "递归强制删除根目录"),
@@ -14,32 +15,31 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-_SAFE_COMMANDS = frozenset({
-    "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc",
-    "find", "which", "whereis", "whoami", "hostname", "uname",
-    "date", "cal", "uptime", "df", "du", "free", "env", "printenv",
-    "file", "stat", "readlink", "realpath", "basename", "dirname",
-    "sort", "uniq", "tr", "cut", "awk", "sed", "grep", "egrep", "fgrep",
-    "diff", "comm", "tee", "xargs", "true", "false", "test",
-    "git status", "git log", "git diff", "git show", "git branch",
-    "git tag", "git remote", "git rev-parse", "git ls-files",
-    "git blame", "git stash list", "go version", "go env",
-    "node -v", "npm -v", "npx", "python --version", "pip list",
-    "cargo --version", "rustc --version", "java -version", "java --version",
-})
-
-
 def is_safe_command(command: str) -> bool:
     trimmed = command.strip()
     if not trimmed:
         return False
-    for ch in ("|", ";", "&&", ">", "$(", "`"):
-        if ch in trimmed:
-            return False
-    for safe in _SAFE_COMMANDS:
-        if trimmed == safe or trimmed.startswith(safe + " "):
-            return True
-    return False
+    # This is deliberately a small grammar, not a general shell parser. Commands
+    # that read arbitrary paths, expand shell input or run programs require approval.
+    if any(ch in command for ch in "\n\r|;&<>$`(){}\\"):
+        return False
+    try:
+        words = shlex.split(trimmed)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    if words[0] in {"pwd", "whoami", "hostname", "true", "false"}:
+        return len(words) == 1
+    if words[0] == "echo":
+        return not any(ch in trimmed for ch in "*?[]~!")
+    if words[0] == "ls":
+        return all(word in {".", "-l", "-a", "-la", "-al", "-h", "-lah", "-1"}
+                   for word in words[1:])
+    if words[:2] == ["git", "status"]:
+        return all(word in {"--short", "--porcelain", "--branch", "-s", "-b", "-sb"}
+                   for word in words[2:])
+    return words in [["node", "-v"], ["python", "--version"], ["python3", "--version"]]
 
 
 class DangerousCommandDetector:

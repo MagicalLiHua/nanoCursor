@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from nanocursor.tools.runtime import resolve_workspace_path
 from nanocursor.tools.base import SKIP_DIRS, Tool, ToolResult
 
 
@@ -21,14 +22,14 @@ class Glob(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        base = Path(params.path)
+        base = resolve_workspace_path(params.path)
         if not base.exists():
             return ToolResult(output=f"Error: path not found: {params.path}", is_error=True)
 
         try:
             found = [
                 p for p in base.glob(params.pattern)
-                if p.is_file() and not any(part in SKIP_DIRS for part in p.parts)
+                if p.resolve().is_relative_to(base) and p.is_file() and not any(part in SKIP_DIRS for part in p.parts)
             ]
             # 按修改时间倒序，最近修改的排前面
             found.sort(key=lambda p: p.stat().st_mtime, reverse=True)

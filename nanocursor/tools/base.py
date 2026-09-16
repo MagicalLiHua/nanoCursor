@@ -45,6 +45,9 @@ class Tool(ABC):
     @abstractmethod
     async def execute(self, params: BaseModel) -> ToolResult: ...
 
+    def validate_arguments(self, arguments: dict[str, Any]) -> BaseModel:
+        return self.params_model.model_validate(arguments)
+
 
 # --- 流式事件 ---
 
@@ -70,6 +73,8 @@ class ToolCallComplete:
     tool_id: str
     tool_name: str
     arguments: dict[str, Any]
+    raw_arguments: str = ""
+    arguments_error: str = ""
 
 
 @dataclass

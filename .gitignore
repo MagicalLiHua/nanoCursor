@@ -19,3 +19,4 @@ evaluation/agent-eval-lab/node_modules/
 evaluation/agent-eval-lab/dist/
 .claude/
 CLAUDE.md
+nanocursor/TECHNICAL_DEBT.md

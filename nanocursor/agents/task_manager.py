@@ -122,6 +122,13 @@ class TaskManager:
             bg.status = "failed"
             bg.result = f"Error: {e}"
         finally:
+            cleanup = getattr(bg.agent, "worktree_cleanup", None)
+            if cleanup is not None:
+                try:
+                    bg.result += await cleanup()
+                except Exception as exc:
+                    log.exception("Worktree cleanup failed")
+                    bg.result += f"\nWorktree cleanup failed: {exc}"
             bg.end_time = time.monotonic()
             bg.progress.input_tokens = bg.agent.total_input_tokens
             bg.progress.output_tokens = bg.agent.total_output_tokens
@@ -168,6 +175,13 @@ class TaskManager:
             bg.status = "failed"
             bg.result = f"Error: {e}"
         finally:
+            cleanup = getattr(bg.agent, "worktree_cleanup", None)
+            if cleanup is not None:
+                try:
+                    bg.result += await cleanup()
+                except Exception as exc:
+                    log.exception("Worktree cleanup failed")
+                    bg.result += f"\nWorktree cleanup failed: {exc}"
             bg.end_time = time.monotonic()
             bg.progress.input_tokens = bg.agent.total_input_tokens
             bg.progress.output_tokens = bg.agent.total_output_tokens

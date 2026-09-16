@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from nanocursor.tools.file_io import atomic_write, path_lock
+from nanocursor.tools.runtime import resolve_workspace_path
 from nanocursor.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -34,24 +35,24 @@ class WriteFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        if self.file_history is not None:
-            self.file_history.track_edit(params.file_path)
+        path = resolve_workspace_path(params.file_path)
 
-        path = Path(params.file_path)
+        with path_lock(path):
+            if self._state_cache is not None and (path.exists() or self._state_cache.has_read(str(path))):
+                resolved = str(path.resolve())
+                ok, err_msg = self._state_cache.check(resolved)
+                if not ok:
+                    return ToolResult(output=err_msg, is_error=True)
 
-        if self._state_cache and path.exists():
-            resolved = str(path.resolve())
-            ok, err_msg = self._state_cache.check(resolved)
-            if not ok:
-                return ToolResult(output=err_msg, is_error=True)
-
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(params.content, encoding="utf-8")
-            if self._cache:
-                self._cache.invalidate(str(path.resolve()))
-            if self._state_cache:
-                self._state_cache.update(str(path.resolve()))
-        except Exception as e:
-            return ToolResult(output=f"Error writing file: {e}", is_error=True)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if self.file_history is not None:
+                    self.file_history.track_edit(str(path))
+                atomic_write(path, params.content)
+                if self._cache is not None:
+                    self._cache.invalidate(str(path.resolve()))
+                if self._state_cache:
+                    self._state_cache.update(str(path.resolve()))
+            except Exception as e:
+                return ToolResult(output=f"Error writing file: {e}", is_error=True)
         return ToolResult(output=f"Successfully wrote to {params.file_path}")

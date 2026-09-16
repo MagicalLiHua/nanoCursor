@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import os
 import random
 import time as _time
@@ -846,7 +847,7 @@ class NanoCursorApp(App):
         )
         restored = self.worktree_manager.restore_session()
         if restored:
-            self.agent.work_dir = restored.worktree_path
+            self.agent.set_work_dir(restored.worktree_path, isolated=True)
 
         wt_command = create_worktree_command(self.worktree_manager)
         self.command_registry.register_sync(wt_command)
@@ -1371,151 +1372,152 @@ class NanoCursorApp(App):
         await asyncio.sleep(0)
 
         try:
-            async for event in self.agent.run(self.conversation):
-                if isinstance(event, ThinkingText):
-                    self.call_after_refresh(chat.scroll_end, animate=False)
+            async with aclosing(self.agent.run(self.conversation)) as agent_events:
+                async for event in agent_events:
+                    if isinstance(event, ThinkingText):
+                        self.call_after_refresh(chat.scroll_end, animate=False)
 
-                elif isinstance(event, StreamText):
-                    if streaming_label is not None and not accumulated_text:
-                        await streaming_label.remove()
+                    elif isinstance(event, StreamText):
+                        if streaming_label is not None and not accumulated_text:
+                            await streaming_label.remove()
+                            streaming_label = Static("", classes="message ai-message")
+                            await ai_row.mount(streaming_label)
+                        accumulated_text += event.text
+                        from rich.text import Text as RichText
+                        t = RichText()
+                        t.append("● ", style="bold color(99)")
+                        t.append(accumulated_text)
+                        streaming_label.update(t)
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                    elif isinstance(event, RetryEvent):
+                        self._show_system_message(f"↻ Retrying: {event.reason}")
+
+                    elif isinstance(event, ToolUseEvent):
+                        if accumulated_text:
+                            if streaming_label is not None:
+                                await streaming_label.remove()
+                            from rich.text import Text as RichText
+                            prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
+                            await ai_row.mount(prefix)
+                            md = Markdown(accumulated_text, classes="message ai-message")
+                            await ai_row.mount(md)
+                            streaming_label = None
+                            accumulated_text = ""
+                        elif streaming_label is not None:
+                            await streaming_label.remove()
+                            streaming_label = None
+
+                        if _is_subagent_tool(event.tool_name):
+                            agent_type = event.arguments.get("subagent_type", "")
+                            desc = event.arguments.get("description", "")
+                            block = SubAgentBlock(
+                                agent_type or "agent",
+                                desc,
+                                classes="tool-block subagent-block",
+                            )
+                        else:
+                            block = ToolCallBlock(
+                                event.tool_name, event.arguments, classes="tool-block"
+                            )
+                        await ai_row.mount(block)
+                        tool_blocks[event.tool_id] = block
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                    elif isinstance(event, PermissionRequest):
+                        await self._handle_permission_request(event)
+
+                    elif isinstance(event, ToolResultEvent):
+                        block = tool_blocks.get(event.tool_id)
+                        if block:
+                            block.set_result(event.output, event.is_error, event.elapsed)
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                        ask_tool = self.registry.get("AskUserQuestion")
+                        if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
+                            await self._handle_askuser(ask_tool._pending_event)
+
+                    elif isinstance(event, TurnComplete):
+                        if self.session:
+                            for msg in self.conversation.history[history_cursor:]:
+                                self.session.append(msg)
+                            history_cursor = len(self.conversation.history)
+
+                        collapsible = [
+                            (tid, blk) for tid, blk in tool_blocks.items()
+                            if isinstance(blk, ToolCallBlock)
+                            and blk.tool_name in COLLAPSIBLE_TOOLS
+                            and not blk._loading
+                        ]
+                        if len(collapsible) >= 2:
+                            total_elapsed = sum(b._elapsed for _, b in collapsible)
+                            summary = ToolGroupSummary(
+                                len(collapsible), total_elapsed,
+                                classes="tool-block tool-group-summary",
+                            )
+                            for _, blk in collapsible:
+                                blk.display = False
+                            await ai_row.mount(summary)
+
+                        tool_blocks.clear()
+                        ai_row = Vertical(classes="ai-row")
+                        await chat.mount(ai_row)
                         streaming_label = Static("", classes="message ai-message")
                         await ai_row.mount(streaming_label)
-                    accumulated_text += event.text
-                    from rich.text import Text as RichText
-                    t = RichText()
-                    t.append("● ", style="bold color(99)")
-                    t.append(accumulated_text)
-                    streaming_label.update(t)
-                    self.call_after_refresh(chat.scroll_end, animate=False)
+                        accumulated_text = ""
+                        self.call_after_refresh(chat.scroll_end, animate=False)
 
-                elif isinstance(event, RetryEvent):
-                    self._show_system_message(f"↻ Retrying: {event.reason}")
+                    elif isinstance(event, UsageEvent):
+                        pass  # token 展示已移除
 
-                elif isinstance(event, ToolUseEvent):
-                    if accumulated_text:
-                        if streaming_label is not None:
+                    elif isinstance(event, HookEvent):
+                        status = "✓" if event.success else "✗"
+                        self._show_system_message(
+                            f"Hook [{event.hook_id}] {status} {event.output}"
+                        )
+
+                    elif isinstance(event, CompactNotification):
+                        self._show_system_message(event.message)
+                        # auto_compact 已重写 conversation.history（摘要 +
+                        # boundary + 保留尾部）。先持久化 boundary 记录，然后
+                        # 将游标推进到重建后的历史末尾，这样 TurnComplete/LoopComplete
+                        # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
+                        # 前缀作为普通记录重复写入。
+                        self._persist_compact_boundary(event)
+                        history_cursor = len(self.conversation.history)
+
+                    elif isinstance(event, ErrorEvent):
+                        # 保留错误前已输出的流式文本
+                        if accumulated_text and streaming_label is not None:
                             await streaming_label.remove()
-                        from rich.text import Text as RichText
-                        prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
-                        await ai_row.mount(prefix)
-                        md = Markdown(accumulated_text, classes="message ai-message")
-                        await ai_row.mount(md)
-                        streaming_label = None
-                        accumulated_text = ""
-                    elif streaming_label is not None:
-                        await streaming_label.remove()
-                        streaming_label = None
+                            md = Markdown(accumulated_text, classes="message ai-message")
+                            await ai_row.mount(md)
+                            streaming_label = None
+                            accumulated_text = ""
+                        self._show_error(event.message)
 
-                    if _is_subagent_tool(event.tool_name):
-                        agent_type = event.arguments.get("subagent_type", "")
-                        desc = event.arguments.get("description", "")
-                        block = SubAgentBlock(
-                            agent_type or "agent",
-                            desc,
-                            classes="tool-block subagent-block",
+                    elif isinstance(event, LoopComplete):
+                        total_time = _time.monotonic() - self._thinking_start
+                        done_label = Static(
+                            f"✻ {_to_past_tense(self._thinking_verb)} for {total_time:.1f}s",
+                            classes="message thinking-done",
                         )
-                    else:
-                        block = ToolCallBlock(
-                            event.tool_name, event.arguments, classes="tool-block"
-                        )
-                    await ai_row.mount(block)
-                    tool_blocks[event.tool_id] = block
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                elif isinstance(event, PermissionRequest):
-                    await self._handle_permission_request(event)
-
-                elif isinstance(event, ToolResultEvent):
-                    block = tool_blocks.get(event.tool_id)
-                    if block:
-                        block.set_result(event.output, event.is_error, event.elapsed)
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                    ask_tool = self.registry.get("AskUserQuestion")
-                    if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
-                        await self._handle_askuser(ask_tool._pending_event)
-
-                elif isinstance(event, TurnComplete):
-                    if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
-
-                    collapsible = [
-                        (tid, blk) for tid, blk in tool_blocks.items()
-                        if isinstance(blk, ToolCallBlock)
-                        and blk.tool_name in COLLAPSIBLE_TOOLS
-                        and not blk._loading
-                    ]
-                    if len(collapsible) >= 2:
-                        total_elapsed = sum(b._elapsed for _, b in collapsible)
-                        summary = ToolGroupSummary(
-                            len(collapsible), total_elapsed,
-                            classes="tool-block tool-group-summary",
-                        )
-                        for _, blk in collapsible:
-                            blk.display = False
-                        await ai_row.mount(summary)
-
-                    tool_blocks.clear()
-                    ai_row = Vertical(classes="ai-row")
-                    await chat.mount(ai_row)
-                    streaming_label = Static("", classes="message ai-message")
-                    await ai_row.mount(streaming_label)
-                    accumulated_text = ""
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                elif isinstance(event, UsageEvent):
-                    pass  # token 展示已移除
-
-                elif isinstance(event, HookEvent):
-                    status = "✓" if event.success else "✗"
-                    self._show_system_message(
-                        f"Hook [{event.hook_id}] {status} {event.output}"
-                    )
-
-                elif isinstance(event, CompactNotification):
-                    self._show_system_message(event.message)
-                    # auto_compact 已重写 conversation.history（摘要 +
-                    # boundary + 保留尾部）。先持久化 boundary 记录，然后
-                    # 将游标推进到重建后的历史末尾，这样 TurnComplete/LoopComplete
-                    # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
-                    # 前缀作为普通记录重复写入。
-                    self._persist_compact_boundary(event)
-                    history_cursor = len(self.conversation.history)
-
-                elif isinstance(event, ErrorEvent):
-                    # 保留错误前已输出的流式文本
-                    if accumulated_text and streaming_label is not None:
-                        await streaming_label.remove()
-                        md = Markdown(accumulated_text, classes="message ai-message")
-                        await ai_row.mount(md)
-                        streaming_label = None
-                        accumulated_text = ""
-                    self._show_error(event.message)
-
-                elif isinstance(event, LoopComplete):
-                    total_time = _time.monotonic() - self._thinking_start
-                    done_label = Static(
-                        f"✻ {_to_past_tense(self._thinking_verb)} for {total_time:.1f}s",
-                        classes="message thinking-done",
-                    )
-                    await ai_row.mount(done_label)
-                    if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
-                        self.session.meta.total_tokens = (
-                            self.agent.total_input_tokens
-                            + self.agent.total_output_tokens
-                        )
-                        asyncio.ensure_future(
-                            self._update_session_summary()
-                        )
-                    if self.agent.plan_mode:
-                        asyncio.ensure_future(
-                            self._show_plan_approval()
-                        )
+                        await ai_row.mount(done_label)
+                        if self.session:
+                            for msg in self.conversation.history[history_cursor:]:
+                                self.session.append(msg)
+                            history_cursor = len(self.conversation.history)
+                            self.session.meta.total_tokens = (
+                                self.agent.total_input_tokens
+                                + self.agent.total_output_tokens
+                            )
+                            asyncio.ensure_future(
+                                self._update_session_summary()
+                            )
+                        if self.agent.plan_mode:
+                            asyncio.ensure_future(
+                                self._show_plan_approval()
+                            )
 
             # 收尾：渲染剩余的累积文本
             if accumulated_text and streaming_label is not None:
@@ -1540,6 +1542,11 @@ class NanoCursorApp(App):
         except LLMError as e:
             self._show_error(str(e))
         finally:
+            # Agent.run closes pending tool calls before returning or raising.
+            # Persist that boundary before another user message can be accepted.
+            if self.session:
+                for msg in self.conversation.history[history_cursor:]:
+                    self.session.append(msg)
             self._finish_streaming()
             input_widget.focus()
 
@@ -1701,6 +1708,14 @@ class NanoCursorApp(App):
 
     def _finish_streaming(self) -> None:
         """清理所有 streaming 状态（取消或完成时调用）。"""
+        request = getattr(self, "_pending_perm_request", None)
+        if request is not None:
+            if not request.future.done():
+                request.future.cancel()
+            self._pending_perm_request = None
+            for widget in self.query("#perm-inline"):
+                widget.remove()
+            self.query_one("#chat-input").disabled = False
         self._streaming = False
         self._stop_spinner()
         self._stop_teammate_polling()
@@ -1797,7 +1812,7 @@ class NanoCursorApp(App):
         from nanocursor.permission_dialog import InlinePermissionWidget
 
         req = getattr(self, "_pending_perm_request", None)
-        if req is not None:
+        if req is not None and not req.future.done():
             req.future.set_result(event.response)
             self._pending_perm_request = None
         # 从聊天区移除权限弹窗组件

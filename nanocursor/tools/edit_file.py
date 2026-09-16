@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from nanocursor.tools.file_io import atomic_write, path_lock
+from nanocursor.tools.runtime import resolve_workspace_path
 from nanocursor.tools.base import Tool, ToolResult
 from nanocursor.tools.diff import build_diff
 
@@ -36,42 +37,42 @@ class EditFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        if self.file_history is not None:
-            self.file_history.track_edit(params.file_path)
+        path = resolve_workspace_path(params.file_path)
+        with path_lock(path):
+            if not path.exists():
+                return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
 
-        path = Path(params.file_path)
-        if not path.exists():
-            return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
-
-        if self._state_cache:
-            resolved = str(path.resolve())
-            ok, err_msg = self._state_cache.check(resolved)
-            if not ok:
-                return ToolResult(output=err_msg, is_error=True)
-
-        try:
-            content = path.read_text(encoding="utf-8")
-        except Exception as e:
-            return ToolResult(output=f"Error reading file: {e}", is_error=True)
-
-        count = content.count(params.old_string)
-        if count == 0:
-            return ToolResult(output="Error: old_string not found in file", is_error=True)
-        if count > 1:
-            return ToolResult(
-                output=f"Error: old_string found {count} times, must be unique",
-                is_error=True,
-            )
-
-        new_content = content.replace(params.old_string, params.new_string, 1)
-        try:
-            path.write_text(new_content, encoding="utf-8")
-            if self._cache:
-                self._cache.invalidate(str(path.resolve()))
             if self._state_cache:
-                self._state_cache.update(str(path.resolve()))
-        except Exception as e:
-            return ToolResult(output=f"Error writing file: {e}", is_error=True)
+                resolved = str(path.resolve())
+                ok, err_msg = self._state_cache.check(resolved)
+                if not ok:
+                    return ToolResult(output=err_msg, is_error=True)
+
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception as e:
+                return ToolResult(output=f"Error reading file: {e}", is_error=True)
+
+            count = content.count(params.old_string)
+            if count == 0:
+                return ToolResult(output="Error: old_string not found in file", is_error=True)
+            if count > 1:
+                return ToolResult(
+                    output=f"Error: old_string found {count} times, must be unique",
+                    is_error=True,
+                )
+
+            new_content = content.replace(params.old_string, params.new_string, 1)
+            try:
+                if self.file_history is not None:
+                    self.file_history.track_edit(str(path))
+                atomic_write(path, new_content)
+                if self._cache is not None:
+                    self._cache.invalidate(str(path.resolve()))
+                if self._state_cache:
+                    self._state_cache.update(str(path.resolve()))
+            except Exception as e:
+                return ToolResult(output=f"Error writing file: {e}", is_error=True)
 
         # 带上具体 diff 而不是只报一句"改好了"：模型和 TUI 都需要知道具体改了哪几行
         diff = build_diff(content, new_content)
