@@ -221,11 +221,36 @@ async def test_completed_result_survives_stream_cancel(tmp_path):
     assert not result.is_error and result.content == "executed"
 
 
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform == "linux":
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except FileNotFoundError:
+            return False
+        # kill(pid, 0) also succeeds for dead children awaiting reaping. Their
+        # state follows the final ')' of comm, which can itself contain spaces.
+        return stat.rpartition(")")[2].split()[0] not in {"Z", "X"}
+    return True
+
+
 @pytest.mark.asyncio
-async def test_cancel_bash_terminates_child_process(tmp_path):
+@pytest.mark.parametrize("ignore_sigterm", [False, True])
+async def test_cancel_bash_terminates_child_process(tmp_path, ignore_sigterm):
     ready = tmp_path / "ready"
-    code = f"import os,time,pathlib; pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(30)"
-    task = asyncio.create_task(Bash().execute(BashParams(command=f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}")))
+    code = (
+        "import os,time,pathlib,signal; "
+        f"signal.signal(signal.SIGTERM, signal.{'SIG_IGN' if ignore_sigterm else 'SIG_DFL'}); "
+        f"ready = pathlib.Path({str(ready)!r}); "
+        "pending = ready.with_suffix('.tmp'); pending.write_text(str(os.getpid())); "
+        "pending.replace(ready); time.sleep(30)"
+    )
+    # Keep a shell and a distinct child even when the shell optimizes a lone command.
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} & wait"
+    task = asyncio.create_task(Bash().execute(BashParams(command=command)))
     try:
         for _ in range(200):
             if ready.exists():
@@ -233,11 +258,14 @@ async def test_cancel_bash_terminates_child_process(tmp_path):
             await asyncio.sleep(0.01)
         assert ready.exists()
         pid = int(ready.read_text())
+        assert _process_is_running(pid)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 3)
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        deadline = asyncio.get_running_loop().time() + 2
+        while _process_is_running(pid) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert not _process_is_running(pid), f"Child process {pid} is still running after cancellation"
     finally:
         if not task.done():
             task.cancel()
