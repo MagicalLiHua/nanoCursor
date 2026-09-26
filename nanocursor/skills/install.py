@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import base64
 import logging
 import os
@@ -264,7 +266,7 @@ def _validate_skill_name(name: str) -> None:
 
 def user_skills_root() -> Path:
     """返回 ~/.nanocursor/skills，不存在则自动创建。"""
-    root = Path.home() / ".nanocursor" / "skills"
+    root = app_home() / "skills"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

@@ -12,6 +12,10 @@ async def handle_session(ctx: CommandContext) -> None:
 
     parts = ctx.args.split(None, 1)
     sub = parts[0] if parts else ""
+    tasks = getattr(ctx.ui, "task_manager", None)
+    if sub in {"new", "resume"} and tasks and any(not t.done() for t in tasks._async_tasks.values()):
+        ctx.ui.add_system_message("Wait for background tasks to finish before switching sessions.")
+        return
 
     if sub == "":
         if ctx.session:

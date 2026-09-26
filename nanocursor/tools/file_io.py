@@ -11,6 +11,19 @@ from typing import Any
 
 _locks: dict[str, threading.RLock] = {}
 _guard = threading.Lock()
+MAX_FILE_BYTES = 8 * 1024 * 1024
+
+
+def read_bounded_text(path: Path, *, errors: str = "strict") -> str:
+    """Bound the actual read too, since the file can grow after stat()."""
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise OSError(f"File exceeds the {MAX_FILE_BYTES} byte read limit; select a smaller file or extract a section with Bash")
+    with path.open("rb") as stream:
+        data = stream.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise OSError(f"File exceeds the {MAX_FILE_BYTES} byte read limit")
+    # Match Path.read_text's universal-newline behavior used by file versions.
+    return data.decode("utf-8", errors=errors).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def path_lock(path: Path) -> Any:
@@ -34,7 +47,7 @@ def read_snapshot(path: Path, cache: Any = None) -> tuple[str, FileVersion]:
         before = stamp(path)
         text = cache.get(str(path), before) if cache is not None else None
         if text is None:
-            text = path.read_text(encoding="utf-8")
+            text = read_bounded_text(path)
         after = stamp(path)
         if before == after:
             if cache is not None:

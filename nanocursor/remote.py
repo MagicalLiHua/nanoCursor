@@ -40,6 +40,8 @@ from nanocursor.commands import CommandContext, CommandRegistry, CommandType
 from nanocursor.commands.handlers import register_all_commands
 from nanocursor.commands.parser import parse_command
 from nanocursor.config import MCPServerConfig, ProviderConfig
+from nanocursor.runtime import app_home
+from nanocursor.workspace import WorkspaceContext
 from nanocursor.conversation import ConversationManager
 from nanocursor.hooks import HookEngine
 from nanocursor.mcp import MCPManager
@@ -71,8 +73,15 @@ class RemoteServer:
         hook_engine: HookEngine | None = None,
         addr: str = "0.0.0.0",
         port: int = 18888,
+        workspace: WorkspaceContext | None = None,
+        permission_mode: PermissionMode = PermissionMode.DEFAULT,
+        sandbox_config=None,
     ) -> None:
         self.providers = providers
+        self.workspace = workspace or WorkspaceContext.resolve()
+        self.permission_mode = permission_mode
+        from nanocursor.config import SandboxAppConfig
+        self.sandbox_config = sandbox_config or SandboxAppConfig()
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
         self.addr = addr
@@ -168,7 +177,7 @@ class RemoteServer:
                 "type": "connected",
                 "data": {
                     "session": self.session_id,
-                    "cwd": os.getcwd(),
+                    "cwd": self.agent.work_dir if self.agent else str(self.workspace.active_cwd),
                 },
             })
 
@@ -217,19 +226,18 @@ class RemoteServer:
     def _init_agent(self) -> None:
         """初始化 Agent 及相关子系统。"""
         provider = self.providers[0]
-        work_dir = os.getcwd()
-        home = Path.home()
+        work_dir = str(self.workspace.active_cwd)
 
         # 权限系统
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(work_dir),
             rule_engine=RuleEngine(
-                user_rules_path=home / ".nanocursor" / "permissions.yaml",
+                user_rules_path=app_home() / "permissions.yaml",
                 project_rules_path=Path(work_dir) / ".nanocursor" / "permissions.yaml",
                 local_rules_path=Path(work_dir) / ".nanocursor" / "permissions.local.yaml",
             ),
-            mode=PermissionMode.DEFAULT,
+            mode=self.permission_mode,
         )
 
         # 加载自定义指令和记忆
@@ -244,6 +252,9 @@ class RemoteServer:
 
         # 工具注册表
         self.registry = create_default_registry()
+        from nanocursor.sandbox import configure_bash_sandbox
+        active = configure_bash_sandbox(self.registry, work_dir, self.sandbox_config)
+        checker.sandbox_enabled = active and self.sandbox_config.auto_allow
         self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
 
         # Skill 加载

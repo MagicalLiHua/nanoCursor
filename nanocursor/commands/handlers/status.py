@@ -5,7 +5,7 @@ import os
 from nanocursor.commands.registry import Command, CommandContext, CommandType
 
 
-VERSION = "v0.9.0"
+from nanocursor.runtime import get_version
 
 
 async def handle_status(ctx: CommandContext) -> None:
@@ -37,7 +37,7 @@ async def handle_status(ctx: CommandContext) -> None:
 
     work_dir = ctx.agent.work_dir if ctx.agent else os.getcwd()
     lines.append(f"工作目录: {work_dir}")
-    lines.append(f"版本: {VERSION}")
+    lines.append(f"版本: v{get_version()}")
 
     ctx.ui.add_system_message("\n".join(lines))
 

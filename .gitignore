@@ -11,7 +11,9 @@ configs/eval.deepseek.yaml
 .idea/
 .vscode/
 .nanocursor/*
+**/.nanocursor/*
 !.nanocursor/config.yaml.example
+.DS_Store
 .env
 .env.*
 !.env.example

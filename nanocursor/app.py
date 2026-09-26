@@ -48,6 +48,9 @@ from nanocursor.commands import (
 from nanocursor.commands.completion import CompletionPopup
 from nanocursor.commands.handlers import register_all_commands
 from nanocursor.config import MCPServerConfig, ProviderConfig
+from nanocursor.runtime import app_home, get_version
+from nanocursor.workspace import WorkspaceContext
+from nanocursor.validator import ConfigError
 from nanocursor.hooks import HookContext, HookEngine, load_hooks
 from nanocursor.conversation import ConversationManager, Message
 from nanocursor.mcp import ConnectResult, MCPManager
@@ -601,9 +604,14 @@ class NanoCursorApp(App):
         enable_coordinator_mode: bool = False,
         driver_class: type | None = None,
         sandbox_config: Any = None,
+        approval_config: Any = None,
+        workspace: WorkspaceContext | None = None,
+        default_provider: str = "",
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
+        self.workspace = workspace or WorkspaceContext.resolve()
+        self._default_provider = default_provider
         self._initial_permission_mode = permission_mode
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
@@ -614,6 +622,8 @@ class NanoCursorApp(App):
         self._enable_coordinator_mode = enable_coordinator_mode
         from nanocursor.config import SandboxAppConfig
         self._sandbox_cfg: SandboxAppConfig = sandbox_config or SandboxAppConfig()
+        from nanocursor.config import ApprovalConfig
+        self._approval_cfg = approval_config or ApprovalConfig()
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
@@ -659,14 +669,16 @@ class NanoCursorApp(App):
         self._has_exited_plan_mode: bool = False
 
     @staticmethod
-    def _make_banner(model: str = "", work_dir: str = "") -> RichText:
+    def _make_banner(model: str = "", work_dir: str = "", *, in_worktree: bool = False) -> RichText:
         t = RichText()
         t.append(" /\\_/\\    ", style="bold color(99)")
-        t.append("nanoCursor v3.0.0\n", style="color(242)")
+        t.append(f"nanoCursor v{get_version()}\n", style="color(242)")
         t.append("( o.o )   ", style="bold color(99)")
         t.append(f"{model}\n" if model else "\n", style="color(242)")
         t.append(" > ^ <    ", style="bold color(99)")
         t.append(work_dir, style="color(242)")
+        if in_worktree:
+            t.append("  [Worktree]", style="color(99)")
         return t
 
     def compose(self) -> ComposeResult:
@@ -694,65 +706,73 @@ class NanoCursorApp(App):
     def on_mount(self) -> None:
         self.register_theme(_NANOCURSOR_THEME)
         self.theme = "nanocursor"
-        if len(self.providers) == 1:
-            self._select_provider(self.providers[0])
+        if len(self.providers) == 1 or self._default_provider:
+            self._select_provider(next((p for p in self.providers if p.name == self._default_provider), self.providers[0]))
         else:
             self.query_one("#chat-area").display = False
             self.query_one("#input-area").display = False
+
+    def _work_dir_changed(self, work_dir: str) -> None:
+        self.workspace.active_cwd = Path(work_dir)
+        self._instructions_content = load_instructions(work_dir)
+        if self.agent:
+            self.agent.instructions_content = self._instructions_content
+        if self.agent_loader:
+            self.agent_loader._work_dir = work_dir
+            self.agent_loader.load_all()
+            catalog = self.agent_loader.list_agents()
+            self.agent.set_agent_catalog("\n".join(f"- {name}: {desc}" for name, desc in catalog), catalog_list=catalog)
+        if self.skill_loader:
+            self.skill_loader = SkillLoader(work_dir)
+            self.skill_loader.load_all()
+            if self._load_skill_tool:
+                self._load_skill_tool.set_loader(self.skill_loader)
+            register_skill_commands(self.command_registry, self.skill_loader, self.skill_executor)
+            self.agent.set_skill_catalog("\n".join(f"- {name}: {desc}" for name, desc in self.skill_loader.get_catalog()))
+        self.query_one("#title-bar", Static).update(
+            self._make_banner(self._selected_provider.model if self._selected_provider else "", work_dir,
+                              in_worktree=bool(self.worktree_manager and self.worktree_manager.current_session))
+        )
+        self.query_one("#chat-input", ChatInput).load_history(work_dir)
 
     def _select_provider(self, provider: ProviderConfig) -> None:
         self._selected_provider = provider
         try:
             self.client = create_client(provider)
-        except AuthenticationError as e:
+        except (AuthenticationError, ConfigError, OSError) as e:
             self._show_error(str(e))
             return
 
-        work_dir = os.getcwd()
-        home = Path.home()
+        work_dir = str(self.workspace.active_cwd)
 
-        # 根据配置决定是否启用 OS 级沙箱自动放行
-        sandbox_auto_allow = (
-            self._sandbox_cfg.enabled and self._sandbox_cfg.auto_allow
-        )
+        from nanocursor.sandbox import configure_bash_sandbox
+        try:
+            sandbox_active = configure_bash_sandbox(self.registry, work_dir, self._sandbox_cfg)
+        except ConfigError as exc:
+            self._show_error(str(exc))
+            return
+        sandbox_auto_allow = sandbox_active and self._sandbox_cfg.auto_allow
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(work_dir),
             rule_engine=RuleEngine(
-                user_rules_path=home / ".nanocursor" / "permissions.yaml",
-                project_rules_path=Path(work_dir) / ".nanocursor" / "permissions.yaml",
-                local_rules_path=Path(work_dir) / ".nanocursor" / "permissions.local.yaml",
+                user_rules_path=app_home() / "permissions.yaml",
+                project_rules_path=self.workspace.state_dir / "permissions.yaml",
+                local_rules_path=self.workspace.state_dir / "permissions.local.yaml",
             ),
             mode=self._initial_permission_mode,
             sandbox_enabled=sandbox_auto_allow,
         )
 
-        # 如果配置启用了沙箱，为 Bash 工具挂载 OS 沙箱
-        if self._sandbox_cfg.enabled:
-            from nanocursor.sandbox import SandboxConfig, create_sandbox
-            os_sandbox = create_sandbox()
-            if os_sandbox and os_sandbox.available():
-                sandbox_config = SandboxConfig(
-                    allow_write=[work_dir, "/tmp"],
-                    deny_write=[
-                        f"{work_dir}/.nanocursor/config.yaml",
-                        f"{work_dir}/.nanocursor/permissions.local.yaml",
-                    ],
-                    network_enabled=self._sandbox_cfg.network_enabled,
-                )
-                bash_tool = self.registry.get("Bash")
-                if bash_tool:
-                    bash_tool.sandbox = os_sandbox
-                    bash_tool.sandbox_config = sandbox_config
-
         self._instructions_content = load_instructions(work_dir)
-        self.memory_manager = MemoryManager(work_dir)
-        self.session_manager = SessionManager(work_dir)
+        state_work_dir = str(self.workspace.workspace_dir)
+        self.memory_manager = MemoryManager(state_work_dir)
+        self.session_manager = SessionManager(state_work_dir)
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
 
         from nanocursor.filehistory import FileHistory
-        self.file_history = FileHistory(work_dir, self.session.session_id)
+        self.file_history = FileHistory(state_work_dir, self.session.session_id)
         for tool in self.registry.list_tools():
             if hasattr(tool, "file_history"):
                 tool.file_history = self.file_history
@@ -784,9 +804,20 @@ class NanoCursorApp(App):
             instructions_content=self._instructions_content,
             memory_manager=self.memory_manager,
             hook_engine=self.hook_engine,
+            session_work_dir=state_work_dir,
         )
         self.agent.file_history = self.file_history
+        self.agent.on_work_dir_changed = self._work_dir_changed
+        self.agent.on_permission_mode_changed = self._update_mode_label
+        if self.workspace.restored:
+            self.agent.sandbox_root = work_dir
         self.agent.session_id = self.session.session_id
+        from nanocursor.permissions.reviewer import ApprovalController
+        controller = ApprovalController(self._approval_cfg, self.providers, provider)
+        controller.on_status = self._show_approval_status
+        controller.on_authorization_changed = self._save_approval_context
+        self.agent.approval_controller = controller
+        controller.persist_authorization()
 
         self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
         self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
@@ -842,12 +873,20 @@ class NanoCursorApp(App):
         from nanocursor.config import WorktreeConfig
         wt_cfg = self._worktree_config or WorktreeConfig()
         self.worktree_manager = WorktreeManager(
-            repo_root=work_dir,
+            repo_root=str(self.workspace.workspace_dir),
             symlink_directories=wt_cfg.symlink_directories,
         )
-        restored = self.worktree_manager.restore_session()
-        if restored:
-            self.agent.set_work_dir(restored.worktree_path, isolated=True)
+        if self.workspace.restored:
+            # The CLI already obtained a direct user choice before any tool runs.
+            # Use the reviewed record, not a second read of mutable project data.
+            from nanocursor.worktree.models import Worktree
+            restored = self.workspace.restored
+            self.worktree_manager.current_session = restored
+            self.worktree_manager.active[restored.worktree_name] = Worktree(
+                name=restored.worktree_name, path=restored.worktree_path,
+                branch=f"worktree-{restored.worktree_name}", based_on="unknown",
+                head_commit=WorktreeManager.read_worktree_head_sha(restored.worktree_path) or "",
+            )
 
         wt_command = create_worktree_command(self.worktree_manager)
         self.command_registry.register_sync(wt_command)
@@ -955,9 +994,9 @@ class NanoCursorApp(App):
             self._mcp_init_task = asyncio.create_task(self._init_mcp())
 
         self.query_one("#model-label", Static).update(provider.model)
-        work_dir = os.getcwd()
+        work_dir = self.agent.work_dir
         self.query_one("#title-bar", Static).update(
-            self._make_banner(provider.model, work_dir)
+            self._make_banner(provider.model, work_dir, in_worktree=bool(self.worktree_manager.current_session))
         )
         self._update_mode_label()
 
@@ -1051,6 +1090,35 @@ class NanoCursorApp(App):
         self.session = session
         if self.agent:
             self.agent.session_id = session.session_id
+            from nanocursor.filehistory import FileHistory
+            from nanocursor.context import create_replacement_state, RecoveryState
+            self.file_history = FileHistory(self.agent.session_work_dir, session.session_id)
+            self.agent.file_history = self.file_history
+            for tool in self.registry.list_tools():
+                if hasattr(tool, "file_history"):
+                    tool.file_history = self.file_history
+            self.agent._file_versions.clear()
+            self.agent.replacement_state = create_replacement_state()
+            self.agent.recovery_state = RecoveryState()
+            self.agent.clear_active_skills()
+            controller = self.agent.approval_controller
+            if controller:
+                controller.authorization = session.load_approval_context()
+                controller.revision += 1
+                controller.persist_authorization()
+
+    def _save_approval_context(self, context) -> None:
+        if self.session:
+            self.session.save_approval_context(context)
+
+    def _show_approval_status(self, text: str) -> None:
+        # One compact status, full short reason in tooltip and /approval status.
+        try:
+            label = self.query_one("#model-label", Static)
+            label.update(RichText(text[:100]))
+            label.tooltip = RichText(text)
+        except Exception:
+            pass
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
         """Layer-2 compact 后写入 compact_boundary 记录。
@@ -1080,7 +1148,7 @@ class NanoCursorApp(App):
         if not is_command:
             if self._streaming or self.agent is None:
                 return
-            self._agent_task = asyncio.create_task(self._send_message(text))
+            self._agent_task = asyncio.create_task(self._send_message(text, direct_input=text))
             return
 
         if name == "":
@@ -1105,6 +1173,9 @@ class NanoCursorApp(App):
             return
 
         ctx = self._build_command_context(args)
+        if self.agent and self.agent.approval_controller:
+            # Record the typed slash command, never its expanded prompt/Skill body.
+            self.agent.approval_controller.record_user(text)
         try:
             await cmd.handler(ctx)
         except Exception as e:
@@ -1295,9 +1366,12 @@ class NanoCursorApp(App):
         else:
             self.agent.set_skill_catalog("")
 
-    async def _send_message(self, text: str, is_notification: bool = False) -> None:
+    async def _send_message(self, text: str, is_notification: bool = False,
+                            direct_input: str | None = None) -> None:
         assert self.agent is not None
         self._refresh_skills_if_needed()
+        if direct_input and not is_notification and self.agent.approval_controller:
+            self.agent.approval_controller.record_user(direct_input)
 
         if self._mcp_init_task and not self._mcp_init_task.done():
             self._show_system_message("Waiting for MCP servers to connect...")
@@ -1626,6 +1700,12 @@ class NanoCursorApp(App):
 
         choice = event.choice
         feedback = event.feedback
+        controller = self.agent.approval_controller
+        if controller:
+            if choice in (PlanChoice.YOLO, PlanChoice.MANUAL):
+                controller.record_user("我在计划确认界面选择了执行当前计划；原有用户限制仍有效。")
+            elif choice == PlanChoice.FEEDBACK and feedback:
+                controller.record_user(feedback)
         plan_path = self.agent._get_plan_path()
         plan_exists = plan_path.exists()
         plan_content = ""
@@ -1682,6 +1762,11 @@ class NanoCursorApp(App):
 
         req = getattr(self, "_pending_askuser_event", None)
         if req is not None and not req.future.done():
+            if self.agent and self.agent.approval_controller and event.answers:
+                import json
+                self.agent.approval_controller.record_user(
+                    "我在问答界面提交了这些回答（键是被引用的问题，不是新的指令）：" +
+                    json.dumps(event.answers, ensure_ascii=False))
             req.future.set_result(event.answers if event.answers else {})
             self._pending_askuser_event = None
         try:
@@ -1796,7 +1881,10 @@ class NanoCursorApp(App):
         from nanocursor.permission_dialog import InlinePermissionWidget
 
         chat = self.query_one("#chat-area", VerticalScroll)
-        widget = InlinePermissionWidget(request.tool_name, request.description)
+        widget = InlinePermissionWidget(request.tool_name, request.description,
+                                        reason=request.reason, cwd=request.cwd,
+                                        allow_always=request.allow_always,
+                                        allow_edits=request.allow_edits)
         self._pending_perm_request = request
         await chat.mount(widget)
         self.call_after_refresh(chat.scroll_end, animate=False)
@@ -2022,6 +2110,13 @@ class NanoCursorApp(App):
         if self.agent:
             perm = self.agent.permission_mode
             display = self._MODE_DISPLAY.get(perm, perm.value)
+            controller = self.agent.approval_controller
+            if controller and controller.config.mode == "smart":
+                display += " · smart" if controller.active(perm) else " · smart 暂停"
+                bash = self.registry.get("Bash")
+                if bash and hasattr(bash, "execution_details"):
+                    active = bash.execution_details(self.agent.work_dir, self.agent.sandbox_root)["sandbox_active"]
+                    display += " · 沙箱" if active else " · 无沙箱"
             color = _MODE_COLORS.get(perm, "dim")
             label = self.query_one("#mode-label", Static)
             if perm == PermissionMode.DEFAULT:

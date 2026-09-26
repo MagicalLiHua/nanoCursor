@@ -440,7 +440,8 @@ class AgentTool(Tool):
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
+            rule_engine=(self._parent_agent.permission_checker.rule_engine
+                         if self._parent_agent.permission_checker else RuleEngine()),
             mode=PermissionMode.BYPASS,
         )
 

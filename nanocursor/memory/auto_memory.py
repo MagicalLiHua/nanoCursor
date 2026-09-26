@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import os
 import re
 from dataclasses import dataclass
@@ -60,12 +62,12 @@ def get_user_auto_mem_path() -> str:
     如果 HOME 无法解析则返回空字符串。
     """
     try:
-        home = str(Path.home())
+        home = str(app_home())
     except RuntimeError:
         return ""
     if not home:
         return ""
-    return os.path.join(home, ".nanocursor", "memory") + os.sep
+    return os.path.join(home, "memory") + os.sep
 
 
 def is_auto_mem_path(absolute_path: str, project_root: str) -> bool:
@@ -312,7 +314,7 @@ class MemoryManager:
         """用户级 MEMORY.md 的路径（兼容旧接口）。"""
         if self._user_mem_dir:
             return Path(os.path.join(self._user_mem_dir, ENTRYPOINT_NAME))
-        return Path.home() / ".nanocursor" / "memory" / ENTRYPOINT_NAME
+        return app_home() / "memory" / ENTRYPOINT_NAME
 
     @property
     def project_path(self) -> Path:
@@ -322,7 +324,7 @@ class MemoryManager:
     @property
     def user_mem_dir(self) -> Path:
         """用户级记忆目录（~/.nanocursor/memory/）。"""
-        return Path(self._user_mem_dir.rstrip(os.sep)) if self._user_mem_dir else Path.home() / ".nanocursor" / "memory"
+        return Path(self._user_mem_dir.rstrip(os.sep)) if self._user_mem_dir else app_home() / "memory"
 
     @property
     def project_mem_dir(self) -> Path:

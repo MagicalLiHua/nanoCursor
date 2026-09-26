@@ -22,8 +22,21 @@ dependencies = [
 [project.scripts]
 nanocursor = "nanocursor.__main__:main"
 
+[project.urls]
+Repository = "https://github.com/MagicalLiHua/nanoCursor"
+Issues = "https://github.com/MagicalLiHua/nanoCursor/issues"
+
+[tool.hatch.build]
+exclude = [
+    "**/.nanocursor/**", "**/.DS_Store", "**/__pycache__/**", "**/*.pyc",
+    ".artifacts/**", "nanocursor/TECHNICAL_DEBT.md", ".env*",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["nanocursor"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/nanocursor", "/tests", "/scripts", "/packaging", "/docs", "/README.md", "/CHANGELOG.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md", "/pyproject.toml", "/uv.lock"]
 
 [build-system]
 requires = ["hatchling"]

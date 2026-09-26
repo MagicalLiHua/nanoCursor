@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import importlib.resources
 import logging
 from pathlib import Path
@@ -97,7 +99,7 @@ class AgentLoader:
                 seen[agent_def.agent_type] = agent_def
 
         # 优先级 2：用户级
-        user_path = Path(USER_AGENTS_DIR).expanduser()
+        user_path = app_home() / "agents"
         for agent_def in self._scan_directory(user_path, "user"):
             if agent_def.agent_type not in seen:
                 seen[agent_def.agent_type] = agent_def

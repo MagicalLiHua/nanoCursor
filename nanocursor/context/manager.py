@@ -196,10 +196,10 @@ def make_persisted_preview(content: str, file_path: Path) -> str:
     preview = content[:PREVIEW_CHARS]
     return (
         f"{PERSISTED_TAG}\n"
-        f"输出太大（{size_kb}KB），完整内容已保存到：\n"
+        f"输出太大（{size_kb}KB），本次工具返回内容已保存到：\n"
         f"{file_path}\n"
         f"\n"
-        f"预览（前 2KB）：\n"
+        f"预览（前 {PREVIEW_CHARS} 字符）：\n"
         f"{preview}\n"
         f"</persisted-output>"
     )
@@ -899,7 +899,9 @@ async def auto_compact(
     # 不清零会导致 current_tokens() 对增量的估算出错。
     # 下一次 API 响应会基于重建后的 history 重新锚定。
     conversation.replace_history(new_messages)
-    cleanup_tool_results(session_dir)
+    # Retained messages and saved sessions may still reference these files.
+    # This directory is also shared with other agents in the same workspace;
+    # compaction is not an ownership boundary for deleting tool output.
 
     if breaker is not None:
         breaker.record_success()

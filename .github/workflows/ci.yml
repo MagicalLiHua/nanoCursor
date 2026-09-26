@@ -6,14 +6,39 @@ on:
 
 jobs:
   python:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      - run: uv run python scripts/export_constraints.py --check
+      - run: uv build --build-constraints packaging/build-constraints.txt
+      - run: uv run python scripts/check_distribution.py dist
+      - run: uv run python scripts/smoke_install.py dist/*.whl --python '${{ matrix.python }}'
+      - run: uv run python scripts/smoke_install.py dist/*.tar.gz --python '${{ matrix.python }}'
+
+  package-metadata-install:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.11"
-      - run: uv sync --frozen
-      - run: uv run pytest -q
+          python-version: "3.12"
+      - run: uv build --build-constraints packaging/build-constraints.txt
+      - run: uv run --no-project python scripts/smoke_install.py dist/*.whl --unconstrained --python 3.12
 
   evaluation:
     runs-on: ubuntu-latest

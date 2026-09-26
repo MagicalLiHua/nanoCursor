@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -24,6 +25,84 @@ from nanocursor.tools.base import (
     ToolCallDelta,
     ToolCallStart,
 )
+
+
+@dataclass(frozen=True)
+class ReviewCompletion:
+    text: str
+    complete: bool
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+def _request_auth_options(config: ProviderConfig) -> dict:
+    if config.auth != "none":
+        return {}
+    # The SDK requires a nonempty constructor key, but a keyless connection
+    # must not send even a placeholder Authorization / x-api-key header.
+    if config.protocol == "anthropic":
+        from anthropic import omit
+        return {"extra_headers": {"X-Api-Key": omit, "Authorization": omit}}
+    from openai import omit
+    return {"extra_headers": {"Authorization": omit}}
+
+
+async def complete_review(config: ProviderConfig, system: str, payload: str,
+                          timeout: float) -> ReviewCompletion:
+    """One isolated, tool-free request. The caller owns the overall deadline.
+
+    No mutation of the task client, no SDK retries, no provider fallback, and no
+    stream that can accidentally accept JSON before a truncated response ends.
+    """
+    key = config.resolve_api_key()
+    if not key:
+        raise AuthenticationError("Approval provider has no API key")
+    options = dict(api_key=key, base_url=config.base_url, max_retries=0, timeout=timeout)
+    request_options = _request_auth_options(config)
+    if config.protocol == "anthropic":
+        async with AsyncAnthropic(**options) as client:
+            response = await client.messages.create(
+                model=config.model, max_tokens=1024, system=system,
+                messages=[{"role": "user", "content": payload}],
+                **request_options,
+            )
+            text = "".join(b.text for b in response.content if b.type == "text")
+            complete = response.stop_reason == "end_turn" and all(
+                b.type == "text" for b in response.content)
+            return ReviewCompletion(text, complete, response.usage.input_tokens,
+                                    response.usage.output_tokens)
+    async with AsyncOpenAI(**options) as client:
+        if config.protocol == "openai":
+            response = await client.responses.create(
+                model=config.model, instructions=system, input=payload,
+                max_output_tokens=2048, store=False,
+                **request_options,
+            )
+            complete = response.status == "completed" and all(
+                item.type in {"message", "reasoning"} for item in response.output)
+            complete = complete and all(
+                block.type == "output_text" for item in response.output if item.type == "message"
+                for block in item.content)
+            usage = response.usage
+            return ReviewCompletion(response.output_text, complete,
+                                    getattr(usage, "input_tokens", 0) or 0,
+                                    getattr(usage, "output_tokens", 0) or 0)
+        if config.protocol != "openai-compat":
+            raise ValueError("Unsupported approval provider protocol")
+        response = await client.chat.completions.create(
+            model=config.model, max_tokens=2048,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": payload}],
+            **request_options,
+        )
+        choice = response.choices[0]
+        complete = (choice.finish_reason == "stop" and not choice.message.tool_calls
+                    and not getattr(choice.message, "refusal", None)
+                    and not getattr(choice.message, "function_call", None))
+        usage = response.usage
+        return ReviewCompletion(choice.message.content or "", complete,
+                                getattr(usage, "prompt_tokens", 0) or 0,
+                                getattr(usage, "completion_tokens", 0) or 0)
 
 
 def _complete_tool_call(tool_id: str, name: str, raw: str) -> ToolCallComplete:
@@ -144,6 +223,7 @@ class AnthropicClient(LLMClient):
                 "Set it in .nanocursor/config.yaml or via ANTHROPIC_API_KEY env var."
             )
         self._client = AsyncAnthropic(api_key=api_key, base_url=config.base_url)
+        self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -159,7 +239,7 @@ class AnthropicClient(LLMClient):
         """
         try:
             info = await self._client.models.retrieve(
-                self.model, timeout=ANTHROPIC_MODEL_FETCH_TIMEOUT
+                self.model, timeout=ANTHROPIC_MODEL_FETCH_TIMEOUT, **self._request_options
             )
             window = getattr(info, "max_input_tokens", None)
             if isinstance(window, int) and window > 0:
@@ -220,7 +300,7 @@ class AnthropicClient(LLMClient):
         delta_cache_creation = 0
 
         try:
-            async with self._client.messages.stream(**kwargs) as stream:
+            async with self._client.messages.stream(**kwargs, **self._request_options) as stream:
                 async for event in stream:
                     index = getattr(event, "index", 0)
                     if event.type == "content_block_start":
@@ -319,6 +399,7 @@ class OpenAIClient(LLMClient):
                 "Set it in .nanocursor/config.yaml or via OPENAI_API_KEY env var."
             )
         self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -349,7 +430,7 @@ class OpenAIClient(LLMClient):
         reasoning_text = ""
 
         try:
-            response_stream = await self._client.responses.create(**kwargs)
+            response_stream = await self._client.responses.create(**kwargs, **self._request_options)
             async for event in response_stream:
                 if event.type == "response.output_text.delta":
                     yield TextDelta(text=event.delta)
@@ -444,6 +525,7 @@ class OpenAICompatClient(LLMClient):
                 "Set it in .nanocursor/config.yaml or via OPENAI_API_KEY env var."
             )
         self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -505,7 +587,7 @@ class OpenAICompatClient(LLMClient):
         reasoning_accum = ""
 
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await self._client.chat.completions.create(**kwargs, **self._request_options)
             async for chunk in response:
                 if not chunk.choices:
                     # 最后一个 chunk，只包含 usage 数据。

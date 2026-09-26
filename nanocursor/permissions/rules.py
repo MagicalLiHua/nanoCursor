@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 import yaml
 
+from nanocursor.validator import ConfigError
+
 Effect = Literal["allow", "deny", "ask"]
 
 _RULE_RE = re.compile(r"^(\w+)\((.+)\)$")
@@ -50,26 +52,28 @@ def extract_content(tool_name: str, arguments: dict[str, Any]) -> str:
 
 
 def _load_rules_file(path: Path) -> list[Rule]:
-    if not path.is_file():
+    if not path.exists() and not path.is_symlink():
         return []
+    if not path.is_file():
+        raise ConfigError(f"Permission rules must be a readable file: {path}")
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError):
-        return []
+    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        raise ConfigError(f"Cannot read or parse permission rules: {path}") from exc
     if not isinstance(raw, list):
-        return []
+        raise ConfigError(f"Permission rules must be a list (use [] for no rules): {path}")
     rules: list[Rule] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
+    for index, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict) or set(entry) != {"rule", "effect"}:
+            raise ConfigError(f"Permission rule #{index} must contain rule and effect: {path}")
         rule_str = entry.get("rule", "")
         effect = entry.get("effect", "")
-        if effect not in ("allow", "deny", "ask"):
-            continue
+        if not isinstance(rule_str, str) or effect not in ("allow", "deny", "ask"):
+            raise ConfigError(f"Invalid permission rule #{index}: {path}")
         try:
             rules.append(parse_rule(rule_str, effect))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ConfigError(f"Invalid permission rule syntax at #{index}: {path}") from exc
     return rules
 
 
@@ -99,6 +103,10 @@ class RuleEngine:
                 if rule.matches(tool_name, content):
                     return rule.effect
         return None
+
+    def validate(self) -> None:
+        """Reject invalid policy before startup; evaluate revalidates live updates."""
+        self._load_tiers()
 
 
     def append_local_rule(self, rule: Rule) -> None:

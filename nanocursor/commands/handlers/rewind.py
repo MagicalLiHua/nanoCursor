@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import time
+import copy
 
 from nanocursor.commands.registry import Command, CommandType
 
 
 async def _handle_rewind(ctx) -> None:
+    tasks = getattr(ctx.ui, "task_manager", None)
+    if getattr(ctx.ui, "_streaming", False) or (tasks and any(not t.done() for t in tasks._async_tasks.values())):
+        ctx.ui.add_system_message("Wait for running tasks to finish before rewinding.")
+        return
     fh = getattr(ctx.agent, "file_history", None)
     if fh is None or not fh.has_snapshots():
         ctx.ui.add_system_message("No checkpoints to rewind to.")
@@ -45,28 +50,59 @@ async def _handle_rewind(ctx) -> None:
         try:
             option = int(parts[1])
         except ValueError:
-            pass
+            ctx.ui.add_system_message("Invalid option. Use 1 (both), 2 (conversation), or 3 (code).")
+            return
 
     snap = snapshots[idx]
 
+    if option in (1, 2) and snap.conversation is None:
+        ctx.ui.add_system_message("Conversation snapshot unavailable; use option 3 for code only.")
+        return
+
+    def restore_conversation():
+        messages = copy.deepcopy(snap.conversation)
+        if ctx.session:
+            ctx.session.reset_history(messages)
+        ctx.conversation.replace_history(messages)
+        ctx.conversation.env_injected = snap.env_injected
+        ctx.conversation.ltm_injected = snap.ltm_injected
+        if ctx.agent:
+            from nanocursor.context import create_replacement_state, RecoveryState
+            ctx.agent.replacement_state = create_replacement_state()
+            ctx.agent.recovery_state = RecoveryState()
+            ctx.agent.clear_active_skills()
+            controller = ctx.agent.approval_controller
+            if controller:
+                # Old approvals must not silently authorize a different branch
+                # of the conversation. A new session restores complete context.
+                from nanocursor.permissions.approval_context import AuthorizationContext
+                controller.authorization = AuthorizationContext()
+                controller.authorization.complete = False
+                controller.revision += 1
+                controller.persist_authorization()
+
     if option == 1:
         changed = fh.rewind(idx)
-        ctx.conversation.replace_history(ctx.conversation.history[: snap.message_index])
-        ctx.ui.add_system_message(
-            f"⟲ Rewound to checkpoint {idx + 1}. Restored {len(changed)} file(s) and conversation."
-        )
+        restore_conversation()
+        notice = f"⟲ Rewound to checkpoint {idx + 1}. Restored {len(changed)} file(s) and conversation."
     elif option == 2:
-        ctx.conversation.replace_history(ctx.conversation.history[: snap.message_index])
-        ctx.ui.add_system_message(
-            f"⟲ Rewound conversation to checkpoint {idx + 1}. Files unchanged."
-        )
+        restore_conversation()
+        notice = f"⟲ Rewound conversation to checkpoint {idx + 1}. Files unchanged."
     elif option == 3:
         changed = fh.rewind(idx)
-        ctx.ui.add_system_message(
-            f"⟲ Restored {len(changed)} file(s) to checkpoint {idx + 1}. Conversation unchanged."
-        )
+        notice = f"⟲ Restored {len(changed)} file(s) to checkpoint {idx + 1}. Conversation unchanged."
     else:
         ctx.ui.add_system_message("Invalid option. Use 1 (both), 2 (conversation), or 3 (code).")
+        return
+
+    if ctx.agent:
+        ctx.agent._file_versions.clear()
+    if option in (1, 2) and ctx.config.get("render_restored"):
+        ctx.config["clear_chat"]()
+        await ctx.config["render_restored"](ctx.conversation.history)
+    ctx.ui.add_system_message(notice)
+    if option in (1, 2) and ctx.agent and ctx.agent.approval_controller:
+        ctx.ui.add_system_message("Conversation rewound. Model approval falls back to manual review until a new session.")
 
 
 REWIND_COMMAND = Command(

@@ -17,6 +17,11 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset({"Agent", "ToolSearch", "AskUserQuestion", 
 class Decision:
     effect: DecisionEffect
     reason: str
+    source: str = "mode_fallback"
+
+    @property
+    def review_eligible(self) -> bool:
+        return self.effect == "ask" and self.source in {"mode_fallback", "shell_uncertain"}
 
 
 class PermissionChecker:
@@ -79,38 +84,48 @@ class PermissionChecker:
         return ", ".join(parts) if parts else tool_name
 
 
-    def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
+    def check(self, tool: Tool, arguments: dict[str, Any], *, smart: bool = False) -> Decision:
         content = extract_content(tool.name, arguments)
 
         # Explicit restrictions precede convenience shortcuts and permission modes.
         rule_result = self.rule_engine.evaluate(tool.name, content)
         if rule_result == "deny":
-            return Decision(effect="deny", reason="权限规则拒绝")
+            return Decision(effect="deny", reason="权限规则拒绝", source="explicit_deny")
         if tool.name == "Bash":
             hit, reason = self.detector.detect(content)
             if hit:
-                return Decision(effect="deny", reason=f"危险命令拦截: {reason}")
+                return Decision(effect="deny", reason=f"危险命令拦截: {reason}", source="dangerous_pattern")
         if rule_result == "ask":
-            return Decision(effect="ask", reason="权限规则要求确认")
+            return Decision(effect="ask", reason="权限规则要求确认", source="explicit_ask")
+
+        # Keep explicit restrictions on compound components in smart mode too.
+        if smart and tool.name == "Bash":
+            import re
+            effects = [self.rule_engine.evaluate(tool.name, sub.strip())
+                       for sub in re.split(r"&&|\|\||[;|&\n\r]", content) if sub.strip()]
+            if "deny" in effects:
+                return Decision("deny", "权限规则拒绝", "explicit_deny")
+            if "ask" in effects:
+                return Decision("ask", "权限规则要求确认", "explicit_ask")
 
         # Layer 0: Plan 模式例外放行
         if self.mode == PermissionMode.PLAN:
             if tool.name in _PLAN_MODE_ALLOWED_TOOLS:
-                return Decision(effect="allow", reason="Plan mode: allowed tool")
+                return Decision(effect="allow", reason="Plan mode: allowed tool", source="mode_restriction")
             if tool.name in ("WriteFile", "EditFile") and content:
                 if self._is_plan_file(content):
-                    return Decision(effect="allow", reason="Plan mode: plan file write")
+                    return Decision(effect="allow", reason="Plan mode: plan file write", source="mode_restriction")
 
         # Layer 1: 安全的只读命令（自动放行）
         if tool.name == "Bash" and is_safe_command(content or ""):
-            return Decision(effect="allow", reason="Safe read-only command")
+            return Decision(effect="allow", reason="Safe read-only command", source="safe_command")
 
         # Layer 1c: OS 沙箱自动放行
         # 沙箱开启时，命令类工具通过了危险命令检查后直接放行——
         # 内核级隔离会阻止越权写入，无需再弹确认。
         # 拆分复合命令逐条检查，防止通过命令拼接绕过权限检查，
         # deny 规则和 ask 规则不受沙箱影响。
-        if self.sandbox_enabled and tool.name == "Bash":
+        if self.sandbox_enabled and tool.name == "Bash" and not smart:
             import re
             subcommands = [s.strip() for s in re.split(r'\s*(?:&&|\|\||[;|&\n\r])\s*', content) if s.strip()]
             if not subcommands:
@@ -119,42 +134,43 @@ class PermissionChecker:
             for sub in subcommands:
                 rule_result = self.rule_engine.evaluate(tool.name, sub)
                 if rule_result == "deny":
-                    return Decision(effect="deny", reason="权限规则拒绝")
+                    return Decision(effect="deny", reason="权限规则拒绝", source="explicit_deny")
                 if rule_result == "ask":
                     has_ask = True
             if has_ask:
-                return Decision(effect="ask", reason="权限规则要求确认")
+                return Decision(effect="ask", reason="权限规则要求确认", source="explicit_ask")
             if any(ch in content for ch in "\n\r|;&<>$`(){}\\"):
-                return Decision(effect="ask", reason="复合 Shell 语法需要确认")
-            return Decision(effect="allow", reason="OS 沙箱自动放行")
+                return Decision(effect="ask", reason="复合 Shell 语法需要确认", source="shell_uncertain")
+            return Decision(effect="allow", reason="OS 沙箱自动放行", source="sandbox_allow")
 
         # Layer 2: 路径沙箱（仅文件类工具）
         path_content = arguments.get("path", ".") if tool.name in ("Glob", "Grep") else content
         if tool.category in ("read", "write") and path_content:
             ok, reason = self.sandbox.check(str(path_content))
             if not ok and self.mode != PermissionMode.BYPASS:
-                return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}")
+                return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}", source="path_restriction")
 
         # Layer 3: 规则引擎匹配
         rule_result = self.rule_engine.evaluate(tool.name, content)
         if rule_result == "allow":
-            return Decision(effect="allow", reason="权限规则放行")
+            return Decision(effect="allow", reason="权限规则放行", source="explicit_allow")
         if rule_result == "deny":
-            return Decision(effect="deny", reason="权限规则拒绝")
+            return Decision(effect="deny", reason="权限规则拒绝", source="explicit_deny")
 
         # Layer 4b: 会话级放行（内存中，优先于模式兜底）
         if self._check_session_allowed(tool.name, content or ""):
-            return Decision(effect="allow", reason="会话级放行（session allow-always）")
+            return Decision(effect="allow", reason="会话级放行（session allow-always）", source="session_allow")
 
         # Layer 4: 权限模式兜底判定
         effect = mode_decide(self.mode, tool.category)
         if effect == "allow":
-            return Decision(effect="allow", reason=f"权限模式 {self.mode.value} 放行")
+            return Decision(effect="allow", reason=f"权限模式 {self.mode.value} 放行", source="mode_allow")
         if effect == "deny":
-            return Decision(effect="deny", reason=f"权限模式 {self.mode.value} 拒绝")
+            return Decision(effect="deny", reason=f"权限模式 {self.mode.value} 拒绝", source="mode_restriction")
 
         # Layer 5: 触发人工确认（HITL）
-        return Decision(effect="ask", reason="需要用户确认")
+        return Decision(effect="ask", reason="需要用户确认",
+                        source="mode_restriction" if self.mode == PermissionMode.PLAN else "mode_fallback")
 
 
     def _is_plan_file(self, target_path: str) -> bool:

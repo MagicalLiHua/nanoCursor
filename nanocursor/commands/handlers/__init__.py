@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from nanocursor.commands.handlers.clear import CLEAR_COMMAND
+from nanocursor.commands.handlers.approval import APPROVAL_COMMAND
 from nanocursor.commands.handlers.compact import COMPACT_COMMAND
 from nanocursor.commands.handlers.help import HELP_COMMAND
 from nanocursor.commands.handlers.mcp import MCP_COMMAND
@@ -16,6 +17,7 @@ from nanocursor.commands.registry import CommandRegistry
 
 
 ALL_COMMANDS = [
+    APPROVAL_COMMAND,
     HELP_COMMAND,
     COMPACT_COMMAND,
     CLEAR_COMMAND,

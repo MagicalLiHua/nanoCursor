@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import random
 import string
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import IO, Any
 
-from nanocursor.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from nanocursor.conversation import ConversationManager, Message, ThinkingBlock, ToolResultBlock, ToolUseBlock
 
 SESSIONS_DIR = ".nanocursor/sessions"
 DEFAULT_MAX_AGE_DAYS = 30
@@ -27,6 +27,8 @@ SESSION_SUMMARY_PROMPT = (
 
 
 class RecordType(str, Enum):
+    HISTORY_BOUNDARY = "history_boundary"
+    APPROVAL_CONTEXT = "approval_context"
     SYSTEM_PROMPT = "system_prompt"
     USER = "user"
     ASSISTANT = "assistant"
@@ -71,7 +73,7 @@ class SessionRecord:
                 tool_use_id=data.get("tool_use_id"),
                 is_error=data.get("is_error", False),
             )
-        except (json.JSONDecodeError, KeyError, ValueError):
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             return None
 
     @classmethod
@@ -161,6 +163,21 @@ def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
     )
 
 
+def make_history_boundary(messages: list[Message]) -> SessionRecord:
+    """An exact, append-only conversation reset after an explicit rewind."""
+    return SessionRecord(RecordType.HISTORY_BOUNDARY, [asdict(m) for m in messages],
+                         datetime.now(timezone.utc))
+
+
+def parse_history_boundary(record: SessionRecord) -> list[Message]:
+    return [Message(
+        role=item["role"], content=item["content"],
+        tool_uses=[ToolUseBlock(**b) for b in item.get("tool_uses", [])],
+        tool_results=[ToolResultBlock(**b) for b in item.get("tool_results", [])],
+        thinking_blocks=[ThinkingBlock(**b) for b in item.get("thinking_blocks", [])],
+    ) for item in record.content]
+
+
 def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
     """make_compact_boundary 的逆操作：返回 (summary, keep_messages)。
 
@@ -201,6 +218,8 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
     pending_tool_results: list[ToolResultBlock] = []
 
     for record in records:
+        if record.type == RecordType.APPROVAL_CONTEXT:
+            continue  # Metadata is never model conversation or a tool result boundary.
         if record.type == RecordType.TOOL_RESULT:
             pending_tool_results.append(
                 ToolResultBlock(
@@ -220,6 +239,10 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                 Message(role="user", content="", tool_results=pending_tool_results)
             )
             pending_tool_results = []
+
+        if record.type == RecordType.HISTORY_BOUNDARY:
+            messages = parse_history_boundary(record)
+            continue
 
         if record.type == RecordType.SYSTEM_PROMPT:
             continue
@@ -368,6 +391,38 @@ class Session:
         self.meta = meta
         self._sessions_dir = sessions_dir
 
+    def save_approval_context(self, context) -> None:
+        self.append_record(SessionRecord(RecordType.APPROVAL_CONTEXT, context.to_dict(),
+                                         datetime.now(timezone.utc)))
+
+    def load_approval_context(self):
+        from nanocursor.permissions.approval_context import AuthorizationContext
+
+        self._file.flush()
+        path = self._sessions_dir / f"{self.session_id}.jsonl"
+        context = AuthorizationContext()
+        seen_content = False
+        seen_context = False
+        corrupt = False
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    record = SessionRecord.from_jsonl(line)
+                    if record is None:
+                        corrupt = True
+                    elif record.type == RecordType.APPROVAL_CONTEXT:
+                        context = AuthorizationContext.from_dict(record.content)
+                        seen_context = True
+                    else:
+                        seen_content = True
+        except (OSError, UnicodeError):
+            corrupt = True
+        if corrupt or (seen_content and not seen_context):
+            context.complete = False
+        return context
+
     def append(self, message: Message) -> None:
         records = SessionRecord.from_message(message)
         for record in records:
@@ -392,6 +447,11 @@ class Session:
         self._file.write(record.to_jsonl() + "\n")
         self._file.flush()
         self.meta.last_active = datetime.now(timezone.utc)
+        self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+
+    def reset_history(self, messages: list[Message]) -> None:
+        self.append_record(make_history_boundary(messages))
+        self.meta.message_count = len(messages)
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
 
 
@@ -518,7 +578,7 @@ class SessionManager:
         # 普通消息（续写）照常重放。没有 boundary 则全量重放（兼容旧 session）。
         last_boundary = -1
         for i, rec in enumerate(records):
-            if rec.type == RecordType.COMPACT_BOUNDARY:
+            if rec.type in (RecordType.COMPACT_BOUNDARY, RecordType.HISTORY_BOUNDARY):
                 last_boundary = i
         if last_boundary >= 0:
             records = records[last_boundary:]

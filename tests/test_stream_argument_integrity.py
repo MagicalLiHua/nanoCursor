@@ -32,6 +32,7 @@ def done(i, text):
 async def responses(items):
     client = OpenAIClient.__new__(OpenAIClient)
     client.model = "offline"
+    client._request_options = {}
     client._client = NS(responses=NS(create=AsyncMock(return_value=events(items))))
     return [e async for e in client.stream(ConversationManager()) if isinstance(e, ToolCallComplete)]
 
@@ -90,6 +91,7 @@ async def test_anthropic_interleaved_indices():
 
     client = AnthropicClient.__new__(AnthropicClient)
     client.model, client.max_output_tokens, client.thinking = "offline", 1024, False
+    client._request_options = {}
     client._client = NS(messages=NS(stream=lambda **kwargs: Stream()))
     calls = [e async for e in client.stream(ConversationManager()) if isinstance(e, ToolCallComplete)]
     assert [(c.tool_id, c.arguments) for c in calls] == [("id1", {"n": 1}), ("id0", {"n": 0})]

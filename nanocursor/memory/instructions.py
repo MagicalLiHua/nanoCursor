@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import os
 from pathlib import Path
 
@@ -168,7 +170,6 @@ def load_instructions(project_root: str) -> str:
     4. workDir/NANOCURSOR.local.md（本地覆盖）
     """
     root = Path(project_root).resolve()
-    home = Path.home()
     seen: set[str] = set()  # 用于文件去重
     sources: list[tuple[str, str]] = []  # (label, content)
 
@@ -200,8 +201,8 @@ def load_instructions(project_root: str) -> str:
         sources.append((label, content.rstrip("\n")))
 
     # 1. 用户全局
-    _add(home / ".nanocursor" / "NANOCURSOR.md")
-    _add(home / ".nanocursor" / "AGENTS.md")
+    _add(app_home() / "NANOCURSOR.md")
+    _add(app_home() / "AGENTS.md")
 
     # 2. 项目目录链
     for d in _project_instruction_dirs(root):

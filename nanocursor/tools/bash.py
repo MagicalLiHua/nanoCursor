@@ -5,7 +5,9 @@ import os
 import re
 import shlex
 import signal
+import shutil
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -17,6 +19,32 @@ if TYPE_CHECKING:
     from nanocursor.sandbox import Sandbox, SandboxConfig
 
 MAX_TIMEOUT = 600
+MAX_CAPTURE_BYTES = 1024 * 1024
+
+
+async def _capture_output(proc: asyncio.subprocess.Process) -> str:
+    """Drain the pipe to EOF while retaining only a bounded head and tail."""
+    head = bytearray()
+    tail = bytearray()
+    total = 0
+    head_limit = MAX_CAPTURE_BYTES // 2
+    tail_limit = MAX_CAPTURE_BYTES - head_limit
+    assert proc.stdout is not None
+    while chunk := await proc.stdout.read(64 * 1024):
+        total += len(chunk)
+        take = min(len(chunk), head_limit - len(head))
+        head.extend(chunk[:take])
+        tail.extend(chunk[take:])
+        if len(tail) > tail_limit:
+            del tail[:len(tail) - tail_limit]
+    await proc.wait()
+    if total <= MAX_CAPTURE_BYTES:
+        return (head + tail).decode(errors="replace")
+    dropped = total - len(head) - len(tail)
+    return (f"[Output truncated: omitted {dropped} bytes; retained first and last output.]\n\n"
+            + head.decode(errors="replace")
+            + "\n\n[... middle output omitted ...]\n\n"
+            + tail.decode(errors="replace"))
 
 # 特殊命令的退出码语义映射
 # 这些命令的 exit code 1 不代表错误，只有 >= 阈值才算真正的错误
@@ -125,18 +153,41 @@ class Bash(Tool):
     sandbox: Sandbox | None = None
     sandbox_config: SandboxConfig | None = None
 
+    def effective_sandbox_config(self, sandbox_root: Path | None = None) -> SandboxConfig | None:
+        config = self.sandbox_config
+        if config and sandbox_root:
+            config = replace(config, allow_write=[str(sandbox_root), "/tmp"],
+                             deny_write=[*config.deny_write,
+                                         str(sandbox_root / ".nanocursor/config.yaml"),
+                                         str(sandbox_root / ".nanocursor/permissions.local.yaml")])
+        return config
+
+    def execution_details(self, cwd: str, sandbox_root: str | None = None) -> dict:
+        """Describe the same conditions used by execute, not the auto-allow flag."""
+        config = self.effective_sandbox_config(Path(sandbox_root) if sandbox_root else None)
+        active = bool(self.sandbox and config and self.sandbox.available())
+        return {
+            "cwd": str(Path(cwd).resolve()),
+            "shell": (shutil.which("bash") or "bash (PATH)") if active else
+                     ("/bin/sh" if os.name == "posix" else "platform default shell"),
+            "sandbox_active": active,
+            "sandbox_backend": type(self.sandbox).__name__ if active else None,
+            "write_scope": [str(Path(p).resolve()) for p in config.allow_write]
+                           if active else "process_permissions",
+            "deny_write": [str(Path(p).resolve()) for p in config.deny_write] if active else [],
+            "read_scope": "process_permissions (no read isolation)",
+            "network": ("allowed" if config.network_enabled else "blocked") if active else
+                       "process_permissions (not isolated)",
+            "inherits_environment": True,
+        }
+
     async def execute(self, params: Params) -> ToolResult:
         timeout = min(params.timeout, MAX_TIMEOUT)
 
         # 如果启用了 OS 沙箱，将命令包装为沙箱内执行
         actual_command = params.command
         context = current_runtime()
-        config = self.sandbox_config
-        if config and context and context.sandbox_root:
-            config = replace(config, allow_write=[str(context.sandbox_root), "/tmp"],
-                             deny_write=[*config.deny_write,
-                                         str(context.sandbox_root / ".nanocursor/config.yaml"),
-                                         str(context.sandbox_root / ".nanocursor/permissions.local.yaml")])
+        config = self.effective_sandbox_config(context.sandbox_root if context else None)
         if self.sandbox and self.sandbox_config and self.sandbox.available():
             actual_command = self.sandbox.wrap(params.command, config)
 
@@ -149,7 +200,7 @@ class Bash(Tool):
                 cwd=str(context.cwd) if context else self.work_dir,
                 start_new_session=os.name == "posix",
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            output = await asyncio.wait_for(_capture_output(proc), timeout=timeout)
         except asyncio.TimeoutError:
             if proc is not None:
                 await _terminate_process_group(proc)
@@ -159,10 +210,9 @@ class Bash(Tool):
                 await _terminate_process_group(proc)
             raise
         except Exception as e:
+            if proc is not None:
+                await _terminate_process_group(proc)
             return ToolResult(output=f"Error executing command: {e}", is_error=True)
-
-        # 合并流输出，不再区分 stdout/stderr
-        output = stdout.decode(errors="replace") if stdout else ""
 
         # 非零退出码时追加退出码信息，但 is_error 始终为 False
         # 只有超时和异常才设置 is_error=True
@@ -196,6 +246,14 @@ async def _spawn_owned_shell(command: str, **kwargs: object) -> asyncio.subproce
 
 
 async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
+    async def drain(stream) -> None:
+        if stream is not None:
+            while await stream.read(64 * 1024):
+                pass
+
+    # A full pipe can prevent the subprocess transport from completing wait(),
+    # even after the process has exited. Discard pending output during cleanup.
+    drains = [asyncio.create_task(drain(s)) for s in (proc.stdout, proc.stderr) if s is not None]
     def stop(sig: int) -> None:
         try:
             if os.name == "posix":
@@ -213,3 +271,5 @@ async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
         # Descendants may outlive the shell or ignore SIGTERM.
         stop(signal.SIGKILL)
         await proc.wait()
+        if drains:
+            await asyncio.gather(*drains, return_exceptions=True)

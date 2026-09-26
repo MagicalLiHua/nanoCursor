@@ -51,18 +51,21 @@ async def handle_sandbox(ctx: CommandContext) -> None:
 def _show_status(ctx: CommandContext) -> None:
     """显示当前沙箱状态。"""
     checker = ctx.agent.permission_checker
-    sandbox_on = checker.sandbox_enabled if checker else False
+    auto_allow = checker.sandbox_enabled if checker else False
 
     # 检查 Bash 工具是否挂载了沙箱
     bash_tool = ctx.agent.registry.get("Bash")
     os_sandbox = getattr(bash_tool, "sandbox", None) if bash_tool else None
     os_available = os_sandbox.available() if os_sandbox else False
+    sandbox_on = bool(os_available and getattr(bash_tool, "sandbox_config", None))
+    controller = getattr(ctx.agent, "approval_controller", None)
+    smart = bool(controller and controller.active(ctx.agent.permission_mode))
 
     lines = [
         "沙箱状态",
         "─────────",
         f"  OS 沙箱: {'已启用' if sandbox_on else '未启用'}",
-        f"  自动放行: {'是' if sandbox_on else '否'}",
+        f"  沙箱自动放行: {'被 smart 审批替代' if smart else ('是' if auto_allow else '否')}",
         f"  沙箱后端: {type(os_sandbox).__name__ if os_sandbox else '无'}",
         f"  后端可用: {'是' if os_available else '否'}",
     ]

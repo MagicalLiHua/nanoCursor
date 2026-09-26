@@ -5,6 +5,10 @@ from nanocursor.conversation import ConversationManager
 
 
 async def handle_clear(ctx: CommandContext) -> None:
+    tasks = getattr(ctx.ui, "task_manager", None)
+    if tasks and any(not t.done() for t in tasks._async_tasks.values()):
+        ctx.ui.add_system_message("Wait for background tasks to finish before clearing the session.")
+        return
     if ctx.session:
         ctx.session.close()
 
@@ -15,7 +19,7 @@ async def handle_clear(ctx: CommandContext) -> None:
         # 用新 session ID 重建 file history
         if ctx.agent:
             from nanocursor.filehistory import FileHistory
-            file_history = FileHistory(ctx.agent._work_dir, new_session.session_id)
+            file_history = FileHistory(getattr(ctx.agent, "session_work_dir", ctx.agent.work_dir), new_session.session_id)
             ctx.agent.file_history = file_history
             for tool in ctx.agent.registry.list_tools():
                 if hasattr(tool, "file_history"):

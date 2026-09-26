@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -100,3 +101,19 @@ async def test_mock_run_uses_shared_prompt_without_host_environment(tmp_path: Pa
     assert summary.final_response == "done"
     assert (tmp_path / "mock-run.trace.jsonl").exists()
     assert (tmp_path / "mock-run.summary.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_eval_compaction_warning_preserves_success(tmp_path, monkeypatch):
+    monkeypatch.setattr("nanocursor.agent.auto_compact", AsyncMock(return_value="temporary summary failure"))
+    async with BridgeClient("http://127.0.0.1:9000", "token",
+                            transport=httpx.MockTransport(bridge_transport)) as bridge:
+        summary = await run_evaluation(
+            client=RecordingClient(), protocol="openai-compat", model="mock-model",
+            prompt="task", task_id="task", run_id="warning", bridge_client=bridge,
+            output_dir=tmp_path, max_turns=4, max_wall_time_seconds=10,
+        )
+    assert summary.status == "completed" and summary.errors == []
+    assert summary.final_response == "done"
+    trace = (tmp_path / "warning.trace.jsonl").read_text()
+    assert '"agent.warning"' in trace and "temporary summary failure" in trace

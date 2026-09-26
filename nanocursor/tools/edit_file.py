@@ -67,6 +67,8 @@ class EditFile(Tool):
                 if self.file_history is not None:
                     self.file_history.track_edit(str(path))
                 atomic_write(path, new_content)
+                if self.file_history is not None:
+                    self.file_history.record_edit(str(path))
                 if self._cache is not None:
                     self._cache.invalidate(str(path.resolve()))
                 if self._state_cache:

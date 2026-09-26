@@ -1,0 +1,88 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: "Create a draft GitHub release (run from an existing version tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      - run: uv run python scripts/export_constraints.py --check
+      - run: uv build --build-constraints packaging/build-constraints.txt
+      - run: uv run python scripts/check_distribution.py dist
+      - run: uv run python scripts/smoke_install.py dist/*.whl --python 3.12
+      - run: uv run python scripts/smoke_install.py dist/*.tar.gz --python 3.12
+      - name: Include tested dependency constraints
+        run: |
+          cp packaging/runtime-constraints.txt packaging/build-constraints.txt dist/
+          cd dist
+          sha256sum *.whl *.tar.gz *constraints.txt > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+
+  verify-platforms:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.11"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+      - run: uv run --no-project python scripts/smoke_install.py dist/*.whl --python '${{ matrix.python }}'
+      - run: uv run --no-project python scripts/smoke_install.py dist/*.tar.gz --python '${{ matrix.python }}'
+
+  draft:
+    if: inputs.draft_release
+    needs: [build, verify-platforms]
+    environment: release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+      - name: Verify tag and create a draft from the tested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          assert os.environ['GITHUB_REF'] == f'refs/tags/v{version}', 'Run from the matching version tag'
+          PY
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md

@@ -54,3 +54,22 @@ def create_sandbox() -> Sandbox | None:
         from .bwrap import BwrapSandbox
         return BwrapSandbox()
     return None
+
+
+def configure_bash_sandbox(registry, work_dir: str, config) -> bool:
+    """Configure the actual backend before enabling any sandbox auto-allow."""
+    if not config.enabled:
+        return False
+    from nanocursor.validator import ConfigError
+    backend = create_sandbox()
+    if backend is None or not backend.available():
+        raise ConfigError("OS sandbox is enabled but unavailable. Install its backend or explicitly disable sandbox.enabled")
+    tool = registry.get("Bash")
+    if tool:
+        tool.sandbox = backend
+        tool.sandbox_config = SandboxConfig(
+            allow_write=[work_dir, "/tmp"],
+            deny_write=[f"{work_dir}/.nanocursor/config.yaml", f"{work_dir}/.nanocursor/permissions.local.yaml"],
+            network_enabled=config.network_enabled,
+        )
+    return bool(tool)

@@ -33,11 +33,13 @@ from nanocursor.permissions import (
     PermissionChecker,
     PermissionMode,
 )
+from nanocursor.permissions.approval_context import build_request
+from nanocursor.permissions.reviewer import ApprovalController
 from nanocursor.hooks import HookContext, HookEngine
 from nanocursor.hooks.engine import HookNotification
 from nanocursor.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from nanocursor.tools import ToolRegistry
-from nanocursor.tools.runtime import ToolRuntimeContext, bind_runtime, normalize_local_arguments
+from nanocursor.tools.runtime import ToolRuntimeContext, bind_runtime, current_runtime, normalize_local_arguments
 from nanocursor.tools.base import (
     MAX_OUTPUT_CHARS,
     StreamEnd,
@@ -113,6 +115,12 @@ class UsageEvent:
 @dataclass
 class ErrorEvent:
     message: str
+    fatal: bool = True
+    code: str = "agent_error"
+
+
+class AgentRunError(RuntimeError):
+    """A terminal loop failure, also propagated to background callers."""
 
 
 @dataclass
@@ -136,6 +144,7 @@ class PermissionResponse(Enum):
     ALLOW = "allow"
     DENY = "deny"
     ALLOW_ALWAYS = "allow_always"
+    ALLOW_EDITS = "allow_edits"
 
 
 @dataclass
@@ -143,6 +152,19 @@ class PermissionRequest:
     tool_name: str
     description: str
     future: asyncio.Future[PermissionResponse]
+    reason: str = ""
+    cwd: str = ""
+    allow_always: bool = True
+    allow_edits: bool = False
+
+
+@dataclass
+class PermissionCall(ToolCallComplete):
+    """UI-only metadata; never included in tool arguments sent to the model."""
+    approval_reason: str = ""
+    approval_cwd: str = ""
+    allow_always: bool = True
+    allow_edits: bool = False
 
 
 AgentEvent = (
@@ -284,7 +306,9 @@ class StreamingExecutor:
         async with self._approval_lock:
             future = asyncio.get_running_loop().create_future()
             await self._permissions.put(PermissionRequest(
-                call.tool_name, PermissionChecker.describe_tool_action(call.tool_name, call.arguments), future))
+                call.tool_name, PermissionChecker.describe_tool_action(call.tool_name, call.arguments), future,
+                getattr(call, "approval_reason", ""), getattr(call, "approval_cwd", ""),
+                getattr(call, "allow_always", True), getattr(call, "allow_edits", False)))
             return await future
 
     async def iter_results(self) -> AsyncIterator[PermissionRequest | _ToolExecResult]:
@@ -350,6 +374,8 @@ class Agent:
         inject_environment_context: bool = True,
         spawn_allowed: bool = True,
         sandbox_root: str | None = None,
+        approval_controller: ApprovalController | None = None,
+        session_work_dir: str | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -363,11 +389,13 @@ class Agent:
         self.worktree_cleanup: Callable[[], Awaitable[str]] | None = None
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker
+        self.approval_controller = approval_controller
         self.permission_mode: PermissionMode = (
             permission_checker.mode if permission_checker else PermissionMode.DEFAULT
         )
         self.context_window = context_window
-        self.session_dir = ensure_session_dir(work_dir)
+        self.session_work_dir = str(Path(session_work_dir or work_dir).resolve())
+        self.session_dir = ensure_session_dir(self.session_work_dir)
         self.compact_breaker = CompactCircuitBreaker()
         self.replacement_state: ContentReplacementState = create_replacement_state()
         # 保存重建工作上下文所需的快照，在 Layer 2 压缩对话后使用：
@@ -390,7 +418,7 @@ class Agent:
         self._consolidator: MemoryConsolidator | None = None
         if memory_manager is not None:
             from nanocursor.memory.consolidation import MemoryConsolidator
-            self._consolidator = MemoryConsolidator(work_dir)
+            self._consolidator = MemoryConsolidator(self.session_work_dir)
         self.session_id: str = ""
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
@@ -412,7 +440,7 @@ class Agent:
     @property
     def _transcript_path(self) -> str:
         if self.session_id:
-            return str(Path(self.work_dir) / ".nanocursor" / "sessions" / f"{self.session_id}.jsonl")
+            return str(Path(self.session_work_dir) / ".nanocursor" / "sessions" / f"{self.session_id}.jsonl")
         return ""
 
     @property
@@ -440,9 +468,15 @@ class Agent:
         return self._plan_path_cache
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
+        changed = mode != self.permission_mode
+        if self.approval_controller and changed:
+            self.approval_controller.revision += 1
         self.permission_mode = mode
         if self.permission_checker:
             self.permission_checker.mode = mode
+        callback = getattr(self, "on_permission_mode_changed", None)
+        if changed and callback:
+            callback()
 
     def activate_skill(self, name: str, prompt_body: str) -> None:
         self.active_skills[name] = prompt_body
@@ -491,11 +525,16 @@ class Agent:
 
     def set_work_dir(self, work_dir: str, *, isolated: bool = False) -> None:
         from nanocursor.permissions import PathSandbox
+        if self.approval_controller:
+            self.approval_controller.revision += 1
         self.work_dir = str(Path(work_dir).resolve())
         self.sandbox_root = self.work_dir if isolated else None
         self._file_versions.clear()
         if self.permission_checker:
             self.permission_checker.sandbox = PathSandbox(self.work_dir)
+        callback = getattr(self, "on_work_dir_changed", None)
+        if callback:
+            callback(self.work_dir)
 
     async def run(self, conversation: ConversationManager, *, interactive: bool = True) -> AsyncIterator[AgentEvent]:
         try:
@@ -558,7 +597,7 @@ class Agent:
 
             if self.max_iterations > 0 and iteration > self.max_iterations:
                 yield ErrorEvent(
-                    message=f"Agent reached maximum iterations ({self.max_iterations})"
+                    message=f"Agent reached maximum iterations ({self.max_iterations})", code="max_iterations"
                 )
                 break
 
@@ -652,7 +691,7 @@ class Agent:
                     conversation, self.session_dir, self.replacement_state
                 )
             elif isinstance(compact_result, str):
-                yield ErrorEvent(message=compact_result)
+                yield ErrorEvent(message=compact_result, fatal=False, code="compact_failed")
 
             collector = StreamCollector()
             executor = StreamingExecutor()
@@ -715,6 +754,9 @@ class Agent:
                         reason=f"max_tokens recovery {output_recoveries}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
                     )
                     continue
+                else:
+                    yield ErrorEvent("Agent stopped after exhausting output-token recovery", code="output_limit")
+                    break
             else:
                 output_recoveries = 0
 
@@ -742,7 +784,9 @@ class Agent:
                         yield he
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
-                    self.file_history.make_snapshot(len(conversation.history), summary)
+                    self.file_history.make_snapshot(len(conversation.history), summary, conversation=conversation.history,
+                                                    env_injected=conversation.env_injected,
+                                                    ltm_injected=conversation.ltm_injected)
                 yield LoopComplete(total_turns=iteration)
                 break
 
@@ -778,7 +822,7 @@ class Agent:
                 consecutive_unknown = consecutive_unknown + 1 if br.is_unknown else 0
                 content = self._maybe_persist_or_truncate(br.tool_id, br.result.output)
                 tool_results.append(ToolResultBlock(br.tool_id, content, br.result.is_error))
-                yield ToolResultEvent(br.tool_id, br.tool_name, br.result.output, br.result.is_error, br.elapsed)
+                yield ToolResultEvent(br.tool_id, br.tool_name, content, br.result.is_error, br.elapsed)
 
             conversation.add_tool_results_message(tool_results)
             self._pending_tool_turn = None
@@ -787,11 +831,11 @@ class Agent:
                 for r in tool_results
             ) else 0
             if parameter_error_turns >= 3:
-                yield ErrorEvent(message="Agent stopped after three consecutive turns with invalid tool arguments")
+                yield ErrorEvent(message="Agent stopped after three consecutive turns with invalid tool arguments", code="invalid_tool_arguments")
                 break
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
-                    message="Agent terminated: too many consecutive unknown tool calls"
+                    message="Agent terminated: too many consecutive unknown tool calls", code="unknown_tools"
                 )
                 break
 
@@ -885,16 +929,65 @@ class Agent:
             if rejection is not None:
                 return ToolResult(f"Hook rejected [{rejection.hook_id}]: {rejection.reason}", True)
         if self.permission_checker:
-            decision = self.permission_checker.check(tool, arguments)
+            controller = self.approval_controller
+            smart = bool(controller and approval and self.parent_id is None
+                         and controller.active(self.permission_checker.mode) and tc.tool_name == "Bash")
+            decision = (self.permission_checker.check(tool, arguments, smart=True) if smart
+                        else self.permission_checker.check(tool, arguments))
+            if smart and not decision.review_eligible:
+                log.info("permission tool=Bash effect=%s source=%s", decision.effect, decision.source)
+                controller.notify(f"规则判定 · {decision.reason}")
             if decision.effect == "deny":
                 return ToolResult(f"Permission denied: {decision.reason}", True)
             if decision.effect == "ask":
                 if approval is None:
                     return ToolResult("Permission denied: non-interactive agent cannot prompt user", True)
-                response = await approval(tc)
-                if response == PermissionResponse.DENY:
-                    return ToolResult("Permission denied: 用户拒绝了此操作", True)
-                if response == PermissionResponse.ALLOW_ALWAYS:
+                request = None
+                reviewed = smart and decision.review_eligible
+                result = None
+                if smart:
+                    runtime = current_runtime()
+                    if runtime and str(runtime.cwd) != self.work_dir:
+                        return ToolResult("Permission invalidated: working directory changed; retry the command.", True)
+                    request = build_request(self, tool, arguments, decision.source)
+                if reviewed:
+                    result = await controller.review(request)
+                response = PermissionResponse.ALLOW if result and result.allowed else None
+                if response is None:
+                    allow_edits = (self.parent_id is None
+                                   and self.permission_mode == PermissionMode.DEFAULT
+                                   and tc.tool_name in {"WriteFile", "EditFile"}
+                                   and tool.category == "write"
+                                   and decision.source == "mode_fallback")
+                    prompt = PermissionCall(tc.tool_id, tc.tool_name, arguments,
+                                            approval_reason=result.reason if result else decision.reason,
+                                            approval_cwd=self.work_dir, allow_always=not reviewed,
+                                            allow_edits=allow_edits)
+                    response = await approval(prompt)
+                    if response == PermissionResponse.ALLOW_EDITS:
+                        current = self.permission_checker.check(tool, arguments)
+                        runtime = current_runtime()
+                        if (not allow_edits or self.permission_mode != PermissionMode.DEFAULT
+                                or current.effect != "ask" or current.source != "mode_fallback"
+                                or (runtime and str(runtime.cwd) != self.work_dir)
+                                or self.registry.get(tc.tool_name) is not tool):
+                            return ToolResult("Permission invalidated: enabling acceptEdits is not available for this request; retry the operation.", True)
+                        self.set_permission_mode(PermissionMode.ACCEPT_EDITS)
+                        response = PermissionResponse.ALLOW
+                    if response not in (PermissionResponse.ALLOW, PermissionResponse.ALLOW_ALWAYS):
+                        if smart:
+                            controller.record_denial(arguments["command"])
+                        return ToolResult("Permission denied: 用户拒绝了此操作", True)
+                    if reviewed and response == PermissionResponse.ALLOW_ALWAYS:
+                        return ToolResult("Permission denied: automatic review permits single-use approval only", True)
+                if request is not None:
+                    # No await between this check and execute's preparation of
+                    # the actual command. Changes require a fresh tool request.
+                    current = build_request(self, tool, params.model_dump(), decision.source)
+                    if (current.binding != request.binding or arguments != params.model_dump()
+                            or self.registry.get(tc.tool_name) is not tool):
+                        return ToolResult("Permission invalidated: command, authorization or execution conditions changed; retry the command.", True)
+                if response == PermissionResponse.ALLOW_ALWAYS and not reviewed:
                     from nanocursor.permissions.rules import Rule, extract_content
                     content = extract_content(tc.tool_name, arguments)
                     self.permission_checker.rule_engine.append_local_rule(Rule(tc.tool_name, content, "allow"))
@@ -1058,6 +1151,8 @@ class Agent:
                 elif isinstance(event, UsageEvent) and event_callback:
                     event_callback({"type": "usage", "usage": {
                         "inputTokens": event.input_tokens, "outputTokens": event.output_tokens}})
+                elif isinstance(event, ErrorEvent) and event.fatal:
+                    raise AgentRunError(event.message)
         return last_text
 
     async def _execute_tool_noninteractive(self, tc: ToolCallComplete) -> ToolResult:

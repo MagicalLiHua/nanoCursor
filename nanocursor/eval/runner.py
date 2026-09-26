@@ -123,9 +123,11 @@ async def run_evaluation(
                 final_response = current_text
                 recorder.record("agent.loop_complete", {"turns": event.total_turns})
             elif isinstance(event, ErrorEvent):
-                status = "error"
-                errors.append(event.message)
-                recorder.record("agent.error", {"message": event.message})
+                if event.fatal:
+                    status = "error"
+                    errors.append(event.message)
+                recorder.record("agent.error" if event.fatal else "agent.warning",
+                                {"message": event.message, "code": event.code})
             elif isinstance(event, PermissionRequest):
                 status = "error"
                 message = f"Unexpected permission request for {event.tool_name}."

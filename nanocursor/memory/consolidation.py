@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import asyncio
 import logging
 import os
@@ -38,7 +40,7 @@ class MemoryConsolidator:
     ) -> None:
         self._work_dir = work_dir
         self._mem_dir = os.path.join(work_dir, ".nanocursor", "memory")
-        self._user_mem_dir = os.path.join(Path.home(), ".nanocursor", "memory")
+        self._user_mem_dir = str(app_home() / "memory")
         self._min_hours = min_hours
         self._min_sessions = min_sessions
         self._last_scan_at = 0

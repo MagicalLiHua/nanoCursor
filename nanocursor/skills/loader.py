@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import logging
 import os
 from pathlib import Path
@@ -18,7 +20,7 @@ class SkillLoader:
     def __init__(self, work_dir: str) -> None:
         self._work_dir = work_dir
         self._project_dir = Path(work_dir) / PROJECT_SKILLS_DIR
-        self._user_dir = Path(USER_SKILLS_DIR).expanduser()
+        self._user_dir = app_home() / "skills"
         self._skills: dict[str, SkillDef] = {}
         self._cache: dict[str, SkillDef] = {}
         self._dir_mod_times: dict[str, float] = {}

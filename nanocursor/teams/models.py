@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -126,12 +128,12 @@ class AgentTeam:
 
 def resolve_team_dir(team_name: str) -> Path:
     slug = _sanitize_name(team_name)
-    return Path.home() / ".nanocursor" / "teams" / slug
+    return app_home() / "teams" / slug
 
 
 def unique_team_name(team_name: str) -> str:
     slug = _sanitize_name(team_name)
-    base_dir = Path.home() / ".nanocursor" / "teams"
+    base_dir = app_home() / "teams"
     if not (base_dir / slug).exists():
         return slug
     counter = 2

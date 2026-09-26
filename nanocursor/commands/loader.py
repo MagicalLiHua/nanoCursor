@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from nanocursor.runtime import app_home
+
 import logging
 import os
 from pathlib import Path
@@ -134,8 +136,7 @@ def load_user_commands(work_dir: str) -> list[Command]:
       2. <work_dir>/.nanocursor/commands/
     """
     dirs: list[str] = []
-    home = Path.home()
-    dirs.append(str(home / ".nanocursor" / "commands"))
+    dirs.append(str(app_home() / "commands"))
     dirs.append(str(Path(work_dir) / ".nanocursor" / "commands"))
 
     merged: dict[str, Command] = {}

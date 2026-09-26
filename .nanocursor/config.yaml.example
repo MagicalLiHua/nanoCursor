@@ -1,11 +1,21 @@
+# Global example: ~/.nanocursor/config.yaml. Prefer `nanocursor setup`.
+# Project config can select default_provider and override a profile's model.
+schema_version: 2
+default_provider: deepseek
 providers:
   - name: deepseek
     protocol: openai-compat
     base_url: https://api.deepseek.com
     model: deepseek-chat
+    api_key_env: DEEPSEEK_API_KEY
     thinking: false
 
 permission_mode: default
+# Main interactive Agent only; /approval on enables it for the current run.
+approval:
+  mode: manual
+  provider: null  # Follow the selected main model, or name another provider above.
+  timeout_seconds: 10
 mcp_servers: []
 hooks: []
 enable_fork: false
@@ -13,6 +23,6 @@ enable_verification_agent: false
 enable_coordinator_mode: false
 
 sandbox:
-  enabled: true
+  enabled: false  # Enable after checking backend availability with `nanocursor doctor`.
   auto_allow: false
   network_enabled: false

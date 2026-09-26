@@ -43,7 +43,15 @@ def lookup_model_context_window(model: str) -> int:
 
 
 class ConfigError(Exception):
-    pass
+    code = "CONFIG_INVALID"
+
+
+class MissingConfigError(ConfigError):
+    code = "CONFIG_MISSING"
+
+
+class CredentialError(ConfigError):
+    code = "CREDENTIAL_MISSING"
 
 
 def validate_providers(raw_providers: list) -> list[dict]:
@@ -60,6 +68,27 @@ def validate_providers(raw_providers: list) -> list[dict]:
         if missing:
             raise ConfigError(f"Provider #{i + 1}: missing fields: {', '.join(missing)}")
 
+        for field in ("name", "protocol", "base_url", "model"):
+            if not isinstance(entry[field], str) or not entry[field].strip():
+                raise ConfigError(f"Provider #{i + 1}: {field} must be a non-empty string")
+        if entry["name"] in {p["name"] for p in providers}:
+            raise ConfigError(f"Provider #{i + 1}: duplicate name")
+        from nanocursor.credentials import normalize_endpoint
+        normalize_endpoint(entry["base_url"])
+        for field in ("api_key", "api_key_env", "credential_ref"):
+            if not isinstance(entry.get(field, ""), str):
+                raise ConfigError(f"Provider #{i + 1}: {field} must be a string")
+        if sum(bool(entry.get(f)) for f in ("api_key", "api_key_env", "credential_ref")) > 1:
+            raise ConfigError(f"Provider #{i + 1}: choose only one credential source")
+        if entry.get("api_key", "").startswith("${"):
+            raise ConfigError(f"Provider #{i + 1}: use api_key_env for an environment variable")
+        import re
+        if entry.get("api_key_env") and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry["api_key_env"]):
+            raise ConfigError(f"Provider #{i + 1}: invalid api_key_env name")
+        if entry.get("auth", "key") not in ("key", "none"):
+            raise ConfigError(f"Provider #{i + 1}: auth must be key or none")
+        if entry.get("auth") == "none" and any(entry.get(f) for f in ("api_key", "api_key_env", "credential_ref")):
+            raise ConfigError(f"Provider #{i + 1}: auth none cannot include a credential source")
         protocol = entry["protocol"]
         if protocol not in VALID_PROTOCOLS:
             raise ConfigError(
@@ -94,6 +123,9 @@ def validate_providers(raw_providers: list) -> list[dict]:
                 "base_url": entry["base_url"],
                 "model": entry["model"],
                 "api_key": entry.get("api_key", ""),
+                "api_key_env": entry.get("api_key_env", ""),
+                "credential_ref": entry.get("credential_ref", ""),
+                "auth": entry.get("auth", "key"),
                 "thinking": thinking,
                 "context_window": context_window,
                 "max_output_tokens": max_output_tokens,
@@ -126,8 +158,22 @@ def validate_mcp_servers(raw_mcp: list | None) -> list[dict]:
         if not isinstance(entry, dict):
             raise ConfigError(f"MCP server #{i + 1}: must be a mapping")
         name = entry.get("name")
-        if not name:
+        if not isinstance(name, str) or not name:
             raise ConfigError(f"MCP server #{i + 1}: missing 'name'")
+        if not isinstance(entry.get("enabled", True), bool):
+            raise ConfigError(f"MCP server #{i + 1}: enabled must be a boolean")
+        if not entry.get("enabled", True):
+            continue
+        for field in ("command", "url"):
+            if field in entry and (not isinstance(entry[field], str) or not entry[field].strip()):
+                raise ConfigError(f"MCP server #{i + 1}: {field} must be a non-empty string")
+        args = entry.get("args", [])
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise ConfigError(f"MCP server #{i + 1}: args must be a list of strings")
+        for field in ("headers", "env"):
+            value = entry.get(field, {})
+            if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+                raise ConfigError(f"MCP server #{i + 1}: {field} must map strings to strings")
         has_command = "command" in entry
         has_url = "url" in entry
         if has_command and has_url:
@@ -236,6 +282,28 @@ def validate_sandbox(raw_sb: dict | None) -> dict:
     return result
 
 
+def validate_approval(raw: object) -> dict:
+    import math
+
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("'approval' must be a mapping")
+    if set(raw) - {"mode", "provider", "timeout_seconds"}:
+        raise ConfigError("Unknown approval configuration field")
+    mode = raw.get("mode", "manual")
+    provider = raw.get("provider")
+    timeout = raw.get("timeout_seconds", 10.0)
+    if mode not in ("manual", "smart"):
+        raise ConfigError("'approval.mode' must be manual or smart")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ConfigError("'approval.provider' must be a provider name or null")
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or not 0 < timeout <= 120):
+        raise ConfigError("'approval.timeout_seconds' must be > 0 and <= 120")
+    return {"mode": mode, "provider": provider, "timeout_seconds": float(timeout)}
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
@@ -262,4 +330,5 @@ def validate_config_structure(raw: object) -> dict:
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
         "sandbox": validate_sandbox(raw.get("sandbox")),
+        "approval": validate_approval(raw.get("approval")),
     }

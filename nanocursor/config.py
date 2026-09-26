@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,7 +16,10 @@ from .validator import (
     VALID_TEAMMATE_MODES,
     lookup_model_context_window,
     validate_config_structure,
+    MissingConfigError,
+    CredentialError,
 )
+from .runtime import app_home
 
 
 _ENV_KEY_MAP = {
@@ -33,18 +37,31 @@ class ProviderConfig:
     protocol: str
     base_url: str
     model: str
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     thinking: bool = False
     # 0 表示"未设置" — get_context_window() 通过四层 fallback 解析真实窗口大小。
     # 正数表示配置文件里显式指定的覆盖值。
     context_window: int = 0
     max_output_tokens: int = 0
+    api_key_env: str = ""
+    credential_ref: str = ""
+    auth: str = "key"
+    _needs_trust: bool = field(default=False, repr=False)
     # 运行时 cache，存放从 provider 的 /v1/models 端点自动拉取的 context window
     # （get_context_window 的第 2 层）。通过 set_fetched_context_window() 写入一次；
     # 0 表示"尚未拉取"。不会持久化。
     _fetched_context_window: int = field(default=0, repr=False)
 
     def resolve_api_key(self) -> str:
+        if self._needs_trust:
+            raise ConfigError("Project provider needs approval of its endpoint; run nanocursor in a terminal first")
+        if self.auth == "none":
+            return "not-required"
+        if self.api_key_env:
+            return os.environ.get(self.api_key_env, "")
+        if self.credential_ref:
+            from .credentials import read_credential
+            return read_credential(self)
         if self.api_key:
             return self.api_key
         env_var = _ENV_KEY_MAP.get(self.protocol, "")
@@ -133,6 +150,13 @@ class SandboxAppConfig:
 
 
 @dataclass
+class ApprovalConfig:
+    mode: str = "manual"
+    provider: str | None = None
+    timeout_seconds: float = 10.0
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
     permission_mode: str = "default"
@@ -144,131 +168,223 @@ class AppConfig:
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
     sandbox: SandboxAppConfig = field(default_factory=SandboxAppConfig)
+    approval: ApprovalConfig = field(default_factory=ApprovalConfig)
+    _approval_fields: set[str] = field(default_factory=set, repr=False)
+    default_provider: str = ""
+    schema_version: int = 1
+    sources: dict[str, str] = field(default_factory=dict)
+    _raw: dict = field(default_factory=dict, repr=False)
+    project_fingerprint: str = ""
+    project_trusted: bool = True
+    project_files: list[str] = field(default_factory=list)
+
+    @property
+    def selected_provider(self) -> ProviderConfig:
+        return next((p for p in self.providers if p.name == self.default_provider), self.providers[0])
+
+
+def read_config_file(path: Path) -> dict:
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        # YAML parser excerpts can contain a secret. Report location, never source.
+        raise ConfigError(f"Invalid YAML in {path}{location}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"Cannot read configuration file: {path}") from exc
+    if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
+        raise ConfigError(f"Config must be a mapping: {path}")
+    schema = raw.get("schema_version", 1)
+    if type(schema) is not int or schema not in (1, 2):
+        raise ConfigError(f"Unsupported schema_version in {path}; update nanoCursor")
+    return raw
+
+
+def _from_raw(raw: dict) -> AppConfig:
+    if type(raw.get("schema_version", 1)) is not int or raw.get("schema_version", 1) not in (1, 2):
+        raise ConfigError("Unsupported schema_version; update nanoCursor")
+    validated = validate_config_structure(raw)
+    default = raw.get("default_provider", "")
+    if not isinstance(default, str):
+        raise ConfigError("default_provider must be a provider name")
+    providers = [ProviderConfig(**p) for p in validated["providers"]]
+    if default and default not in {p.name for p in providers}:
+        raise ConfigError("default_provider does not name a configured provider")
+    return AppConfig(
+        providers=providers,
+        permission_mode=validated["permission_mode"],
+        mcp_servers=[MCPServerConfig(**s) for s in validated["mcp_servers"]],
+        raw_hooks=validated["hooks"],
+        enable_fork=validated["enable_fork"],
+        enable_verification_agent=validated["enable_verification_agent"],
+        worktree=WorktreeConfig(**validated["worktree"]),
+        teammate_mode=validated["teammate_mode"],
+        enable_coordinator_mode=validated["enable_coordinator_mode"],
+        sandbox=SandboxAppConfig(**validated["sandbox"]),
+        approval=ApprovalConfig(**validated["approval"]),
+        _approval_fields=set(raw.get("approval") or {}),
+        default_provider=default,
+        schema_version=raw.get("schema_version", 1),
+        _raw=deepcopy(raw),
+    )
 
 
 def _load_single_file(path: Path) -> AppConfig:
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
-        raise ConfigError(f"Failed to parse config {path}: {e}") from e
+        return _from_raw(read_config_file(path))
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
 
-    validated = validate_config_structure(raw)
 
-    providers = [
-        ProviderConfig(
-            name=p["name"],
-            protocol=p["protocol"],
-            base_url=p["base_url"],
-            model=p["model"],
-            api_key=p["api_key"],
-            thinking=p["thinking"],
-            context_window=p["context_window"],
-            max_output_tokens=p["max_output_tokens"],
-        )
-        for p in validated["providers"]
-    ]
-
-    mcp_servers = [
-        MCPServerConfig(
-            name=s["name"],
-            command=s["command"],
-            args=s["args"],
-            url=s["url"],
-            headers=s["headers"],
-            env=s["env"],
-        )
-        for s in validated["mcp_servers"]
-    ]
-
-    wt = validated["worktree"]
-    worktree_cfg = WorktreeConfig(
-        symlink_directories=wt["symlink_directories"],
-        stale_cleanup_interval=wt["stale_cleanup_interval"],
-        stale_cutoff_hours=wt["stale_cutoff_hours"],
-    )
-
-    sb = validated["sandbox"]
-    sandbox_cfg = SandboxAppConfig(
-        enabled=sb["enabled"],
-        auto_allow=sb["auto_allow"],
-        network_enabled=sb["network_enabled"],
-    )
-
-    return AppConfig(
-        providers=providers,
-        permission_mode=validated["permission_mode"],
-        mcp_servers=mcp_servers,
-        raw_hooks=validated["hooks"],
-        enable_fork=validated["enable_fork"],
-        enable_verification_agent=validated["enable_verification_agent"],
-        worktree=worktree_cfg,
-        teammate_mode=validated["teammate_mode"],
-        enable_coordinator_mode=validated["enable_coordinator_mode"],
-        sandbox=sandbox_cfg,
-    )
+def _merge_raw(base: dict, override: dict) -> dict:
+    result = deepcopy(base)
+    schema = override.get("schema_version", base.get("schema_version", 1))
+    for key, value in override.items():
+        if key in {"approval", "sandbox", "worktree"} and isinstance(value, dict):
+            result[key] = {**(result.get(key) or {}), **deepcopy(value)}
+        elif key == "hooks" and schema == 1:
+            result[key] = list(result.get(key) or []) + list(value or [])
+        elif key == "mcp_servers" and isinstance(value, list) and value:
+            servers = {s["name"]: deepcopy(s) for s in result.get(key, [])}
+            for server in value:
+                servers[server["name"]] = deepcopy(server)
+            result[key] = list(servers.values())
+        else:
+            result[key] = deepcopy(value)
+    return result
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
-    if override.providers:
-        base.providers = override.providers
-    if override.permission_mode != "default":
-        base.permission_mode = override.permission_mode
-
-    if override.mcp_servers:
-        by_name = {s.name: i for i, s in enumerate(base.mcp_servers)}
-        for s in override.mcp_servers:
-            if s.name in by_name:
-                base.mcp_servers[by_name[s.name]] = s
-            else:
-                base.mcp_servers.append(s)
-                by_name[s.name] = len(base.mcp_servers) - 1
-
-    base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
-    if override.teammate_mode:
-        base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
-    # 沙箱配置：后层覆盖前层（任一字段为非默认值即覆盖）
-    if override.sandbox.enabled:
-        base.sandbox.enabled = True
-    if override.sandbox.auto_allow:
-        base.sandbox.auto_allow = True
-    if override.sandbox.network_enabled:
-        base.sandbox.network_enabled = True
-    return base
+    # Keep the helper used by callers/tests while merging explicit raw fields.
+    return _from_raw(_merge_raw(base._raw, override._raw))
 
 
-def load_config(path: Path | None = None) -> AppConfig:
+def _validate_layer(raw: dict, *, partial_providers: bool = False) -> None:
+    seed = {"providers": [{"name": "validation", "protocol": "openai-compat",
+                           "base_url": "https://example.invalid", "model": "validation"}]}
+    candidate = {**seed, **raw}
+    if partial_providers:
+        candidate["providers"] = seed["providers"]
+    for key in ("approval", "sandbox", "worktree"):
+        if key in raw and not isinstance(raw[key], dict):
+            raise ConfigError(f"{key} must be a mapping; reset individual fields explicitly")
+    validate_config_structure(candidate)
+
+
+def load_config(path: Path | None = None, *, work_dir: Path | str | None = None,
+                env_provider: str | None = None) -> AppConfig:
     if path is not None:
+        if env_provider is not None:
+            raise ConfigError("An explicit config path cannot be combined with an environment connection")
         if not path.exists():
-            raise ConfigError(f"Config file not found: {path}")
+            raise MissingConfigError(f"Config file not found: {path}")
         return _load_single_file(path)
 
-    cwd = Path.cwd()
-    home = Path.home()
-    candidates = [
-        home / ".nanocursor" / "config.yaml",
-        cwd / ".nanocursor" / "config.yaml",
-        cwd / ".nanocursor" / "config.local.yaml",
-    ]
-
-    merged: AppConfig | None = None
-    for p in candidates:
-        if not p.exists():
+    cwd = Path(work_dir or Path.cwd()).resolve()
+    global_path = app_home() / "config.yaml"
+    candidates = [global_path, cwd / ".nanocursor" / "config.yaml", cwd / ".nanocursor" / "config.local.yaml"]
+    merged: dict = {}
+    sources: dict[str, str] = {}
+    project_payload: list[dict] = []
+    global_targets: set[tuple[str, str]] = set()
+    seen: set[Path] = set()
+    found = False
+    for candidate in candidates:
+        if candidate in seen:
             continue
-        layer = _load_single_file(p)
-        if merged is None:
-            merged = layer
+        seen.add(candidate)
+        if not candidate.exists():
+            continue
+        found = True
+        raw = read_config_file(candidate)
+        project_raw = deepcopy(raw)
+        project = candidate != global_path
+        version = raw.get("schema_version", merged.get("schema_version", 1))
+        if raw.get("schema_version", version) < merged.get("schema_version", 1):
+            raise ConfigError(f"Cannot downgrade configuration schema in {candidate}")
+        try:
+            partial = project and version == 2 and "providers" in raw
+            _validate_layer(raw, partial_providers=partial)
+            if partial:
+                entries = raw["providers"]
+                if not isinstance(entries, list) or not entries:
+                    raise ConfigError("Project providers must be a non-empty list of existing profiles")
+                by_name = {p["name"]: deepcopy(p) for p in merged.get("providers", [])}
+                names = set()
+                for entry in entries:
+                    if not isinstance(entry, dict) or entry.get("name") not in by_name:
+                        raise ConfigError("Define new connection profiles globally using nanocursor setup")
+                    if entry["name"] in names:
+                        raise ConfigError("Duplicate project provider name")
+                    names.add(entry["name"])
+                    if set(entry) - {"name", "model", "thinking", "context_window", "max_output_tokens"}:
+                        raise ConfigError("Project profiles may change models, not endpoints or credential sources; use setup")
+                    by_name[entry["name"]].update(entry)
+                raw = {**raw, "providers": list(by_name.values())}
+            merged = _merge_raw(merged, raw)
+        except (ConfigError, TypeError, KeyError) as exc:
+            if isinstance(exc, ConfigError):
+                raise ConfigError(f"{candidate}: {exc}") from exc
+            raise ConfigError(f"Invalid configuration fields in {candidate}") from exc
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                for field_name in value:
+                    sources[f"{key}.{field_name}"] = str(candidate)
+            else:
+                sources[key] = str(candidate)
+        if project:
+            project_payload.append({"path": str(candidate), "raw": project_raw})
         else:
-            merged = _merge_config(merged, layer)
-
-    if merged is None:
-        raise ConfigError(
-            "No config file found. Expected .nanocursor/config.yaml "
-            "in project or ~/.nanocursor/config.yaml"
-        )
-    return merged
+            from .credentials import normalize_endpoint
+            global_targets = {(p["protocol"], normalize_endpoint(p["base_url"])) for p in raw.get("providers", [])}
+    if env_provider is not None or "providers" not in merged:
+        from .environment import environment_connection
+        try:
+            profile, source = environment_connection(env_provider)
+        except MissingConfigError:
+            if not found:
+                raise
+            # Preserve validation of an existing, incomplete configuration.
+        else:
+            if any(p["name"] == profile["name"] for p in merged.get("providers", [])):
+                raise ConfigError("Environment connection name conflicts with a file profile; rename the file profile")
+            merged["providers"] = [*merged.get("providers", []), profile]
+            merged["default_provider"] = profile["name"]
+            if not found:
+                merged["schema_version"] = 2
+            sources[f"providers.{profile['name']}"] = source
+            sources["default_provider"] = source
+            global_targets.add((profile["protocol"], profile["base_url"]))
+    try:
+        config = _from_raw(merged)
+    except ConfigError as exc:
+        raise ConfigError(f"Effective configuration ({', '.join(str(p) for p in seen if p.exists())}): {exc}") from exc
+    config.sources = sources
+    from .permissions.rules import RuleEngine
+    RuleEngine(
+        user_rules_path=app_home() / "permissions.yaml",
+        project_rules_path=cwd / ".nanocursor" / "permissions.yaml",
+        local_rules_path=cwd / ".nanocursor" / "permissions.local.yaml",
+    ).validate()
+    import hashlib
+    for name in ("permissions.yaml", "permissions.local.yaml"):
+        rules = cwd / ".nanocursor" / name
+        if rules.exists():
+            try:
+                digest = hashlib.sha256(rules.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ConfigError(f"Cannot read project permissions: {rules}") from exc
+            project_payload.append({"path": str(rules), "sha256": digest})
+    # Trust records bind to the exact project settings, including secret-source
+    # names, before hooks, MCP, permission overrides or API probes can run.
+    from .trust import fingerprint, is_trusted
+    if project_payload:
+        config.project_files = [p["path"] for p in project_payload]
+        config.project_fingerprint = fingerprint(cwd, project_payload)
+        config.project_trusted = is_trusted(cwd, config.project_fingerprint)
+        from .credentials import normalize_endpoint
+        for provider in config.providers:
+            known = (provider.protocol, normalize_endpoint(provider.base_url)) in global_targets
+            provider._needs_trust = not config.project_trusted and not known
+    return config
