@@ -229,12 +229,35 @@ def _process_is_running(pid: int) -> bool:
     if sys.platform == "linux":
         try:
             stat = Path(f"/proc/{pid}/stat").read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaping can remove the path before open or the process during read.
             return False
         # kill(pid, 0) also succeeds for dead children awaiting reaping. Their
         # state follows the final ')' of comm, which can itself contain spaces.
         return stat.rpartition(")")[2].split()[0] not in {"Z", "X"}
     return True
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, ProcessLookupError])
+def test_process_probe_handles_exit_during_proc_read(monkeypatch, error_type):
+    monkeypatch.setattr(sys, "platform", "linux")
+    probe = Mock()
+    read_stat = Mock(side_effect=error_type())
+    monkeypatch.setattr(os, "kill", probe)
+    monkeypatch.setattr(Path, "read_text", read_stat)
+
+    assert not _process_is_running(12345)
+    probe.assert_called_once_with(12345, 0)
+    read_stat.assert_called_once()
+
+
+def test_process_probe_does_not_treat_permission_error_as_exit(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "kill", Mock())
+    monkeypatch.setattr(Path, "read_text", Mock(side_effect=PermissionError()))
+
+    with pytest.raises(PermissionError):
+        _process_is_running(12345)
 
 
 @pytest.mark.asyncio
