@@ -32,6 +32,8 @@ class Message:
     tool_uses: list[ToolUseBlock] = field(default_factory=list)
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list)
+    # Host provenance only. API adapters send content, never this metadata.
+    memory_context: dict[str, Any] | None = None
 
 
 # 估算最后一次 API 用量锚点之后追加的消息 token 开销时使用的字符/token 比率。
@@ -152,6 +154,11 @@ class ConversationManager:
     ) -> None:
         if self.ltm_injected:
             return
+        if memories:
+            from nanocursor.memory.context import _message
+            memory_message = _message(memories, 1024, kind="index", roots=[])
+            if memory_message:
+                self.history.append(memory_message)
         sections: list[str] = []
         if instructions:
             sections.append(
@@ -161,9 +168,8 @@ class ConversationManager:
                 "IMPORTANT: These instructions OVERRIDE any default behavior "
                 "and you MUST follow them exactly as written.\n\n" + instructions
             )
-        if memories:
-            sections.append("# autoMemory\n" + memories)
         if not sections:
+            self.ltm_injected = bool(memories)
             return
         from datetime import date
 
@@ -188,6 +194,9 @@ class ConversationManager:
         # 旧的用量锚点描述的是压缩前的对话记录，这里清除它，
         # 使 current_tokens() 退化为字符估算，直到下次 API 响应
         # 基于摘要后的历史重新建立锚点。
+        self.reset_usage_anchor()
+
+    def reset_usage_anchor(self) -> None:
         self.baseline_tokens = 0
         self.anchor_count = 0
         self.last_input_tokens = 0

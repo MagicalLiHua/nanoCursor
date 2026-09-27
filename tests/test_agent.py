@@ -119,23 +119,20 @@ async def test_single_step_tool_call():
     assert c["loop"][0].total_turns == 2
 
 @pytest.mark.asyncio
-async def test_multi_step_autonomous():
+async def test_multi_step_autonomous(tmp_path):
     """Agent 先 WriteFile 再 ReadFile 然后停止 —— 端到端的多步流程。"""
-    # 清理残留文件，避免 read-before-edit 拦截新文件创建
-    test_file = "/tmp/nanocursor_test_hello.txt"
-    if os.path.exists(test_file):
-        os.remove(test_file)
+    test_file = str(tmp_path / "hello.txt")
     client = MockLLMClient([
         # 第 1 轮：WriteFile
         [
             TextDelta("Creating file."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/nanocursor_test_hello.txt", "content": "Hello World"}),
+            ToolCallComplete("t1", "WriteFile", {"file_path": test_file, "content": "Hello World"}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         # 第 2 轮：ReadFile 进行验证
         [
             TextDelta("Verifying content."),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/nanocursor_test_hello.txt"}),
+            ToolCallComplete("t2", "ReadFile", {"file_path": test_file}),
             StreamEnd("end_turn", input_tokens=40, output_tokens=25),
         ],
         # 第 3 轮：最终答案
@@ -145,7 +142,7 @@ async def test_multi_step_autonomous():
         ],
     ])
     registry = create_default_registry()
-    agent = Agent(client, registry, "anthropic", work_dir="/tmp")
+    agent = Agent(client, registry, "anthropic", work_dir=str(tmp_path))
     conv = ConversationManager()
     conv.add_user_message("Create hello.txt with Hello World, then verify")
 

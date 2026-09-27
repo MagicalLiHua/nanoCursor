@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from contextlib import aclosing
 import logging
 import time
@@ -10,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from nanocursor.client import LLMClient
+from nanocursor.client import LLMClient, LLMError
 from nanocursor.context import (
     CompactBoundary,
     CompactCircuitBreaker,
@@ -21,6 +22,7 @@ from nanocursor.context import (
     append_replacement_records,
     apply_tool_result_budget,
     auto_compact,
+    compute_compact_threshold,
     create_replacement_state,
     ensure_session_dir,
     load_replacement_records,
@@ -56,7 +58,6 @@ from nanocursor.tools.base import (
 log = logging.getLogger(__name__)
 
 MEMORY_EXTRACTION_INTERVAL = 1
-MAX_TOKENS_CEILING = 64000
 MAX_OUTPUT_TOKENS_RECOVERIES = 3
 
 
@@ -130,6 +131,14 @@ class CompactNotification:
     # 结构化 boundary（摘要 + 原文保留尾部），UI/session 层用它持久化 compact_boundary 记录。
     # 失败路径下为 None。
     boundary: "CompactBoundary | None" = None
+    # The persistence owner can restore the exact history and usage anchor if
+    # publishing this candidate boundary fails. No provider/tool is replayed.
+    prior_conversation: ConversationManager | None = None
+
+
+@dataclass
+class MemoryContextChanged:
+    prior_conversation: ConversationManager
 
 
 @dataclass
@@ -179,6 +188,7 @@ AgentEvent = (
     | ErrorEvent
     | PermissionRequest
     | CompactNotification
+    | MemoryContextChanged
     | HookEvent
 )
 
@@ -203,6 +213,7 @@ class LLMResponse:
     output_tokens: int = 0
     cache_read: int = 0
     cache_creation: int = 0
+    usage_available: bool = False
 
 
 class StreamCollector:
@@ -212,33 +223,43 @@ class StreamCollector:
     async def consume(
         self, stream: AsyncIterator[StreamEvent]
     ) -> AsyncIterator[AgentEvent]:
-        async for event in stream:
-            if isinstance(event, TextDelta):
-                self.response.text += event.text
-                yield StreamText(text=event.text)
-            elif isinstance(event, ThinkingDelta):
-                yield ThinkingText(text=event.text)
-            elif isinstance(event, ThinkingComplete):
-                self.response.thinking_blocks.append(
-                    ThinkingBlock(thinking=event.thinking, signature=event.signature)
-                )
-            elif isinstance(event, ToolCallStart):
-                pass
-            elif isinstance(event, ToolCallDelta):
-                pass
-            elif isinstance(event, ToolCallComplete):
-                self.response.tool_calls.append(event)
-                yield ToolUseEvent(
-                    tool_name=event.tool_name,
-                    tool_id=event.tool_id,
-                    arguments=event.arguments,
-                )
-            elif isinstance(event, StreamEnd):
-                self.response.stop_reason = event.stop_reason
-                self.response.input_tokens = event.input_tokens
-                self.response.output_tokens = event.output_tokens
-                self.response.cache_read = event.cache_read
-                self.response.cache_creation = event.cache_creation
+        ended = False
+        async with aclosing(stream):
+            async for event in stream:
+                if ended:
+                    raise LLMError("Model stream contained data after its terminal event")
+                if isinstance(event, TextDelta):
+                    self.response.text += event.text
+                    yield StreamText(text=event.text)
+                elif isinstance(event, ThinkingDelta):
+                    yield ThinkingText(text=event.text)
+                elif isinstance(event, ThinkingComplete):
+                    self.response.thinking_blocks.append(
+                        ThinkingBlock(thinking=event.thinking, signature=event.signature)
+                    )
+                elif isinstance(event, ToolCallStart):
+                    pass
+                elif isinstance(event, ToolCallDelta):
+                    pass
+                elif isinstance(event, ToolCallComplete):
+                    self.response.tool_calls.append(event)
+                    yield ToolUseEvent(
+                        tool_name=event.tool_name,
+                        tool_id=event.tool_id,
+                        arguments=event.arguments,
+                    )
+                elif isinstance(event, StreamEnd):
+                    if event.stop_reason not in {"end_turn", "stop_sequence", "tool_use", "max_tokens", "stop", "tool_calls"}:
+                        raise LLMError(f"Model stream ended unsuccessfully: {event.stop_reason}")
+                    ended = True
+                    self.response.stop_reason = event.stop_reason
+                    self.response.input_tokens = event.input_tokens
+                    self.response.output_tokens = event.output_tokens
+                    self.response.cache_read = event.cache_read
+                    self.response.cache_creation = event.cache_creation
+                    self.response.usage_available = event.usage_available
+        if not ended:
+            raise LLMError("Model stream ended without a terminal event")
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +397,10 @@ class Agent:
         sandbox_root: str | None = None,
         approval_controller: ApprovalController | None = None,
         session_work_dir: str | None = None,
+        memory_recall_config: Any = None,
+        execution_guard: Callable[[], str | None] | None = None,
     ) -> None:
+        self.execution_guard = execution_guard
         self.client = client
         self.registry = registry
         self.protocol = protocol
@@ -404,8 +428,11 @@ class Agent:
         self.recovery_state: RecoveryState = RecoveryState()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.usage_missing_requests = 0
         self.instructions_content = instructions_content
         self.memory_manager = memory_manager
+        from nanocursor.memory.recall import MemoryRecallService
+        self.memory_recall = MemoryRecallService(memory_recall_config)
         self.hook_engine = hook_engine
         self.system_prompt_override = system_prompt_override
         self.inject_environment_context = inject_environment_context
@@ -415,10 +442,8 @@ class Agent:
         # _pending_extraction: 提取期间又触发了新请求，标记需要尾随提取
         self._extracting = False
         self._pending_extraction = False
-        self._consolidator: MemoryConsolidator | None = None
-        if memory_manager is not None:
-            from nanocursor.memory.consolidation import MemoryConsolidator
-            self._consolidator = MemoryConsolidator(self.session_work_dir)
+        self.background_task_callback: Callable[[asyncio.Task], None] | None = None
+        self._memory_tasks: set[asyncio.Task] = set()
         self.session_id: str = ""
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
@@ -433,9 +458,8 @@ class Agent:
         self.notification_fn: Callable[[], list[str]] | None = None
         self.file_history: Any = None
 
-        # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
+        # Prepared by the interactive owner, consumed before the first request.
         self.memory_recall_task: Any | None = None
-        self._memory_recall_consumed: bool = False
 
     @property
     def _transcript_path(self) -> str:
@@ -570,6 +594,10 @@ class Agent:
 
     async def _run(self, conversation: ConversationManager, *, interactive: bool) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
+        from nanocursor.memory.context import sync_memory
+        from nanocursor.memory.recall import RecallOutcome
+        recall = RecallOutcome()
+        before_injection = copy.deepcopy(conversation)
         env_context = ""
         if self.inject_environment_context:
             env_context = build_environment_context(
@@ -577,8 +605,19 @@ class Agent:
             )
             conversation.inject_environment(env_context)
 
-        memory_content = self.memory_manager.load() if self.memory_manager else ""
-        conversation.inject_long_term_memory(self.instructions_content, memory_content)
+        conversation.inject_long_term_memory(self.instructions_content, "")
+        if self.memory_manager:
+            if self.memory_recall_task is not None:
+                recall = await self.memory_recall_task
+            else:
+                # Other Agent callers receive bounded indexes, not automatic
+                # query/model recall reserved for the main interactive entry.
+                recall = await self.memory_recall.prepare("", self.memory_manager.user_mem_dir,
+                                                         self.memory_manager.project_mem_dir)
+            sync_memory(conversation, recall, self.memory_recall, self.context_window,
+                        getattr(self.client, "max_output_tokens", 0))
+            if conversation.history != before_injection.history:
+                yield MemoryContextChanged(before_injection)
 
         if self.hook_engine:
             ctx = self._build_hook_context("session_start")
@@ -589,10 +628,12 @@ class Agent:
         iteration = 0
         consecutive_unknown = 0
         parameter_error_turns = 0
-        max_tokens_escalated = False
         output_recoveries = 0
 
         while True:
+            if self.execution_guard and (reason := self.execution_guard()):
+                yield ErrorEvent(message=reason, code="authority_changed")
+                break
             iteration += 1
 
             if self.max_iterations > 0 and iteration > self.max_iterations:
@@ -627,7 +668,7 @@ class Agent:
                 agent_catalog=self._agent_catalog_list or None,
             )
 
-            if self.plan_mode:
+            if self.plan_mode and self.spawn_allowed:
                 plan_path = str(self._get_plan_path())
                 if self.permission_checker:
                     self.permission_checker.plan_file_path = plan_path
@@ -663,6 +704,11 @@ class Agent:
 
             # Layer 2: 接近 context window 上限时自动 compact
             # tool-result budget 已就地修改 conversation，直接用 conversation.history 估算
+            prior_conversation = (
+                copy.deepcopy(conversation)
+                if conversation.current_tokens() >= compute_compact_threshold(self.context_window)
+                else None
+            )
             compact_result = await auto_compact(
                 conversation,
                 self.client,
@@ -674,24 +720,44 @@ class Agent:
                 tool_schemas=self.registry.get_all_schemas(self.protocol),
                 transcript_path=self._transcript_path,
             )
+            after_compact = None
             if isinstance(compact_result, CompactEvent):
+                after_compact = copy.deepcopy(conversation)
                 yield CompactNotification(
                     before_tokens=compact_result.before_tokens,
                     message=f"上下文已压缩（压缩前 {compact_result.before_tokens:,} tokens）",
                     boundary=compact_result.boundary,
+                    prior_conversation=prior_conversation,
                 )
                 if env_context:
                     conversation.inject_environment(env_context)
-                mem = self.memory_manager.load() if self.memory_manager else ""
-                conversation.inject_long_term_memory(
-                    self.instructions_content, mem
-                )
+                conversation.inject_long_term_memory(self.instructions_content, "")
                 # 压缩后重新应用 budget（就地修改）
                 apply_tool_result_budget(
                     conversation, self.session_dir, self.replacement_state
                 )
             elif isinstance(compact_result, str):
-                yield ErrorEvent(message=compact_result, fatal=False, code="compact_failed")
+                fatal = conversation.current_tokens() >= compute_compact_threshold(self.context_window, manual=True)
+                yield ErrorEvent(message=compact_result, fatal=fatal, code="compact_failed")
+                if fatal:
+                    break
+
+            if self.memory_manager:
+                prior_memory = after_compact or copy.deepcopy(conversation)
+                changed = sync_memory(conversation, recall, self.memory_recall, self.context_window,
+                                      getattr(self.client, "max_output_tokens", 0), record_stats=False)
+                if changed or prior_memory.history != conversation.history:
+                    yield MemoryContextChanged(prior_memory)
+
+            # A short but oversized tail can leave no prefix worth
+            # summarizing. None (or a summary that is still too large) must
+            # never authorize another request beyond the hard input budget.
+            if conversation.current_tokens() >= compute_compact_threshold(self.context_window, manual=True):
+                yield ErrorEvent(
+                    message="上下文仍超过安全上限，已保留当前会话；请减少输入或手动整理后重试。",
+                    fatal=True, code="compact_failed",
+                )
+                break
 
             collector = StreamCollector()
             executor = StreamingExecutor()
@@ -717,6 +783,8 @@ class Agent:
 
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens
+            if not response.usage_available:
+                self.usage_missing_requests += 1
             yield UsageEvent(
                 input_tokens=self.total_input_tokens,
                 output_tokens=self.total_output_tokens,
@@ -728,24 +796,10 @@ class Agent:
             ]
 
             if response.stop_reason == "max_tokens" and not response.tool_calls:
-                if not max_tokens_escalated:
-                    self.client.set_max_output_tokens(MAX_TOKENS_CEILING)
-                    max_tokens_escalated = True
-                    if response.text:
-                        conversation.add_assistant_message(
-                            response.text, thinking_blocks=conv_thinking
-                        )
-                        conversation.add_user_message(
-                            "Output token limit hit. Resume directly from where you stopped. "
-                            "Do not apologize or repeat previous content. Pick up mid-thought if needed."
-                        )
-                    yield RetryEvent(reason="max_tokens escalation")
-                    continue
-                elif output_recoveries < MAX_OUTPUT_TOKENS_RECOVERIES:
+                if response.text:
+                    conversation.add_assistant_message(response.text, thinking_blocks=conv_thinking)
+                if output_recoveries < MAX_OUTPUT_TOKENS_RECOVERIES:
                     output_recoveries += 1
-                    conversation.add_assistant_message(
-                        response.text, thinking_blocks=conv_thinking
-                    )
                     conversation.add_user_message(
                         "Output token limit hit. Resume directly from where you stopped. "
                         "Break remaining work into smaller pieces."
@@ -765,16 +819,25 @@ class Agent:
                 conversation.add_assistant_message(
                     response.text, thinking_blocks=conv_thinking
                 )
+                # Final replies also become part of the current context. Anchor
+                # their usage before LoopComplete exposes the finished turn.
+                conversation.record_usage_anchor(
+                    response.input_tokens,
+                    response.output_tokens,
+                    response.cache_read,
+                    response.cache_creation,
+                )
                 self._loop_count += 1
                 if (
                     self._loop_count % MEMORY_EXTRACTION_INTERVAL == 0
                     and self.memory_manager
                 ):
-                    asyncio.ensure_future(self._extract_memories(conversation))
-                if self._consolidator is not None:
-                    asyncio.ensure_future(
-                        self._consolidator.maybe_run(self.client, conversation, self.protocol)
-                    )
+                    from copy import deepcopy
+                    task = asyncio.create_task(self._extract_memories(deepcopy(conversation)))
+                    self._memory_tasks.add(task)
+                    task.add_done_callback(self._memory_tasks.discard)
+                    if self.background_task_callback:
+                        self.background_task_callback(task)
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
                     await self.hook_engine.run_hooks("turn_end", ctx)
@@ -842,17 +905,6 @@ class Agent:
             exit_plan_called = any(
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
-            # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
-            if self.memory_recall_task and not self._memory_recall_consumed:
-                if self.memory_recall_task.done():
-                    try:
-                        recall = self.memory_recall_task.result()
-                        if recall:
-                            conversation.add_system_reminder(recall)
-                    except Exception:
-                        pass
-                    self._memory_recall_consumed = True
-
             if exit_plan_called:
                 yield TurnComplete(turn=iteration)
                 yield LoopComplete(total_turns=iteration)
@@ -907,6 +959,8 @@ class Agent:
         self, tc: ToolCallComplete,
         approval: Callable[[ToolCallComplete], Awaitable[PermissionResponse]] | None,
     ) -> ToolResult:
+        if self.execution_guard and (reason := self.execution_guard()):
+            return ToolResult(reason, True)
         tool = self.registry.get(tc.tool_name)
         if tool is None:
             return ToolResult(f"Error: unknown tool '{tc.tool_name}'", True)
@@ -928,6 +982,10 @@ class Agent:
             rejection = await self.hook_engine.run_pre_tool_hooks(ctx)
             if rejection is not None:
                 return ToolResult(f"Hook rejected [{rejection.hook_id}]: {rejection.reason}", True)
+        if self.execution_guard and (reason := self.execution_guard()):
+            return ToolResult(reason, True)
+        if not self.registry.is_enabled(tc.tool_name) or self.registry.get(tc.tool_name) is not tool:
+            return ToolResult("Tool scope changed before execution", True)
         if self.permission_checker:
             controller = self.approval_controller
             smart = bool(controller and approval and self.parent_id is None
@@ -941,7 +999,7 @@ class Agent:
                 return ToolResult(f"Permission denied: {decision.reason}", True)
             if decision.effect == "ask":
                 if approval is None:
-                    return ToolResult("Permission denied: non-interactive agent cannot prompt user", True)
+                    return ToolResult("Permission denied: non-interactive agent cannot prompt user; authorize this operation in the main session", True)
                 request = None
                 reviewed = smart and decision.review_eligible
                 result = None
@@ -961,7 +1019,8 @@ class Agent:
                                    and decision.source == "mode_fallback")
                     prompt = PermissionCall(tc.tool_id, tc.tool_name, arguments,
                                             approval_reason=result.reason if result else decision.reason,
-                                            approval_cwd=self.work_dir, allow_always=not reviewed,
+                                            approval_cwd=self.work_dir,
+                                            allow_always=not reviewed and getattr(tool, "allow_always", True),
                                             allow_edits=allow_edits)
                     response = await approval(prompt)
                     if response == PermissionResponse.ALLOW_EDITS:
@@ -988,6 +1047,8 @@ class Agent:
                             or self.registry.get(tc.tool_name) is not tool):
                         return ToolResult("Permission invalidated: command, authorization or execution conditions changed; retry the command.", True)
                 if response == PermissionResponse.ALLOW_ALWAYS and not reviewed:
+                    if not getattr(tool, "allow_always", True):
+                        return ToolResult("Permission denied: this tool requires single-use approval", True)
                     from nanocursor.permissions.rules import Rule, extract_content
                     content = extract_content(tc.tool_name, arguments)
                     self.permission_checker.rule_engine.append_local_rule(Rule(tc.tool_name, content, "allow"))
@@ -1117,10 +1178,13 @@ class Agent:
                     self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
                 )
                 conversation.inject_environment(env_context)
-            memory_content = self.memory_manager.load() if self.memory_manager else ""
-            conversation.inject_long_term_memory(
-                self.instructions_content, memory_content
-            )
+            conversation.inject_long_term_memory(self.instructions_content, "")
+            if self.memory_manager:
+                from nanocursor.memory.context import sync_memory
+                recall = await self.memory_recall.prepare("", self.memory_manager.user_mem_dir,
+                                                         self.memory_manager.project_mem_dir)
+                sync_memory(conversation, recall, self.memory_recall, self.context_window,
+                            getattr(self.client, "max_output_tokens", 0))
             return CompactNotification(
                 before_tokens=result.before_tokens,
                 message=f"上下文已压缩（压缩前 {result.before_tokens:,} tokens）",

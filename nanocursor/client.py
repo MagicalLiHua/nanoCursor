@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from contextlib import aclosing
+from typing import Callable, Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -41,9 +42,11 @@ def _request_auth_options(config: ProviderConfig) -> dict:
     # The SDK requires a nonempty constructor key, but a keyless connection
     # must not send even a placeholder Authorization / x-api-key header.
     if config.protocol == "anthropic":
-        from anthropic import omit
+        from anthropic import Omit
+        omit = Omit()
         return {"extra_headers": {"X-Api-Key": omit, "Authorization": omit}}
-    from openai import omit
+    from openai import Omit
+    omit = Omit()
     return {"extra_headers": {"Authorization": omit}}
 
 
@@ -188,18 +191,88 @@ class NetworkError(LLMError):
     pass
 
 
+@dataclass(frozen=True)
+class TextResponse:
+    text: str
+    end: StreamEnd
+
+
+async def _close_provider_stream(stream: Any) -> None:
+    if stream is not None:
+        close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def collect_text_response(
+    client: Any,
+    conversation: ConversationManager,
+    *,
+    system: str = "",
+    tools: list[dict[str, Any]] | None = None,
+    max_output_tokens: int | None = None,
+    on_end: Callable[[StreamEnd], None] | None = None,
+) -> TextResponse:
+    """Collect a complete text-only response before allowing state changes.
+
+    Callers own the deadline and destination snapshot. Missing usage stays
+    missing in ``end``; a plausible partial text never substitutes for success.
+    """
+    kwargs: dict[str, Any] = {"system": system, "tools": tools}
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    if getattr(client, "supports_tool_choice", False):
+        kwargs["tool_choice"] = "none"
+    chunks: list[str] = []
+    end: StreamEnd | None = None
+    async with aclosing(client.stream(conversation, **kwargs)) as stream:
+        async for event in stream:
+            if end is not None:
+                raise LLMError("Response contained events after its terminal event")
+            if isinstance(event, TextDelta):
+                chunks.append(event.text)
+            elif isinstance(event, (ToolCallStart, ToolCallDelta, ToolCallComplete)):
+                raise LLMError("Expected a text-only response, received a tool call")
+            elif isinstance(event, StreamEnd):
+                if on_end:
+                    on_end(event)
+                if event.stop_reason not in {"end_turn", "stop_sequence"}:
+                    raise LLMError(f"Text response did not complete normally: {event.stop_reason}")
+                end = event
+    if end is None:
+        raise LLMError("Stream ended without a terminal event")
+    text = "".join(chunks).strip()
+    if not text:
+        raise LLMError("Model returned an empty text response")
+    return TextResponse(text, end)
+
+
 class LLMClient(ABC):
+    supports_tool_choice = False
+
     @abstractmethod
     async def stream(
         self,
         conversation: ConversationManager,
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        max_output_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         yield TextDelta("")
 
     def set_max_output_tokens(self, tokens: int) -> None:
         pass
+
+    async def aclose(self) -> None:
+        """Close an independently owned client's transport, including on cancel."""
+        import inspect
+        close = getattr(getattr(self, "_client", None), "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def _supports_adaptive_thinking(model: str) -> bool:
@@ -212,7 +285,9 @@ def _supports_adaptive_thinking(model: str) -> bool:
 
 
 class AnthropicClient(LLMClient):
-    def __init__(self, config: ProviderConfig) -> None:
+    supports_tool_choice = True
+
+    def __init__(self, config: ProviderConfig, *, max_retries: int = 2) -> None:
         self.model = config.model
         self.thinking = config.thinking
         self.max_output_tokens = config.get_max_output_tokens()
@@ -222,7 +297,7 @@ class AnthropicClient(LLMClient):
                 "Anthropic API key not found. "
                 "Set it in .nanocursor/config.yaml or via ANTHROPIC_API_KEY env var."
             )
-        self._client = AsyncAnthropic(api_key=api_key, base_url=config.base_url)
+        self._client = AsyncAnthropic(api_key=api_key, base_url=config.base_url, max_retries=max_retries)
         self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
@@ -253,6 +328,9 @@ class AnthropicClient(LLMClient):
         conversation: ConversationManager,
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        max_output_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         import anthropic as _anthropic
 
@@ -266,7 +344,7 @@ class AnthropicClient(LLMClient):
 
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": min(self.max_output_tokens, max_output_tokens) if max_output_tokens is not None else self.max_output_tokens,
             "messages": messages,
         }
         if system:
@@ -277,6 +355,8 @@ class AnthropicClient(LLMClient):
             }]
         if tools:
             kwargs["tools"] = _mark_last_tool_for_cache(tools)
+            if tool_choice is not None:
+                kwargs["tool_choice"] = {"type": tool_choice}
 
         if self.thinking:
             if _supports_adaptive_thinking(self.model):
@@ -284,7 +364,7 @@ class AnthropicClient(LLMClient):
             else:
                 kwargs["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": max(self.max_output_tokens - 1, 1024),
+                    "budget_tokens": max(kwargs["max_tokens"] - 1, 1024),
                 }
 
         blocks: dict[int, dict[str, str]] = {}
@@ -350,6 +430,8 @@ class AnthropicClient(LLMClient):
                 if any(block["type"] == "tool_use" for block in blocks.values()):
                     raise LLMError("Stream ended before tool arguments completed")
                 final = await stream.get_final_message()
+                if final.stop_reason not in {"end_turn", "stop_sequence", "tool_use", "max_tokens"}:
+                    raise LLMError(f"Anthropic response did not complete normally: {final.stop_reason}")
                 usage = final.usage
                 input_tokens = usage.input_tokens
                 cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
@@ -367,7 +449,7 @@ class AnthropicClient(LLMClient):
                     cache_creation = delta_cache_creation
 
                 yield StreamEnd(
-                    stop_reason=final.stop_reason or "end_turn",
+                    stop_reason=final.stop_reason,
                     input_tokens=input_tokens,
                     output_tokens=usage.output_tokens,
                     cache_read=cache_read,
@@ -389,7 +471,9 @@ class AnthropicClient(LLMClient):
 
 
 class OpenAIClient(LLMClient):
-    def __init__(self, config: ProviderConfig) -> None:
+    supports_tool_choice = True
+
+    def __init__(self, config: ProviderConfig, *, max_retries: int = 2) -> None:
         self.model = config.model
         self.max_output_tokens = config.get_max_output_tokens()
         api_key = config.resolve_api_key()
@@ -398,7 +482,7 @@ class OpenAIClient(LLMClient):
                 "OpenAI API key not found. "
                 "Set it in .nanocursor/config.yaml or via OPENAI_API_KEY env var."
             )
-        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url, max_retries=max_retries)
         self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
@@ -409,6 +493,9 @@ class OpenAIClient(LLMClient):
         conversation: ConversationManager,
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        max_output_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         import openai as _openai
 
@@ -418,20 +505,27 @@ class OpenAIClient(LLMClient):
             "model": self.model,
             "input": input_messages,
             "stream": True,
+            "max_output_tokens": min(self.max_output_tokens, max_output_tokens) if max_output_tokens is not None else self.max_output_tokens,
         }
         if system:
             kwargs["instructions"] = system
         if tools:
             kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
 
         calls: dict[str | int, dict[str, Any]] = {}
         indices: dict[int, str | int] = {}
         reasoning_id = ""
         reasoning_text = ""
+        terminal: StreamEnd | None = None
+        response_stream = None
 
         try:
             response_stream = await self._client.responses.create(**kwargs, **self._request_options)
             async for event in response_stream:
+                if terminal is not None:
+                    raise LLMError("Responses stream contained events after its terminal event")
                 if event.type == "response.output_text.delta":
                     yield TextDelta(text=event.delta)
                 elif event.type == "response.reasoning_summary_text.delta":
@@ -469,8 +563,21 @@ class OpenAIClient(LLMClient):
                         raw = getattr(event, "arguments", None)
                         yield _complete_tool_call(call["id"], call["name"], raw if raw is not None else call["args"])
                         call["done"] = True
-                elif event.type == "response.completed":
+                elif event.type in {"error", "response.failed"}:
                     resp = getattr(event, "response", None)
+                    error = getattr(resp, "error", None) if resp is not None else event
+                    detail = getattr(error, "message", None) or getattr(error, "code", None) or "unknown error"
+                    raise LLMError(f"Responses request failed: {detail}")
+                elif event.type in {"response.completed", "response.incomplete"}:
+                    resp = getattr(event, "response", None)
+                    stop_reason = "end_turn"
+                    if event.type == "response.incomplete":
+                        reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
+                        if reason != "max_output_tokens":
+                            raise LLMError(f"Responses request incomplete: {reason or 'unknown reason'}")
+                        stop_reason = "max_tokens"
+                    if any(not call["done"] for call in calls.values()):
+                        raise LLMError("Stream ended before tool arguments completed")
                     usage = getattr(resp, "usage", None) if resp else None
                     # Responses API 通过 input_tokens_details.cached_tokens
                     # 暴露 cache 命中数，没有 creation 计数。注意这里的
@@ -479,16 +586,20 @@ class OpenAIClient(LLMClient):
                     details = getattr(usage, "input_tokens_details", None)
                     cache_read = getattr(details, "cached_tokens", 0) or 0
                     input_tokens = getattr(usage, "input_tokens", 0) or 0
-                    yield StreamEnd(
-                        stop_reason="end_turn",
+                    terminal = StreamEnd(
+                        stop_reason=stop_reason,
                         input_tokens=max(input_tokens - cache_read, 0),
                         output_tokens=getattr(usage, "output_tokens", 0) or 0,
                         cache_read=cache_read,
                         cache_creation=0,
+                        usage_available=usage is not None,
                     )
 
             if any(not call["done"] for call in calls.values()):
                 raise LLMError("Stream ended before tool arguments completed")
+            if terminal is None:
+                raise LLMError("Responses stream ended without a terminal event")
+            yield terminal
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -504,6 +615,8 @@ class OpenAIClient(LLMClient):
             raise NetworkError(f"Network error: {e}") from e
         except _openai.APIStatusError as e:
             raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+        finally:
+            await _close_provider_stream(response_stream)
 
 
 class OpenAICompatClient(LLMClient):
@@ -515,7 +628,9 @@ class OpenAICompatClient(LLMClient):
     Together、Azure OpenAI 等）。
     """
 
-    def __init__(self, config: ProviderConfig) -> None:
+    supports_tool_choice = True
+
+    def __init__(self, config: ProviderConfig, *, max_retries: int = 2) -> None:
         self.model = config.model
         self.max_output_tokens = config.get_max_output_tokens()
         api_key = config.resolve_api_key()
@@ -524,7 +639,7 @@ class OpenAICompatClient(LLMClient):
                 "OpenAI-compatible API key not found. "
                 "Set it in .nanocursor/config.yaml or via OPENAI_API_KEY env var."
             )
-        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url, max_retries=max_retries)
         self._request_options = _request_auth_options(config)
 
     def set_max_output_tokens(self, tokens: int) -> None:
@@ -562,6 +677,9 @@ class OpenAICompatClient(LLMClient):
         conversation: ConversationManager,
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        max_output_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         import openai as _openai
 
@@ -574,44 +692,39 @@ class OpenAICompatClient(LLMClient):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": min(self.max_output_tokens, max_output_tokens) if max_output_tokens is not None else self.max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
 
         # 用于累积 streaming tool call 的状态。Chat Completions 流按
         # tool_calls 列表中的位置索引下发 delta，我们按索引跟踪每个进行中的调用。
         active_calls: dict[int, dict[str, str]] = {}  # 索引 -> {id, name, args}
         reasoning_accum = ""
+        latest_usage = None
+        stop_reason = ""
+        response = None
 
         try:
             response = await self._client.chat.completions.create(**kwargs, **self._request_options)
             async for chunk in response:
+                # OpenAI sends a separate choices=[] usage chunk, while
+                # DeepSeek attaches usage to the final choice chunk. These are
+                # cumulative request totals, so retain the latest rather than
+                # summing repeated usage snapshots.
+                if chunk.usage is not None:
+                    latest_usage = chunk.usage
                 if not chunk.choices:
-                    # 最后一个 chunk，只包含 usage 数据。
-                    if chunk.usage:
-                        # 部分兼容 provider 通过 prompt_tokens_details.cached_tokens
-                        # 上报 cache 命中数，大多数不上报（cache_read 保持 0）。
-                        # prompt_tokens 包含了缓存 token，需要减去以保持
-                        # input + cache_read 可加性。没有 provider 上报 creation 计数。
-                        details = getattr(
-                            chunk.usage, "prompt_tokens_details", None
-                        )
-                        cache_read = getattr(details, "cached_tokens", 0) or 0
-                        prompt_tokens = chunk.usage.prompt_tokens or 0
-                        yield StreamEnd(
-                            stop_reason="end_turn",
-                            input_tokens=max(prompt_tokens - cache_read, 0),
-                            output_tokens=chunk.usage.completion_tokens or 0,
-                            cache_read=cache_read,
-                            cache_creation=0,
-                        )
                     continue
 
                 choice = chunk.choices[0]
                 delta = choice.delta
+                if stop_reason:
+                    raise LLMError("Chat completion contained a choice after its finish reason")
 
                 # --- 文本内容 ---
                 if delta and delta.content:
@@ -645,7 +758,12 @@ class OpenAICompatClient(LLMClient):
                             yield ToolCallDelta(text=tc.function.arguments)
 
                 # --- 结束原因 ---
-                if choice.finish_reason in ("tool_calls", "stop"):
+                if choice.finish_reason:
+                    if choice.finish_reason not in {"stop", "tool_calls", "length"}:
+                        raise LLMError(f"Chat completion stopped abnormally: {choice.finish_reason}")
+                    stop_reason = {
+                        "stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens",
+                    }.get(choice.finish_reason, choice.finish_reason)
                     if reasoning_accum:
                         yield ThinkingComplete(thinking=reasoning_accum, signature="")
                         reasoning_accum = ""
@@ -656,6 +774,25 @@ class OpenAICompatClient(LLMClient):
 
             if active_calls:
                 raise LLMError("Stream ended before tool arguments completed")
+            if not stop_reason:
+                raise LLMError("Chat completion stream ended without a finish reason")
+
+            # DeepSeek also exposes cache hits at the top level. Both fields
+            # describe the same tokens: use the standard breakdown when present
+            # and fall back to DeepSeek's field, never add them together.
+            details = getattr(latest_usage, "prompt_tokens_details", None)
+            cache_read = getattr(details, "cached_tokens", None)
+            if cache_read is None:
+                cache_read = getattr(latest_usage, "prompt_cache_hit_tokens", 0) or 0
+            prompt_tokens = getattr(latest_usage, "prompt_tokens", 0) or 0
+            yield StreamEnd(
+                stop_reason=stop_reason,
+                input_tokens=max(prompt_tokens - cache_read, 0),
+                output_tokens=getattr(latest_usage, "completion_tokens", 0) or 0,
+                cache_read=cache_read,
+                cache_creation=0,
+                usage_available=latest_usage is not None,
+            )
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -671,15 +808,17 @@ class OpenAICompatClient(LLMClient):
             raise NetworkError(f"Network error: {e}") from e
         except _openai.APIStatusError as e:
             raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+        finally:
+            await _close_provider_stream(response)
 
 
-def create_client(config: ProviderConfig) -> LLMClient:
+def create_client(config: ProviderConfig, *, max_retries: int = 2) -> LLMClient:
     if config.protocol == "anthropic":
-        return AnthropicClient(config)
+        return AnthropicClient(config, max_retries=max_retries)
     elif config.protocol == "openai":
-        return OpenAIClient(config)
+        return OpenAIClient(config, max_retries=max_retries)
     elif config.protocol == "openai-compat":
-        return OpenAICompatClient(config)
+        return OpenAICompatClient(config, max_retries=max_retries)
     raise ValueError(f"Unknown protocol: {config.protocol}")
 
 

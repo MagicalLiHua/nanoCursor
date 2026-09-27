@@ -8,7 +8,7 @@ from nanocursor.commands.registry import Command, CommandType
 
 async def _handle_rewind(ctx) -> None:
     tasks = getattr(ctx.ui, "task_manager", None)
-    if getattr(ctx.ui, "_streaming", False) or (tasks and any(not t.done() for t in tasks._async_tasks.values())):
+    if getattr(ctx.ui, "_streaming", False) or (tasks and tasks.has_active_tasks()):
         ctx.ui.add_system_message("Wait for running tasks to finish before rewinding.")
         return
     fh = getattr(ctx.agent, "file_history", None)
@@ -59,10 +59,19 @@ async def _handle_rewind(ctx) -> None:
         ctx.ui.add_system_message("Conversation snapshot unavailable; use option 3 for code only.")
         return
 
+    prepare = ctx.config.get("prepare_session_change")
+    if prepare:
+        await prepare()
+
     def restore_conversation():
         messages = copy.deepcopy(snap.conversation)
         if ctx.session:
-            ctx.session.reset_history(messages)
+            from nanocursor.memory.session import SessionMetadataError
+
+            try:
+                ctx.session.reset_history(messages)
+            except SessionMetadataError as exc:
+                ctx.ui.add_system_message(f"回退记录已保存，但会话元数据更新失败: {exc}")
         ctx.conversation.replace_history(messages)
         ctx.conversation.env_injected = snap.env_injected
         ctx.conversation.ltm_injected = snap.ltm_injected

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from nanocursor.teams.manager import TeamManager
 
 ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
+    "ManageMCP",
     "TaskOutput",
     "ExitPlanMode",
     "EnterPlanMode",
@@ -161,6 +162,7 @@ def build_teammate_tools(
         filtered = {t.name: t for t in parent_registry.list_tools()}
         filtered.pop("TeamCreate", None)
         filtered.pop("TeamDelete", None)
+        filtered.pop("ManageMCP", None)
 
     # 应用 agent 定义中的工具限制
     if definition is not None:
@@ -205,6 +207,8 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
 
     forked = ToolRegistry()
     for tool in parent_registry.list_tools():
+        if tool.name == "ManageMCP":
+            continue
         if tool.name == "Agent" and hasattr(tool, "query_source"):
             clone = copy.copy(tool)
             clone.query_source = FORK_QUERY_SOURCE

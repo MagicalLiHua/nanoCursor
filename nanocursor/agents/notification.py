@@ -34,6 +34,7 @@ def format_task_notification(task: BackgroundTask) -> str:
     return (
         f"<task-notification>\n"
         f"Task ID: {task.id}\n"
+        f"Session ID: {task.session_id}\n"
         f"Agent: {task.name}\n"
         f"Status: {task.status}\n"
         f"Elapsed: {elapsed}\n"

@@ -73,7 +73,7 @@ def test_deleting_one_of_two_teams_should_not_restore_full_tools():
         full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
         agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True, enable_teams=True)
         r1 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug1")))
         assert not r1.is_error
         assert agent.coordinator_mode is True
@@ -103,7 +103,7 @@ def test_second_team_create_does_not_corrupt_full_registry_snapshot():
         full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
         agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True, enable_teams=True)
         asyncio.run(create.execute(TeamCreateParams(team_name="coordbug3")))
         asyncio.run(create.execute(TeamCreateParams(team_name="coordbug4")))
 

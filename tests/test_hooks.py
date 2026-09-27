@@ -239,7 +239,7 @@ class TestCommandExecutor:
     async def test_variable_substitution(self):
         from nanocursor.hooks.executors import execute_command
 
-        action = Action(type="command", command="echo $FILE_PATH")
+        action = Action(type="command", command='printf "%s" "$NANOCURSOR_HOOK_FILE_PATH"')
         ctx = HookContext(file_path="src/main.py")
         result = await execute_command(action, ctx)
         assert "src/main.py" in result.output
@@ -289,8 +289,8 @@ class TestAgentExecutor:
         action = Action(type="agent", prompt="Check $FILE_PATH")
         ctx = HookContext(file_path="test.py")
         result = await execute_agent(action, ctx)
-        assert result.success is True
-        assert "not yet implemented" in result.output
+        assert result.success is False
+        assert "not supported" in result.output
 
 class TestExecuteAction:
     @pytest.mark.asyncio
@@ -376,7 +376,7 @@ class TestLoadHooks:
         with pytest.raises(HookConfigError, match="requires.*message"):
             load_hooks([{"event": "startup", "action": {"type": "prompt"}}])
 
-        with pytest.raises(HookConfigError, match="requires.*prompt"):
+        with pytest.raises(HookConfigError, match="not supported"):
             load_hooks([{"event": "startup", "action": {"type": "agent"}}])
 
 # ---------------------------------------------------------------------------

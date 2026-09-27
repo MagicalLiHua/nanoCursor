@@ -17,6 +17,7 @@ class Action:
     headers: dict[str, str] = field(default_factory=dict)
     prompt: str = ""
     timeout: int = 30
+    input: str = "none"
 
 
 @dataclass

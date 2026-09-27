@@ -308,7 +308,16 @@ async def test_keyless_sdk_requests_do_not_send_placeholder_credentials(environm
                 ]
                 content = "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
                 return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+            if protocol == "openai":
+                event = {"type": "response.completed", "sequence_number": 0, "response": {
+                    "id": "fixture", "object": "response", "created_at": 0,
+                    "model": "test-model", "status": "completed", "output": [], "usage": None,
+                }}
+            else:
+                event = {"id": "fixture", "object": "chat.completion.chunk", "created": 0,
+                         "model": "test-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n")
         if protocol == "anthropic":
             result = {"content": [{"type": "text", "text": "OK"}], "stop_reason": "end_turn",
                       "usage": {"input_tokens": 1, "output_tokens": 1}}

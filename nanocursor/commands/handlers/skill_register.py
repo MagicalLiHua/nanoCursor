@@ -52,27 +52,53 @@ def register_skill_commands(
 
                 skill = skill_loader.get(name)
                 if skill is None:
-                    ctx.ui.add_system_message(f"未找到 Skill：{name}")
+                    ctx.ui.add_system_message(f"Skill 不可用：{name}\n{getattr(skill_loader, 'diagnostics', {}).get(name, '未找到定义')}")
                     return
 
                 if skill.mode == "fork":
+                    if ctx.conversation is None:
+                        ctx.ui.add_system_message("Skill fork 需要当前会话")
+                        return
+                    snapshot = exe.snapshot_context(skill.context, ctx.conversation)
+                    try:
+                        invocation = exe.prepare_fork(skill, ctx.args, context_messages=snapshot)
+                    except (ValueError, OSError) as exc:
+                        ctx.ui.add_system_message(f"Skill 配置错误: {exc}")
+                        return
+                    session_id = ctx.config.get("session_id", "")
+                    is_current = ctx.config.get("is_session_current", lambda _id: True)
                     ctx.ui.add_system_message(f"⏳ Running {name} skill...")
 
 
                     async def _run_fork() -> None:
                         try:
-                            result = await exe.execute_fork(skill, ctx.args)
-                            ctx.ui.add_system_message(
-                                f"[{name} skill result]\n{result}"
-                            )
+                            result = await exe.execute_fork(skill, ctx.args, invocation=invocation)
+                            if not asyncio.current_task().cancelling() and is_current(session_id):
+                                ctx.ui.add_system_message(
+                                    f"[{name} skill result]\n{result.display()}"
+                                )
+                                publish = ctx.config.get("queue_skill_result")
+                                if publish:
+                                    publish(session_id, ctx.conversation, name, result)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
-                            ctx.ui.add_system_message(
-                                f"Skill {name} failed: {e}"
-                            )
+                            if is_current(session_id):
+                                ctx.ui.add_system_message(
+                                    f"Skill {name} failed: {e}"
+                                )
 
-                    asyncio.create_task(_run_fork())
+                    register_task = ctx.config.get("register_owned_task")
+                    if register_task is None:
+                        await _run_fork()
+                    else:
+                        register_task(asyncio.create_task(_run_fork()))
                 else:
-                    exe.execute_inline(skill, ctx.args)
+                    try:
+                        exe.execute_inline(skill, ctx.args)
+                    except ValueError as exc:
+                        ctx.ui.add_system_message(f"Skill 配置错误: {exc}")
+                        return
                     ctx.ui.add_system_message(
                         f"skill({name})\nSuccessfully loaded skill"
                     )

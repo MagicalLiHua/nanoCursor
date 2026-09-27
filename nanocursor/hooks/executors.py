@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from urllib.request import Request, urlopen
@@ -14,7 +15,25 @@ log = logging.getLogger(__name__)
 
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
-    command = ctx.expand(action.command)
+    # The configured command is code; context is only data. Never interpolate it.
+    command = action.command
+    env = dict(os.environ)
+    env.update({
+        "NANOCURSOR_HOOK_EVENT": ctx.event_name,
+        "NANOCURSOR_HOOK_TOOL_NAME": ctx.tool_name,
+        "NANOCURSOR_HOOK_FILE_PATH": ctx.file_path,
+    })
+    payload = None
+    if action.input == "context-json":
+        payload = json.dumps({
+            "schema_version": 1,
+            "event": ctx.event_name,
+            "tool_name": ctx.tool_name,
+            "tool_args": ctx.tool_args,
+            "file_path": ctx.file_path,
+            "message": ctx.message,
+            "error": ctx.error,
+        }, ensure_ascii=False).encode("utf-8")
     context = current_runtime()
     proc = None
     try:
@@ -22,12 +41,14 @@ async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.PIPE if payload is not None else None,
+            env=env,
             cwd=str(context.cwd) if context else None,
             start_new_session=os.name == "posix",
         )
         try:
             stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=action.timeout
+                proc.communicate(payload), timeout=action.timeout
             )
         except asyncio.TimeoutError:
             await _terminate_process_group(proc)
@@ -82,11 +103,9 @@ async def execute_http(action: Action, ctx: HookContext) -> ActionResult:
 
 
 async def execute_agent(action: Action, ctx: HookContext) -> ActionResult:
-    prompt = ctx.expand(action.prompt)
-    log.info("Agent executor stub called with prompt: %s", prompt[:100])
     return ActionResult(
-        output="agent executor not yet implemented",
-        success=True,
+        output="agent Hook is not supported",
+        success=False,
     )
 
 

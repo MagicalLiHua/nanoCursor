@@ -1,206 +1,142 @@
 from __future__ import annotations
 
-from nanocursor.runtime import app_home
-
-import logging
-import os
+import copy
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
-from nanocursor.skills.parser import SkillDef, SkillParseError, parse_skill_file
-
-log = logging.getLogger(__name__)
+from nanocursor.runtime import app_home
+from nanocursor.skills.parser import SkillDef, SkillParseError, parse_frontmatter, parse_skill_file
 
 PROJECT_SKILLS_DIR = ".nanocursor/skills"
 USER_SKILLS_DIR = "~/.nanocursor/skills"
 
 
 class SkillLoader:
+    """Reload original sources, with project errors shadowing user definitions."""
+
     def __init__(self, work_dir: str) -> None:
         self._work_dir = work_dir
         self._project_dir = Path(work_dir) / PROJECT_SKILLS_DIR
         self._user_dir = app_home() / "skills"
         self._skills: dict[str, SkillDef] = {}
-        self._cache: dict[str, SkillDef] = {}
-        self._dir_mod_times: dict[str, float] = {}
+        self._claims: dict[Path, str] = {}
+        self.diagnostics: dict[str, str] = {}
+        self.validator: Callable[[SkillDef], object] | None = None
+        self._fingerprint: tuple = ()
 
+    def _sources(self, directory: Path) -> list[Path]:
+        if not directory.is_dir():
+            return []
+        sources = []
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file() and entry.suffix == ".md":
+                sources.append(entry)
+            elif entry.is_dir():
+                # An invalid YAML definition must not fall back to another format.
+                for name in ("skill.yaml", "SKILL.md"):
+                    if (entry / name).exists():
+                        sources.append(entry / name)
+                        break
+        return sources
+
+    def _claim(self, path: Path) -> str:
+        fallback = self._claims.get(path, path.parent.name if path.name in {"skill.yaml", "SKILL.md"} else path.stem)
+        try:
+            raw = path.read_text(encoding="utf-8")
+            meta = yaml.safe_load(raw) if path.name == "skill.yaml" else parse_frontmatter(raw)[0]
+            name = meta.get("name") if isinstance(meta, dict) else None
+            return name if isinstance(name, str) and name else fallback
+        except (OSError, UnicodeError, yaml.YAMLError, SkillParseError):
+            return fallback
 
     def load_all(self) -> dict[str, SkillDef]:
-        seen: dict[str, SkillDef] = {}
-
-        for skill in self._scan_directory(self._project_dir, "project"):
-            if skill.name not in seen:
-                seen[skill.name] = skill
-
-        for skill in self._scan_directory(self._user_dir, "user"):
-            if skill.name not in seen:
-                seen[skill.name] = skill
-
-        for skill in self._load_builtins():
-            if skill.name not in seen:
-                seen[skill.name] = skill
-
-        self._skills = seen
-        self._cache = {k: v for k, v in seen.items()}
-        self._snapshot_dir_mod_times()
-        return seen
-
-
-    def _scan_directory(self, path: Path, source: str) -> list[SkillDef]:
-        results: list[SkillDef] = []
-        if not path.is_dir():
-            return results
-
-        for entry in sorted(path.iterdir()):
+        skills, diagnostics, seen = {}, {}, set()
+        for directory in (self._project_dir, self._user_dir):
             try:
-                if entry.is_file() and entry.suffix == ".md":
-                    skill = parse_skill_file(entry)
-                    skill.source_path = entry
-                    results.append(skill)
-                elif entry.is_dir():
-                    # 优先尝试 skill.yaml + prompt.md 格式（对齐 Go 版）
-                    skill_yaml = entry / "skill.yaml"
-                    if skill_yaml.is_file():
-                        skill = self._parse_skill_yaml(skill_yaml, entry)
-                        if skill is not None:
-                            results.append(skill)
-                            continue
-                    # 回退到 SKILL.md 格式
-                    skill_md = entry / "SKILL.md"
-                    if skill_md.is_file():
-                        skill = parse_skill_file(skill_md)
-                        skill.source_path = skill_md
-                        skill.is_directory = True
-                        results.append(skill)
-            except SkillParseError as e:
-                log.warning("Skipping %s skill '%s': %s", source, entry.name, e)
-
-        return results
+                sources = self._sources(directory)
+            except OSError as exc:
+                diagnostics[str(directory)] = str(exc)
+                # A failed higher-priority scan cannot authorize lower sources.
+                break
+            for path in sources:
+                name = self._claim(path)
+                if name in seen:
+                    continue
+                seen.add(name)
+                self._claims[path] = name
+                try:
+                    skill = parse_skill_file(path)
+                    skills[skill.name] = skill
+                    if self.validator:
+                        self.validator(skill)
+                except (SkillParseError, ValueError, OSError) as exc:
+                    diagnostics[name] = f"{path}: {exc}"
+        self._skills, self.diagnostics = skills, diagnostics
+        self._fingerprint = self._state()
+        return {name: skill for name, skill in skills.items() if name not in diagnostics}
 
     @staticmethod
-    def _parse_skill_yaml(yaml_path: Path, skill_dir: Path) -> SkillDef | None:
-        """解析 skill.yaml + prompt.md 格式的 skill（对齐 Go 版 parseFrontmatterOnly + loadSkillBody）。"""
-        try:
-            data = yaml_path.read_text(encoding="utf-8")
-            meta = yaml.safe_load(data)
-        except (OSError, yaml.YAMLError) as e:
-            log.warning("Cannot parse %s: %s", yaml_path, e)
-            return None
+    def _parse_skill_yaml(yaml_path: Path, skill_dir: Path) -> SkillDef:
+        return parse_skill_file(yaml_path)
 
-        if not isinstance(meta, dict):
-            log.warning("Invalid skill.yaml in %s: not a mapping", skill_dir)
-            return None
-
-        name = meta.get("name", "")
-        if not name:
-            # 自动从目录名派生
-            name = skill_dir.name.lower().replace(" ", "-")
-
-        description = meta.get("description", "")
-
-        # 读取 prompt.md 作为 prompt body
-        prompt_md = skill_dir / "prompt.md"
-        prompt_body = ""
-        if prompt_md.is_file():
+    def _state(self) -> tuple:
+        result = []
+        for root in (self._project_dir, self._user_dir):
             try:
-                prompt_body = prompt_md.read_text(encoding="utf-8")
-            except OSError as e:
-                log.warning("Cannot read prompt.md in %s: %s", skill_dir, e)
-
-        # 没有 description 时从 prompt body 推断
-        if not description and prompt_body:
-            for line in prompt_body.split("\n"):
-                line = line.strip()
-                if line and not line.startswith("#") and not line.startswith("---"):
-                    description = line
-                    break
-
-        mode = meta.get("mode", "inline")
-        if mode not in ("inline", "fork"):
-            mode = "inline"
-
-        return SkillDef(
-            name=name,
-            description=description,
-            prompt_body=prompt_body,
-            mode=mode,
-            model=meta.get("model"),
-            context=meta.get("context", "full"),
-            source_path=prompt_md if prompt_md.is_file() else yaml_path,
-            is_directory=True,
-        )
-
-    def _load_builtins(self) -> list[SkillDef]:
-        """内置 skill 已移除，返回空列表。"""
-        return []
-
+                paths = [root, *self._sources(root)]
+                paths += [p.parent / "prompt.md" for p in paths if p.name == "skill.yaml"]
+                for path in paths:
+                    try:
+                        stat = path.stat()
+                        result.append((str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size))
+                    except OSError:
+                        result.append((str(path), None))
+            except OSError:
+                result.append((str(root), None))
+        return tuple(result)
 
     def get(self, name: str) -> SkillDef | None:
-        skill = self._skills.get(name)
-        if skill is None:
+        previous = self._skills.get(name)
+        if previous and previous.source_path is None:
+            return copy.deepcopy(previous)
+        self.load_all()
+        current = self._skills.get(name) if name not in self.diagnostics else None
+        if previous and current and previous.source_path != current.source_path:
+            self.diagnostics[name] = f"{previous.source_path}: source disappeared or changed; reload and select the new definition explicitly"
+            self._skills.pop(name, None)
             return None
-
-        if skill.source_path is not None:
-            try:
-                fresh = parse_skill_file(skill.source_path)
-                fresh.is_directory = skill.is_directory
-                self._skills[name] = fresh
-                self._cache[name] = fresh
-                return fresh
-            except SkillParseError as e:
-                log.warning(
-                    "Hot-reload failed for skill '%s', using cached version: %s",
-                    name, e,
-                )
-                return self._cache.get(name, skill)
-
-        return skill
+        return copy.deepcopy(current)
 
     def get_catalog(self) -> list[tuple[str, str]]:
-        return [(s.name, s.description) for s in self._skills.values()]
+        if self.needs_reload():
+            self.load_all()
+        # Permissions and MCP connectivity can change without changing a file.
+        catalog = []
+        for skill in self._skills.values():
+            try:
+                if self.validator:
+                    self.validator(skill)
+            except (ValueError, OSError) as exc:
+                self.diagnostics[skill.name] = f"{skill.source_path}: {exc}"
+                continue
+            self.diagnostics.pop(skill.name, None)
+            catalog.append((skill.name, skill.description))
+        return catalog
 
     def needs_reload(self) -> bool:
-        """skill 目录的 modtime 变化说明有新增或删除的 skill。"""
-        for dir_path, recorded in self._dir_mod_times.items():
-            try:
-                current = os.stat(dir_path).st_mtime
-                if current != recorded:
-                    return True
-            except OSError:
-                if recorded != 0.0:
-                    return True
-        # 检查之前不存在的目录是否已创建
-        for d in [str(self._user_dir), str(self._project_dir)]:
-            if d not in self._dir_mod_times:
-                try:
-                    os.stat(d)
-                    return True
-                except OSError:
-                    pass
-        return False
-
-    def _snapshot_dir_mod_times(self) -> None:
-        self._dir_mod_times = {}
-        for d in [str(self._user_dir), str(self._project_dir)]:
-            try:
-                self._dir_mod_times[d] = os.stat(d).st_mtime
-            except OSError:
-                self._dir_mod_times[d] = 0.0
+        return self._state() != self._fingerprint
 
     def reload(self) -> dict[str, SkillDef]:
         return self.load_all()
 
-
     def get_source_label(self, name: str) -> str:
         skill = self._skills.get(name)
-        if skill is None:
-            return "unknown"
-        if skill.source_path is None:
-            return "builtin"
-        path_str = str(skill.source_path)
-        if path_str.startswith(str(self._project_dir)):
+        if not skill or skill.source_path is None:
+            return "builtin" if skill else "unknown"
+        if skill.source_path.is_relative_to(self._project_dir):
             return "project"
-        if path_str.startswith(str(self._user_dir)):
+        if skill.source_path.is_relative_to(self._user_dir):
             return "user"
-        return "builtin"
+        return "unknown"

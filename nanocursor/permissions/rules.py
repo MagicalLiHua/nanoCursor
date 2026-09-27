@@ -45,6 +45,9 @@ def parse_rule(raw: str, effect: Effect) -> Rule:
 
 
 def extract_content(tool_name: str, arguments: dict[str, Any]) -> str:
+    if tool_name == "ManageMCP":
+        import json
+        return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
     field = _CONTENT_FIELDS.get(tool_name)
     if field is None:
         return ""

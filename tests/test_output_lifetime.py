@@ -9,7 +9,7 @@ from nanocursor.tools.base import StreamEnd, TextDelta
 
 class SummaryClient:
     async def stream(self, *args, **kwargs):
-        yield TextDelta("A summary of the old conversation")
+        yield TextDelta("<summary>A summary of the old conversation</summary>")
         yield StreamEnd("end_turn")
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from nanocursor.tools.base import Tool
 
@@ -9,7 +9,8 @@ if TYPE_CHECKING:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, *, availability: Callable[[str], bool] | None = None) -> None:
+        self._availability = availability
         self._tools: dict[str, Tool] = {}
         self._disabled: set[str] = set()
         self._discovered: set[str] = set()
@@ -17,12 +18,18 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+        self._disabled.discard(name)
+        self._discovered.discard(name)
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
 
     def is_enabled(self, name: str) -> bool:
-        return name in self._tools and name not in self._disabled
+        return (name in self._tools and name not in self._disabled
+                and (self._availability is None or self._availability(name)))
 
     def enable(self, name: str) -> None:
         self._disabled.discard(name)
@@ -37,7 +44,8 @@ class ToolRegistry:
 
 
     def mark_discovered(self, name: str) -> None:
-        self._discovered.add(name)
+        if self.is_enabled(name):
+            self._discovered.add(name)
 
     def is_discovered(self, name: str) -> bool:
         return name in self._discovered
@@ -49,7 +57,7 @@ class ToolRegistry:
             for name, tool in self._tools.items()
             if getattr(tool, "should_defer", False)
             and name not in self._discovered
-            and name not in self._disabled
+            and self.is_enabled(name)
         ]
 
     def search_deferred(
@@ -60,7 +68,7 @@ class ToolRegistry:
         for name, tool in self._tools.items():
             if not getattr(tool, "should_defer", False):
                 continue
-            if name in self._disabled:
+            if not self.is_enabled(name):
                 continue
             score = 0
             name_lower = name.lower()
@@ -97,7 +105,7 @@ class ToolRegistry:
         results: list[dict[str, Any]] = []
         for name in names:
             tool = self._tools.get(name)
-            if tool is None:
+            if tool is None or not self.is_enabled(name):
                 continue
             if not getattr(tool, "should_defer", False):
                 continue
@@ -120,7 +128,7 @@ class ToolRegistry:
     def get_all_schemas(self, protocol: str = "anthropic") -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
         for name, tool in self._tools.items():
-            if name in self._disabled:
+            if not self.is_enabled(name):
                 continue
             if getattr(tool, "should_defer", False) and name not in self._discovered:
                 continue

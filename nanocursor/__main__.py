@@ -146,7 +146,7 @@ def main() -> None:
         except OSError as exc:
             raise ConfigError("Cannot write application/workspace state; check directory permissions") from exc
         mode = PermissionMode(args.mode or config.permission_mode)
-        hooks = load_hooks(config.raw_hooks)
+        hooks = load_hooks(config.raw_hooks, source=config.sources.get("hooks", "configuration"))
         hook_engine = HookEngine(hooks) if hooks else None
         if args.p is not None:
             status = asyncio.run(_run_prompt(config, mode, hook_engine, args.p, args.output_format, workspace=workspace))
@@ -165,6 +165,9 @@ def main() -> None:
         app = NanoCursorApp(
             providers=config.providers, permission_mode=mode, mcp_servers=config.mcp_servers,
             hook_engine=hook_engine, enable_fork=config.enable_fork,
+            enable_teams=config.enable_teams,
+            memory_consolidation_enabled=config.memory_consolidation_enabled,
+            memory_recall_config=config.memory_recall,
             enable_verification_agent=config.enable_verification_agent,
             worktree_config=config.worktree, teammate_mode=config.teammate_mode,
             enable_coordinator_mode=config.enable_coordinator_mode,
@@ -279,7 +282,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     task_manager = TaskManager()
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
-    team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager)
+    team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager, task_manager=task_manager)
 
     agent_tool = AgentTool(
         agent_loader=agent_loader,
@@ -287,19 +290,22 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         trace_manager=trace_manager,
         parent_agent=agent,
         enable_fork=config.enable_fork,
+        enable_teams=config.enable_teams,
         provider_config=provider,
         worktree_manager=wt_manager,
         team_manager=team_manager,
     )
     registry.register(agent_tool)
-    registry.register(TeamCreateTool(
-        team_manager=team_manager,
-        parent_agent=agent,
-        teammate_mode="in-process",
-        is_interactive=False,
-        enable_coordinator_mode=config.enable_coordinator_mode,
-    ))
-    registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
+    if config.enable_teams:
+        registry.register(TeamCreateTool(
+            team_manager=team_manager,
+            parent_agent=agent,
+            teammate_mode="in-process",
+            is_interactive=False,
+            enable_coordinator_mode=config.enable_coordinator_mode,
+            enable_teams=config.enable_teams,
+        ))
+        registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
 
     def drain_notifications() -> list[str]:
         notes: list[str] = []
@@ -430,11 +436,24 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     except Exception as exc:
         report_error(str(exc), "runtime_error")
     finally:
-        pending = list(task_manager._async_tasks.values())
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        for name in list(team_manager._teams):
+            try:
+                team = await team_manager.close_team(name)
+                if team.status != "closed":
+                    report_error(f"Team {name} is still stopping; worktrees retained", "shutdown_incomplete")
+            except Exception as exc:
+                report_error(f"Team shutdown failed: {exc}", "shutdown_incomplete")
+        try:
+            if not await task_manager.shutdown():
+                report_error("Background tasks did not stop; worktrees were retained", "shutdown_incomplete")
+        except Exception as exc:
+            report_error(f"Background shutdown failed: {exc}", "shutdown_incomplete")
+        if hook_engine:
+            try:
+                if not await hook_engine.shutdown():
+                    report_error("Hook processes did not stop", "shutdown_incomplete")
+            except Exception as exc:
+                report_error(f"Hook shutdown failed: {exc}", "shutdown_incomplete")
 
     # Exactly one terminal result, after all requested work and cleanup.
     if is_json:

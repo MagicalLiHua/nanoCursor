@@ -13,7 +13,7 @@ async def handle_session(ctx: CommandContext) -> None:
     parts = ctx.args.split(None, 1)
     sub = parts[0] if parts else ""
     tasks = getattr(ctx.ui, "task_manager", None)
-    if sub in {"new", "resume"} and tasks and any(not t.done() for t in tasks._async_tasks.values()):
+    if (sub == "new" or (sub == "resume" and len(parts) > 1)) and tasks and tasks.has_active_tasks():
         ctx.ui.add_system_message("Wait for background tasks to finish before switching sessions.")
         return
 
@@ -55,21 +55,30 @@ async def handle_session(ctx: CommandContext) -> None:
             for i, m in enumerate(metas[:15], 1):
                 ts = m.last_active.strftime("%Y-%m-%d %H:%M")
                 title = m.title or "(未命名)"
-                lines.append(f"  {i}. [{m.id[:8]}]  {title}  ({m.message_count} msgs, {ts})")
+                lines.append(f"  {i}. [{m.id}]  {title}  ({m.message_count} msgs, {ts})")
             ctx.ui.add_system_message("\n".join(lines))
-            ctx.config["_resume_candidates"] = [m.id for m in metas[:15]]
+            ctx.ui._resume_candidates = tuple(m.id for m in metas[:15])
             return
-        candidates = ctx.config.get("_resume_candidates", [])
-        if session_id.isdigit() and candidates:
+        candidates = getattr(ctx.ui, "_resume_candidates", ())
+        if session_id.isdigit():
+            if not candidates:
+                ctx.ui.add_system_message("请先运行 /session resume 查看候选会话。")
+                return
             idx = int(session_id) - 1
-            if 0 <= idx < len(candidates):
-                session_id = candidates[idx]
+            if not 0 <= idx < len(candidates):
+                ctx.ui.add_system_message(f"编号无效，请选择 1–{len(candidates)}，或重新查看列表。")
+                return
+            session_id = candidates[idx]
+        prepare = ctx.config.get("prepare_session_change")
+        if prepare:
+            await prepare()
         result = sm.resume(session_id)
         if result is None:
             ctx.ui.add_system_message(f"会话未找到: {session_id}")
             return
         if ctx.session:
             ctx.session.close()
+        ctx.ui._resume_candidates = ()
         ctx.config["set_session"](result.session)
         conv = ConversationManager()
         for msg in result.messages:
@@ -84,9 +93,12 @@ async def handle_session(ctx: CommandContext) -> None:
 
 
     elif sub == "new":
+        prepare = ctx.config.get("prepare_session_change")
+        if prepare:
+            await prepare()
+        new_session = sm.create()
         if ctx.session:
             ctx.session.close()
-        new_session = sm.create()
         ctx.config["set_session"](new_session)
         ctx.config["set_conversation"](ConversationManager())
         if ctx.agent:
@@ -102,6 +114,9 @@ async def handle_session(ctx: CommandContext) -> None:
         if ctx.session and ctx.session.session_id == session_id:
             ctx.ui.add_system_message("不能删除当前活跃的会话。")
             return
+        prepare = ctx.config.get("prepare_session_change")
+        if prepare:
+            await prepare()
         if sm.delete(session_id):
             ctx.ui.add_system_message(f"会话已删除: {session_id}")
         else:

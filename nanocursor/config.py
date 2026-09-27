@@ -84,7 +84,7 @@ class ProviderConfig:
              缓存的值（只有 anthropic 协议的 provider 才会设置它；拉取失败或缺失时
              保持为 0 并跳过）。
           3. 内置的「模型名 -> window」映射表（按子串匹配）。
-          4. 保守的默认值（claude -> 200000，其他 -> 128000）。
+          4. 通用回退值 200000；已知模型的映射仍优先。
         """
         if self.context_window > 0:
             return self.context_window
@@ -93,9 +93,7 @@ class ProviderConfig:
         window = lookup_model_context_window(self.model)
         if window > 0:
             return window
-        if "claude" in self.model.lower():
-            return DEFAULT_CONTEXT_WINDOW
-        return 128_000
+        return DEFAULT_CONTEXT_WINDOW
 
     def get_max_output_tokens(self) -> int:
         if self.max_output_tokens > 0:
@@ -157,12 +155,22 @@ class ApprovalConfig:
 
 
 @dataclass
+class MemoryRecallConfig:
+    mode: str = "local"
+    max_context_tokens: int = 4096
+    model_timeout_ms: int = 2000
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
     permission_mode: str = "default"
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     raw_hooks: list[dict] = field(default_factory=list)
     enable_fork: bool = False
+    enable_teams: bool = False
+    memory_consolidation_enabled: bool = False
+    memory_recall: MemoryRecallConfig = field(default_factory=MemoryRecallConfig)
     enable_verification_agent: bool = False
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     teammate_mode: str = ""
@@ -217,6 +225,9 @@ def _from_raw(raw: dict) -> AppConfig:
         mcp_servers=[MCPServerConfig(**s) for s in validated["mcp_servers"]],
         raw_hooks=validated["hooks"],
         enable_fork=validated["enable_fork"],
+        enable_teams=validated["enable_teams"],
+        memory_consolidation_enabled=validated["memory"]["consolidation"]["enabled"],
+        memory_recall=MemoryRecallConfig(**validated["memory"]["recall"]),
         enable_verification_agent=validated["enable_verification_agent"],
         worktree=WorktreeConfig(**validated["worktree"]),
         teammate_mode=validated["teammate_mode"],
@@ -241,7 +252,14 @@ def _merge_raw(base: dict, override: dict) -> dict:
     result = deepcopy(base)
     schema = override.get("schema_version", base.get("schema_version", 1))
     for key, value in override.items():
-        if key in {"approval", "sandbox", "worktree"} and isinstance(value, dict):
+        if key == "memory" and isinstance(value, dict):
+            previous = result.get("memory") or {}
+            result[key] = {**previous, **deepcopy(value)}
+            for section in ("consolidation", "recall"):
+                if isinstance(value.get(section), dict):
+                    result[key][section] = {
+                        **previous.get(section, {}), **value[section]}
+        elif key in {"approval", "sandbox", "worktree"} and isinstance(value, dict):
             result[key] = {**(result.get(key) or {}), **deepcopy(value)}
         elif key == "hooks" and schema == 1:
             result[key] = list(result.get(key) or []) + list(value or [])
@@ -266,7 +284,7 @@ def _validate_layer(raw: dict, *, partial_providers: bool = False) -> None:
     candidate = {**seed, **raw}
     if partial_providers:
         candidate["providers"] = seed["providers"]
-    for key in ("approval", "sandbox", "worktree"):
+    for key in ("approval", "sandbox", "worktree", "memory"):
         if key in raw and not isinstance(raw[key], dict):
             raise ConfigError(f"{key} must be a mapping; reset individual fields explicitly")
     validate_config_structure(candidate)
@@ -290,6 +308,8 @@ def load_config(path: Path | None = None, *, work_dir: Path | str | None = None,
     global_targets: set[tuple[str, str]] = set()
     seen: set[Path] = set()
     found = False
+    user_consolidation_enabled = False
+    user_model_recall = False
     for candidate in candidates:
         if candidate in seen:
             continue
@@ -322,6 +342,13 @@ def load_config(path: Path | None = None, *, work_dir: Path | str | None = None,
                         raise ConfigError("Project profiles may change models, not endpoints or credential sources; use setup")
                     by_name[entry["name"]].update(entry)
                 raw = {**raw, "providers": list(by_name.values())}
+            if not project:
+                user_consolidation_enabled = raw.get("memory", {}).get("consolidation", {}).get("enabled", False)
+                user_model_recall = raw.get("memory", {}).get("recall", {}).get("mode") == "model"
+            elif raw.get("memory", {}).get("consolidation", {}).get("enabled", False) and not user_consolidation_enabled:
+                raise ConfigError("Enable memory consolidation in your user configuration first; projects may only disable it")
+            if project and raw.get("memory", {}).get("recall", {}).get("mode") == "model" and not user_model_recall:
+                raise ConfigError("Enable model memory recall in your user configuration first; projects cannot enable model requests")
             merged = _merge_raw(merged, raw)
         except (ConfigError, TypeError, KeyError) as exc:
             if isinstance(exc, ConfigError):

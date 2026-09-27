@@ -83,13 +83,11 @@ class MCPToolWrapper(Tool):
 
     async def execute(self, params: BaseModel) -> ToolResult:
         if not self._client.is_alive:
-            try:
-                await self._client.connect()
-            except Exception as e:
-                return ToolResult(
-                    output=f"MCP server '{self._server_name}' reconnect failed: {e}",
-                    is_error=True,
-                )
+            return ToolResult(
+                output=f"MCP server '{self._server_name}' is stopped or disconnected; "
+                       "use ManageMCP start in the main session to reconnect.",
+                is_error=True,
+            )
 
         try:
             result = await self._client.call_tool(

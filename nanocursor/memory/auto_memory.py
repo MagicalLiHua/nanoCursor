@@ -9,12 +9,17 @@ from __future__ import annotations
 from nanocursor.runtime import app_home
 
 import os
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from nanocursor.conversation import ConversationManager, Message
+from nanocursor.memory.store import (MemoryStore, MemoryStorageError, MemoryPublishedError, active_records,
+                                     memory_filename)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -85,7 +90,8 @@ def is_auto_mem_path(absolute_path: str, project_root: str) -> bool:
 def ensure_memory_dir_exists(memory_dir: str) -> None:
     """确保记忆目录存在，agent 可直接写入无需先 mkdir。"""
     if memory_dir:
-        os.makedirs(memory_dir, exist_ok=True)
+        with MemoryStore.from_directory(memory_dir).open(create=True):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +160,12 @@ def truncate_entrypoint_content(raw: str) -> str:
 
     result_bytes = result.encode("utf-8")
     if len(result_bytes) > MAX_ENTRYPOINT_BYTES:
-        cut = result[:MAX_ENTRYPOINT_BYTES].rfind("\n")
+        prefix = result_bytes[:MAX_ENTRYPOINT_BYTES].decode("utf-8", errors="ignore")
+        cut = prefix.rfind("\n")
         if cut > 0:
-            result = result[:cut]
+            result = prefix[:cut]
         else:
-            result = result[:MAX_ENTRYPOINT_BYTES]
+            result = prefix
 
     # 构建警告信息
     if over_bytes and not over_lines:
@@ -215,7 +222,7 @@ def _build_entrypoint_section(scope_label: str, entrypoint_path: str) -> str:
     """读取一个 MEMORY.md 文件并格式化为系统提示段。"""
     header = f"## {scope_label} {ENTRYPOINT_NAME} (`{entrypoint_path}`)\n"
     try:
-        data = Path(entrypoint_path).read_text(encoding="utf-8")
+        data = MemoryStore.from_directory(Path(entrypoint_path).parent).catalog().index
         if data.strip():
             return header + "\n" + truncate_entrypoint_content(data)
     except OSError:
@@ -279,6 +286,8 @@ def _build_memory_lines(user_mem_dir: str, project_mem_dir: str) -> str:
         f"- Both `{ENTRYPOINT_NAME}` files are always loaded into your conversation context"
         f" — lines after {MAX_ENTRYPOINT_LINES} each will be truncated, so keep each index concise\n"
         "- Keep the name, description, and type fields in memory files up-to-date with the content\n"
+        "- Preserve nanocursor-memory-index and nanocursor-consolidation metadata comments in the index. "
+        "After consolidation, only indexed memories are active; unindexed old bodies are retained for recovery.\n"
         "- Organize memory semantically by topic, not chronologically\n"
         "- Update or remove memories that turn out to be wrong or outdated\n"
         "- Do not write duplicate memories. First check if there is an existing memory you can update "
@@ -344,7 +353,8 @@ class MemoryManager:
             ensure_memory_dir_exists(self._user_mem_dir)
         if self._mem_dir:
             ensure_memory_dir_exists(self._mem_dir)
-        return build_memory_prompt(self._user_mem_dir, self._mem_dir)
+        from nanocursor.memory.budget import clip
+        return clip(build_memory_prompt(self._user_mem_dir, self._mem_dir), 1024)
 
     def load_all(self) -> list[MemoryFile]:
         """扫描两个目录中所有 .md 文件（排除 MEMORY.md），解析 frontmatter。
@@ -369,24 +379,13 @@ class MemoryManager:
         return out
 
     def _scan_existing_memories(self) -> str:
-        """扫描已有记忆文件，生成 manifest 给 LLM 做去重。"""
+        """Use the same active set as recall, listing, and consolidation."""
         entries: list[str] = []
         for dir_path in (self._user_mem_dir, self._mem_dir):
-            if not dir_path:
-                continue
-            d = Path(dir_path)
-            if not d.is_dir():
-                continue
-            for f in sorted(d.iterdir()):
-                if f.name == ENTRYPOINT_NAME or not f.name.endswith(".md"):
-                    continue
-                try:
-                    mf = parse_frontmatter(f.read_text(encoding="utf-8"))
-                    type_tag = mf.type or "?"
-                    desc = mf.description or f.stem
-                    entries.append(f"- [{type_tag}] {f.name}: {desc}")
-                except OSError:
-                    continue
+            if dir_path:
+                for record in active_records(dir_path):
+                    mf = parse_frontmatter(record.content)
+                    entries.append(f"- [{mf.type or '?'}] {record.filename}: {mf.description or mf.name}")
         return "\n".join(entries)
 
     async def extract(
@@ -399,15 +398,16 @@ class MemoryManager:
 
         使用裸 LLM 调用 + 结构化输出解析，发送已有记忆 manifest 做去重。
         """
-        from nanocursor.tools.base import StreamEnd, TextDelta
+        from nanocursor.client import collect_text_response
 
-        recent = conversation.history[self._last_extraction_msg_count:]
+        captured_count = len(conversation.history)
+        recent = conversation.history[self._last_extraction_msg_count:captured_count]
         if not recent:
             return
 
         conv_lines: list[str] = []
         for msg in recent:
-            if msg.role == "user" and msg.content:
+            if msg.role == "user" and msg.content and not msg.memory_context:
                 conv_lines.append(f"[user]: {msg.content}")
             elif msg.role == "assistant" and msg.content:
                 conv_lines.append(f"[assistant]: {msg.content}")
@@ -415,7 +415,14 @@ class MemoryManager:
             return
 
         # 扫描已有记忆做去重
-        manifest = self._scan_existing_memories()
+        try:
+            stores = {scope: MemoryStore.from_directory(path) for scope, path in
+                      (("user", self._user_mem_dir), ("project", self._mem_dir)) if path}
+            snapshots = {scope: store.snapshot() for scope, store in stores.items()}
+            manifest = self._scan_existing_memories()
+        except OSError as exc:
+            logger.warning("Memory extraction could not read safe storage: %s", exc)
+            return
         manifest_section = ""
         if manifest:
             manifest_section = (
@@ -445,57 +452,41 @@ class MemoryManager:
         extract_conv = ConversationManager()
         extract_conv.history = [Message(role="user", content=prompt)]
 
-        collected = ""
         try:
-            async for event in client.stream(
-                extract_conv, system="You are a memory extraction assistant."
-            ):
-                if isinstance(event, TextDelta):
-                    collected += event.text
-                elif isinstance(event, StreamEnd):
-                    pass
-        except Exception:
-            return
-
-        self._last_extraction_msg_count = len(conversation.history)
-
-        # 解析并写入记忆文件
-        if not collected or collected.strip() == "NONE" or "MEMORY_NAME:" not in collected:
-            return
-
-        blocks = [b for b in collected.split("---") if "MEMORY_NAME:" in b]
-        for block in blocks:
-            name = _extract_field(block, "MEMORY_NAME")
-            mtype = _extract_field(block, "MEMORY_TYPE") or "reference"
-            desc = _extract_field(block, "MEMORY_DESC")
-            body = _extract_field(block, "MEMORY_BODY")
-            if not name or not body:
-                continue
-            if mtype not in VALID_TYPES:
-                mtype = "reference"
-
-            # 路由到正确的目录
-            target_dir = self._user_mem_dir if mtype in _USER_LEVEL_TYPES else self._mem_dir
-            if not target_dir:
-                continue
-            ensure_memory_dir_exists(target_dir)
-
-            content = f"---\nname: {name}\ndescription: {desc}\nmetadata:\n  type: {mtype}\n---\n\n{body}\n"
-            file_path = Path(target_dir) / f"{name}.md"
-            try:
-                file_path.write_text(content, encoding="utf-8")
-            except OSError:
-                continue
-
-            # 更新 MEMORY.md 索引
-            idx_path = Path(target_dir) / ENTRYPOINT_NAME
-            idx_line = f"- [{name}]({name}.md) — {desc}\n"
-            try:
-                existing = idx_path.read_text(encoding="utf-8") if idx_path.exists() else ""
-                if f"{name}.md" not in existing:
-                    idx_path.write_text(existing + idx_line, encoding="utf-8")
-            except OSError:
-                pass
+            response = await collect_text_response(
+                client, extract_conv, system="You are a memory extraction assistant."
+            )
+            collected = response.text.strip()
+            if collected == "NONE":
+                self._last_extraction_msg_count = captured_count
+                return
+            blocks = [block.strip() for block in re.split(r"(?m)^---\s*$", collected) if block.strip()]
+            if not blocks or len(blocks) > 16:
+                raise MemoryStorageError("Invalid memory extraction response")
+            grouped: dict[str, list[tuple[str, str, str, str]]] = {}
+            for block in blocks:
+                match = re.fullmatch(
+                    r"MEMORY_NAME:[ \t]*([^\n]+)\nMEMORY_TYPE:[ \t]*([^\n]+)\n"
+                    r"MEMORY_DESC:[ \t]*([^\n]*)\nMEMORY_BODY:[ \t]*(.+)", block, re.DOTALL
+                )
+                if not match:
+                    raise MemoryStorageError("Invalid memory extraction response")
+                name, memory_type, description, body = (part.strip() for part in match.groups())
+                memory_filename(name)
+                if memory_type not in VALID_TYPES or not body or len(body.encode()) > 32_000:
+                    raise MemoryStorageError("Invalid extracted memory")
+                scope = "user" if memory_type in _USER_LEVEL_TYPES else "project"
+                if scope not in stores:
+                    raise MemoryStorageError("Memory scope is unavailable")
+                grouped.setdefault(scope, []).append((name, memory_type, description, body))
+            # Parsing the entire proposal first prevents partially accepting malformed output.
+            for scope, memories in grouped.items():
+                stores[scope].write_memories(memories, snapshots[scope])
+            self._last_extraction_msg_count = captured_count
+        except MemoryPublishedError as exc:
+            logger.warning("Memory extraction index published but durability confirmation failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Memory extraction was not fully published: %s", exc)
 
     def clear(self) -> None:
         """清除两个目录中所有 .md 文件（对齐 Go 版 Clear）。"""
@@ -523,32 +514,20 @@ class MemoryManager:
 # ---------------------------------------------------------------------------
 
 def _load_dir(dir_path: str) -> list[MemoryFile]:
-    """扫描目录中的 .md 文件，解析 frontmatter 并返回 MemoryFile 列表。"""
+    """Read the shared active set without following directory or file links."""
     if not dir_path:
         return []
-    d = Path(dir_path)
-    if not d.is_dir():
-        return []
-
     try:
-        entries = sorted(d.iterdir(), key=lambda p: p.name)
-    except OSError:
+        records = active_records(dir_path)
+    except OSError as exc:
+        logger.warning("Cannot load memories: %s", exc)
         return []
-
     result: list[MemoryFile] = []
-    for entry in entries:
-        if entry.is_dir():
-            continue
-        if entry.name == ENTRYPOINT_NAME or not entry.name.endswith(".md"):
-            continue
-        try:
-            data = entry.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        mf = parse_frontmatter(data)
-        mf.path = str(entry)
+    for record in records:
+        mf = parse_frontmatter(record.content)
+        mf.path = str(Path(dir_path) / record.filename)
         if not mf.name:
-            mf.name = entry.stem  # 去掉 .md 后缀
+            mf.name = Path(record.filename).stem
         result.append(mf)
     return result
 
@@ -560,19 +539,6 @@ def _extract_field(block: str, field: str) -> str:
 
 
 def _clear_dir(dir_path: str) -> None:
-    """删除目录中所有 .md 文件（包括 MEMORY.md）。"""
-    if not dir_path:
-        return
-    d = Path(dir_path)
-    if not d.is_dir():
-        return
-    try:
-        for entry in d.iterdir():
-            if entry.is_dir() or not entry.name.endswith(".md"):
-                continue
-            try:
-                entry.unlink()
-            except OSError:
-                pass
-    except OSError:
-        pass
+    """Explicit user clear; the storage layer validates every managed path."""
+    if dir_path:
+        MemoryStore.from_directory(dir_path).clear()

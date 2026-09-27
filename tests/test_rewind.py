@@ -190,7 +190,7 @@ async def test_history_changes_wait_for_background_tasks(operation):
     from nanocursor.commands.handlers.session import handle_session
     handlers = {"rewind": _handle_rewind, "clear": handle_clear, "session": handle_session}
     session, manager = Mock(), Mock()
-    ui = NS(add_system_message=Mock(), task_manager=NS(_async_tasks={"running": NS(done=lambda: False)}))
+    ui = NS(add_system_message=Mock(), task_manager=NS(has_active_tasks=lambda: True))
     ctx = NS(ui=ui, session=session, session_manager=manager, args="new")
     await handlers[operation](ctx)
     session.close.assert_not_called()

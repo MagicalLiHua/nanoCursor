@@ -30,7 +30,7 @@ async def test_team_respects_parent_restrictions(tmp_path, monkeypatch, effect):
     child_dir.mkdir()
     worktrees = NS(create=AsyncMock(return_value=NS(path=str(child_dir))))
     tasks = NS(launch=Mock(return_value="task-id"))
-    tool = AgentTool(NS(), tasks, TraceManager(), parent, worktree_manager=worktrees, team_manager=teams)
+    tool = AgentTool(NS(), tasks, TraceManager(), parent, worktree_manager=worktrees, team_manager=teams, enable_teams=True)
     result = await tool.execute(AgentToolParams(prompt="task", description="test", team_name=team.name))
     assert not result.is_error
     child = tasks.launch.call_args.kwargs["agent"]

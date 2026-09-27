@@ -101,6 +101,8 @@ class StreamEnd:
     # 计数，所以 cache_creation 在那边始终为 0。
     cache_read: int = 0
     cache_creation: int = 0
+    # Missing provider usage must not look like a measured zero-token request.
+    usage_available: bool = True
 
 
 StreamEvent = TextDelta | ThinkingDelta | ThinkingComplete | ToolCallStart | ToolCallDelta | ToolCallComplete | StreamEnd

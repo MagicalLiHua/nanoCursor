@@ -23,6 +23,8 @@ class HookEngine:
         self.hooks: list[Hook] = hooks or []
         self._prompt_messages: list[str] = []
         self._notifications: list[HookNotification] = []
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
 
 
     def find_matching_hooks(self, event: str, ctx: HookContext) -> list[Hook]:
@@ -39,13 +41,28 @@ class HookEngine:
 
 
     async def run_hooks(self, event: str, ctx: HookContext) -> None:
+        if self._closing:
+            return
         matched = self.find_matching_hooks(event, ctx)
         for hook in matched:
             hook.mark_executed()
             if hook.async_exec:
-                asyncio.ensure_future(self._run_single(hook, ctx))
+                task = asyncio.create_task(self._run_single(hook, ctx))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             else:
                 await self._run_single(hook, ctx)
+
+    async def shutdown(self, timeout: float = 5.0) -> bool:
+        self._closing = True
+        tasks = {task for task in self._tasks if not task.done()}
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        if not tasks:
+            return True
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        return not pending
 
 
     async def _run_single(self, hook: Hook, ctx: HookContext) -> None:

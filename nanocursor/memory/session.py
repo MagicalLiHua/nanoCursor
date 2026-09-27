@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import string
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from nanocursor.conversation import ConversationManager, Message, ThinkingBlock, ToolResultBlock, ToolUseBlock
+from nanocursor.storage import atomic_write
 
 SESSIONS_DIR = ".nanocursor/sessions"
 DEFAULT_MAX_AGE_DAYS = 30
@@ -48,6 +51,7 @@ class SessionRecord:
     timestamp: datetime
     tool_use_id: str | None = None
     is_error: bool = False
+    memory_context: dict | None = None
 
     def to_jsonl(self) -> str:
         data: dict[str, Any] = {
@@ -59,6 +63,8 @@ class SessionRecord:
             data["tool_use_id"] = self.tool_use_id
         if self.type == RecordType.TOOL_RESULT:
             data["is_error"] = self.is_error
+        if self.memory_context is not None:
+            data["memory_context"] = self.memory_context
         return json.dumps(data, ensure_ascii=False)
 
 
@@ -72,6 +78,7 @@ class SessionRecord:
                 timestamp=datetime.fromisoformat(data["timestamp"]),
                 tool_use_id=data.get("tool_use_id"),
                 is_error=data.get("is_error", False),
+                memory_context=data.get("memory_context") if isinstance(data.get("memory_context"), dict) else None,
             )
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             return None
@@ -115,7 +122,8 @@ class SessionRecord:
                 )
         else:
             records.append(
-                cls(type=RecordType.USER, content=message.content, timestamp=now)
+                cls(type=RecordType.USER, content=message.content, timestamp=now,
+                    memory_context=deepcopy(message.memory_context))
             )
 
         return records
@@ -141,11 +149,13 @@ def _message_to_record_dicts(message: Message) -> list[dict[str, Any]]:
             data["tool_use_id"] = rec.tool_use_id
         if rec.type == RecordType.TOOL_RESULT:
             data["is_error"] = rec.is_error
+        if rec.memory_context is not None:
+            data["memory_context"] = rec.memory_context
         dicts.append(data)
     return dicts
 
 
-def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
+def make_compact_boundary(summary: str, keep: list[Message], *, messages: list[Message] | None = None) -> SessionRecord:
     """构建一条 COMPACT_BOUNDARY record，内联摘要和原样保留的 keep 尾部。
 
     `keep` 是 auto_compact 原样保留的近期尾部消息。将其存储在 boundary record
@@ -156,6 +166,8 @@ def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
     for msg in keep:
         keep_dicts.extend(_message_to_record_dicts(msg))
     payload = {"summary": summary, "keep": keep_dicts}
+    if messages is not None:
+        payload["history"] = [asdict(m) for m in messages]
     return SessionRecord(
         type=RecordType.COMPACT_BOUNDARY,
         content=payload,
@@ -175,6 +187,7 @@ def parse_history_boundary(record: SessionRecord) -> list[Message]:
         tool_uses=[ToolUseBlock(**b) for b in item.get("tool_uses", [])],
         tool_results=[ToolResultBlock(**b) for b in item.get("tool_results", [])],
         thinking_blocks=[ThinkingBlock(**b) for b in item.get("thinking_blocks", [])],
+        memory_context=deepcopy(item.get("memory_context")) if isinstance(item.get("memory_context"), dict) else None,
     ) for item in record.content]
 
 
@@ -201,6 +214,7 @@ def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
                     timestamp=record.timestamp,
                     tool_use_id=item.get("tool_use_id"),
                     is_error=item.get("is_error", False),
+                    memory_context=item.get("memory_context") if isinstance(item.get("memory_context"), dict) else None,
                 )
             )
         except ValueError:
@@ -257,6 +271,10 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             continue
 
         if record.type == RecordType.COMPACT_BOUNDARY:
+            if isinstance(record.content, dict) and isinstance(record.content.get("history"), list):
+                messages = parse_history_boundary(SessionRecord(
+                    RecordType.HISTORY_BOUNDARY, record.content["history"], record.timestamp))
+                continue
             # 内联展开：摘要作为 user 消息，后接原样保留的 keep 尾部。
             # resume() 通常已预裁剪到最后一个 boundary，所以这里只会处理
             # 权威的那一条；但在此展开可以保证 records_to_messages 对任何
@@ -267,7 +285,8 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             continue
 
         if record.type == RecordType.USER:
-            messages.append(Message(role="user", content=record.content or ""))
+            messages.append(Message(role="user", content=record.content or "",
+                                    memory_context=deepcopy(record.memory_context)))
         elif record.type == RecordType.ASSISTANT:
             if isinstance(record.content, list):
                 text = ""
@@ -352,9 +371,7 @@ class SessionMeta:
             "created_at": self.created_at.isoformat(),
             "last_active": self.last_active.isoformat(),
         }
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 
     @classmethod
     def load(cls, path: Path) -> SessionMeta | None:
@@ -376,6 +393,14 @@ class SessionMeta:
 # ---------------------------------------------------------------------------
 # Session（活跃会话句柄）
 # ---------------------------------------------------------------------------
+
+
+class SessionMetadataError(OSError):
+    """The JSONL append was flushed, but saving its metadata failed.
+
+    The caller must not replay the already committed message or boundary. The
+    in-memory metadata remains updated; a later save or resume can repair it.
+    """
 
 
 class Session:
@@ -435,7 +460,7 @@ class Session:
         if not self.meta.title and message.role == "user" and message.content:
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
 
-        self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        self._save_metadata_after_append()
 
     def append_record(self, record: SessionRecord) -> None:
         """追加一条原始 SessionRecord（例如 compact_boundary 标记）。
@@ -447,12 +472,24 @@ class Session:
         self._file.write(record.to_jsonl() + "\n")
         self._file.flush()
         self.meta.last_active = datetime.now(timezone.utc)
-        self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        self._save_metadata_after_append()
+
+    def _save_metadata_after_append(self) -> None:
+        try:
+            self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        except Exception as exc:
+            raise SessionMetadataError(
+                f"Session records were saved, but metadata could not be updated: {exc}"
+            ) from exc
 
     def reset_history(self, messages: list[Message]) -> None:
-        self.append_record(make_history_boundary(messages))
+        try:
+            self.append_record(make_history_boundary(messages))
+        except SessionMetadataError:
+            self.meta.message_count = len(messages)
+            raise
         self.meta.message_count = len(messages)
-        self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        self._save_metadata_after_append()
 
 
     def close(self) -> None:
@@ -481,9 +518,9 @@ class ResumeResult:
 async def generate_session_summary(
     client: Any, conversation: ConversationManager, protocol: str
 ) -> str:
-    from nanocursor.tools.base import StreamEnd, TextDelta
+    from nanocursor.client import collect_text_response
 
-    recent = conversation.history[-10:]
+    recent = deepcopy(conversation.history[-10:])
     if not recent:
         return ""
 
@@ -495,19 +532,12 @@ async def generate_session_summary(
         Message(role="user", content="请用一句话总结上面的对话内容。不要调用工具。")
     )
 
-    collected = ""
     try:
-        async for event in client.stream(
-            summary_conv, system=SESSION_SUMMARY_PROMPT
-        ):
-            if isinstance(event, TextDelta):
-                collected += event.text
-            elif isinstance(event, StreamEnd):
-                pass
+        response = await collect_text_response(client, summary_conv, system=SESSION_SUMMARY_PROMPT)
     except Exception:
         return ""
 
-    return collected.strip()
+    return response.text
 
 
 # ---------------------------------------------------------------------------
@@ -562,31 +592,45 @@ class SessionManager:
         if meta is None:
             return None
 
-        records: list[SessionRecord] = []
-        with open(jsonl_path, encoding="utf-8") as f:
+        raw_records: list[SessionRecord | None] = []
+        last_line = b""
+        with open(jsonl_path, "rb") as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                last_line = line
+                if not line.strip():
                     continue
-                record = SessionRecord.from_jsonl(line)
-                if record is not None:
-                    records.append(record)
+                try:
+                    record = SessionRecord.from_jsonl(line.decode("utf-8"))
+                except UnicodeError:
+                    record = None
+                # Keep corruption in the sequence: replaying records after an
+                # unknown gap would invent a history whose protocol is unknown.
+                raw_records.append(record)
 
         # 重建压缩后的状态：仅从最后一个 compact_boundary 开始重放。
         # 该标记之前的 record 是已被摘要过的原始前缀——保留在磁盘上供审计，
         # 但不再重放。标记本身内联了摘要 + 原样 keep 尾部，标记之后追加的
         # 普通消息（续写）照常重放。没有 boundary 则全量重放（兼容旧 session）。
         last_boundary = -1
-        for i, rec in enumerate(records):
-            if rec.type in (RecordType.COMPACT_BOUNDARY, RecordType.HISTORY_BOUNDARY):
+        for i, rec in enumerate(raw_records):
+            if rec is not None and rec.type in (RecordType.COMPACT_BOUNDARY, RecordType.HISTORY_BOUNDARY):
                 last_boundary = i
         if last_boundary >= 0:
-            records = records[last_boundary:]
+            raw_records = raw_records[last_boundary:]
+
+        needs_recovery = None in raw_records
+        records: list[SessionRecord] = []
+        for record in raw_records:
+            if record is None:
+                break
+            records.append(record)
 
         valid_count = validate_message_chain(records)
+        needs_recovery = needs_recovery or valid_count != len(records)
         records = records[:valid_count]
         messages = records_to_messages(records)
 
+        last_active = meta.last_active
         file = open(jsonl_path, "a", encoding="utf-8")  # noqa: SIM115
         session = Session(
             session_id=session_id,
@@ -595,10 +639,27 @@ class SessionManager:
             sessions_dir=self._sessions_dir,
         )
 
+        try:
+            if last_line and not last_line.endswith(b"\n"):
+                file.write("\n")
+                file.flush()
+            if needs_recovery:
+                # Preserve all original bytes while establishing the only
+                # history future appends and resumes should replay.
+                session.reset_history(messages)
+                os.fsync(file.fileno())
+            elif meta.message_count != len(messages):
+                # JSONL is authoritative even if a crash preceded meta.save().
+                meta.message_count = len(messages)
+                meta.save(meta_path)
+        except BaseException:
+            session.close()
+            raise
+
         return ResumeResult(
             session=session,
             messages=messages,
-            last_active=meta.last_active,
+            last_active=last_active,
         )
 
     def delete(self, session_id: str) -> bool:

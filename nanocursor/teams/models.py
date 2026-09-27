@@ -28,6 +28,9 @@ class TeammateInfo:
     backend_type: str  # BackendType value
     is_active: bool | None = None
     progress: Optional[TeammateProgress] = None
+    branch: str = ""
+    result: str = ""
+    task_id: str = ""
 
     def to_dict(self) -> dict:
         # Exclude progress (runtime-only, contains threading.Lock)
@@ -39,6 +42,9 @@ class TeammateInfo:
             "worktree_path": self.worktree_path,
             "backend_type": self.backend_type,
             "is_active": self.is_active,
+            "branch": self.branch,
+            "result": self.result,
+            "task_id": self.task_id,
         }
 
     @classmethod
@@ -59,6 +65,9 @@ class AgentTeam:
     members: list[TeammateInfo] = field(default_factory=list)
     config_path: str = ""
     description: str = ""
+    status: str = "active"
+    close_error: str = ""
+    session_id: str = ""
 
     def get_member(self, name: str) -> TeammateInfo | None:
         for m in self.members:
@@ -99,6 +108,9 @@ class AgentTeam:
             "members": [m.to_dict() for m in self.members],
             "config_path": self.config_path,
             "description": self.description,
+            "status": self.status,
+            "close_error": self.close_error,
+            "session_id": self.session_id,
         }
 
 
@@ -111,12 +123,15 @@ class AgentTeam:
             members=members,
             config_path=data.get("config_path", ""),
             description=data.get("description", ""),
+            status=data.get("status", "active"),
+            close_error=data.get("close_error", ""),
+            session_id=data.get("session_id", ""),
         )
 
     def save(self) -> None:
         path = Path(self.config_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        from nanocursor.storage import write_json
+        write_json(path, self.to_dict())
 
     @classmethod
     def load(cls, config_path: str) -> AgentTeam:

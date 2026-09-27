@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from nanocursor.permissions.dangerous import DangerousCommandDetector, is_safe_command
@@ -71,6 +71,17 @@ class PermissionChecker:
     @staticmethod
     def describe_tool_action(tool_name: str, arguments: dict[str, Any]) -> str:
         """为 HITL 确认生成人类可读的操作描述（对齐 Go 版 ExtractContent + formatToolArgs）。"""
+        if tool_name == "ManageMCP":
+            import json
+            from copy import deepcopy
+            config = deepcopy(arguments.get("config") or {})
+            for field in ("env", "headers"):
+                config[field] = {key: value if "${" in value else "[configured]"
+                                 for key, value in config.get(field, {}).items()}
+            detail = json.dumps(config, ensure_ascii=False, indent=2) if config else ""
+            return (f"MCP {arguments.get('action')}: {arguments.get('name')}\n"
+                    "保存到用户配置，影响后续启动及其他项目。\n"
+                    "本地 MCP 程序不使用 Bash 沙箱；远程服务仅连接/断开。\n" + detail)
         content = extract_content(tool_name, arguments)
         if content:
             return content
@@ -91,12 +102,16 @@ class PermissionChecker:
         rule_result = self.rule_engine.evaluate(tool.name, content)
         if rule_result == "deny":
             return Decision(effect="deny", reason="权限规则拒绝", source="explicit_deny")
+        if tool.name == "ManageMCP" and arguments.get("action") != "list" and self.mode == PermissionMode.PLAN:
+            return Decision("deny", "Plan mode: MCP configuration changes are unavailable", "mode_restriction")
         if tool.name == "Bash":
             hit, reason = self.detector.detect(content)
             if hit:
                 return Decision(effect="deny", reason=f"危险命令拦截: {reason}", source="dangerous_pattern")
         if rule_result == "ask":
             return Decision(effect="ask", reason="权限规则要求确认", source="explicit_ask")
+        if tool.name == "ManageMCP" and arguments.get("action") == "list":
+            return Decision("allow", "Read-only MCP status", "safe_command")
 
         # Keep explicit restrictions on compound components in smart mode too.
         if smart and tool.name == "Bash":
@@ -112,9 +127,6 @@ class PermissionChecker:
         if self.mode == PermissionMode.PLAN:
             if tool.name in _PLAN_MODE_ALLOWED_TOOLS:
                 return Decision(effect="allow", reason="Plan mode: allowed tool", source="mode_restriction")
-            if tool.name in ("WriteFile", "EditFile") and content:
-                if self._is_plan_file(content):
-                    return Decision(effect="allow", reason="Plan mode: plan file write", source="mode_restriction")
 
         # Layer 1: 安全的只读命令（自动放行）
         if tool.name == "Bash" and is_safe_command(content or ""):
@@ -150,6 +162,12 @@ class PermissionChecker:
             if not ok and self.mode != PermissionMode.BYPASS:
                 return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}", source="path_restriction")
 
+        # Only the allocated plan file gets this convenience exception, and
+        # only after explicit restrictions and the path sandbox have agreed.
+        if (self.mode == PermissionMode.PLAN and tool.name in ("WriteFile", "EditFile")
+                and self._is_plan_file(content)):
+            return Decision(effect="allow", reason="Plan mode: plan file write", source="mode_restriction")
+
         # Layer 3: 规则引擎匹配
         rule_result = self.rule_engine.evaluate(tool.name, content)
         if rule_result == "allow":
@@ -175,14 +193,29 @@ class PermissionChecker:
 
     def _is_plan_file(self, target_path: str) -> bool:
         if not self.plan_file_path or not target_path:
-            return ".nanocursor/plans/" in target_path
+            return False
         try:
-            abs_target = os.path.abspath(target_path)
-            abs_plan = os.path.abspath(self.plan_file_path)
-            if abs_target == abs_plan:
-                return True
-        except Exception:
-            pass
-        if os.path.basename(target_path) == os.path.basename(self.plan_file_path):
-            return True
-        return ".nanocursor/plans/" in target_path
+            root = self.sandbox.project_root
+
+            def checked_path(raw: str) -> Path | None:
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    path = root / path
+                # Check before resolve(), otherwise a link to the real plan
+                # would become indistinguishable from its allocated path.
+                relative = path.relative_to(root)
+                current = root
+                # Walk before normalizing '..': a symlink followed by '..'
+                # follows the link on disk and must not disappear lexically.
+                for component in relative.parts:
+                    current = current.parent if component == ".." else current / component
+                    current.relative_to(root)
+                    if current.is_symlink():
+                        return None
+                return current.resolve()
+
+            target = checked_path(target_path)
+            plan = checked_path(self.plan_file_path)
+            return target is not None and plan is not None and target == plan
+        except (OSError, RuntimeError, ValueError):
+            return False

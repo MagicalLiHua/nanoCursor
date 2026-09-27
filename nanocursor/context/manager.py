@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -15,7 +18,6 @@ from nanocursor.conversation import (
     ToolResultBlock,
     estimate_tokens,
 )
-from nanocursor.serialization import build_messages
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -41,6 +43,7 @@ KEEP_MAX_TOKENS = 40_000
 # 前缀 token 数低于此阈值时不值得做摘要——摘要往返的开销比回收的空间还大，
 # 退化为不压缩、保留原始历史（避免「压了个寂寞」）。
 MIN_SUMMARIZE_PREFIX_TOKENS = 2_000
+SUMMARY_TIMEOUT_SECONDS = 60.0
 
 PERSISTED_TAG = "<persisted-output>"
 
@@ -324,8 +327,11 @@ def apply_tool_result_budget(
 # ---------------------------------------------------------------------------
 
 def compute_compact_threshold(context_window: int, manual: bool = False) -> int:
-    effective = context_window - SUMMARY_OUTPUT_RESERVE
+    # Fixed 20K/13K reserves cannot fit a small local model. Scale them down
+    # there, while preserving the established budgets for normal windows.
+    effective = context_window - min(SUMMARY_OUTPUT_RESERVE, max(1, context_window // 4))
     margin = MANUAL_COMPACT_SAFETY_MARGIN if manual else AUTO_COMPACT_SAFETY_MARGIN
+    margin = min(margin, max(1, effective // (10 if manual else 4)))
     return effective - margin
 
 
@@ -811,7 +817,9 @@ async def auto_compact(
     # 当调用方提前对 conversation 做了 budget 替换，把替换后的消息列表传入
     # budget_messages，这样 keep_start 的计算和摘要构建都基于缩减后的 token
     # 估算，让阈值判断更准确。最终仍然重写 conversation.history（原始对话）。
-    effective_history = budget_messages if budget_messages else conversation.history
+    history_snapshot = copy.deepcopy(conversation.history)
+    effective_history = copy.deepcopy(budget_messages) if budget_messages else history_snapshot
+    attachment = build_recovery_attachment(recovery, tool_schemas)
 
     # 决定保留多少尾部消息原文。只有前缀 messages[:keep_start] 会被摘要；
     # messages[keep_start:] 原样保留，让模型看到近期原文而非靠有损摘要复述。
@@ -824,16 +832,6 @@ async def auto_compact(
     if keep_start <= 0 or _prefix_too_small_to_compact(to_summarize):
         return None
 
-    messages_for_summary = build_messages(list(to_summarize), protocol)
-
-    summary_messages: list[dict[str, Any]] = [
-        {"role": "user", "content": SUMMARY_PROMPT},
-    ]
-    summary_messages.extend(messages_for_summary)
-    summary_messages.append(
-        {"role": "user", "content": "Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only."}
-    )
-
     summary_conv = ConversationManager()
     summary_conv.history = [
         Message(role="user", content=SUMMARY_PROMPT),
@@ -845,45 +843,35 @@ async def auto_compact(
         Message(role="user", content="Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only.")
     )
 
-    max_retries = 3
-    llm_output: str | None = None
+    try:
+        from nanocursor.client import LLMError, collect_text_response
 
-    for attempt in range(max_retries):
-        try:
-            from nanocursor.tools.base import StreamEnd, StreamEvent, TextDelta
-
-            collected_text = ""
-            async for event in client.stream(summary_conv, system=SUMMARY_PROMPT, tools=tool_schemas):
-                if isinstance(event, TextDelta):
-                    collected_text += event.text
-                elif isinstance(event, StreamEnd):
-                    pass
-            llm_output = collected_text
-            break
-
-        except Exception as e:
-            err_msg = str(e).lower()
-            if "prompt" in err_msg and "long" in err_msg or "too many" in err_msg:
-                groups = _group_messages_by_turn(summary_conv.history[1:-1])
-                drop_count = max(1, len(groups) // 5)
-                remaining = groups[drop_count:]
-                summary_conv.history = (
-                    [summary_conv.history[0]]
-                    + [m for g in remaining for m in g]
-                    + [summary_conv.history[-1]]
-                )
-                continue
-            if breaker is not None:
-                breaker.record_failure()
-            return f"摘要生成失败: {e}"
-
-    if llm_output is None:
+        async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
+            response = await collect_text_response(
+                client, summary_conv, system=SUMMARY_PROMPT, tools=tool_schemas,
+            )
+        # The summary prompt promises this structure. Partial/open tags, an
+        # analysis-only answer or plain prose cannot replace the source history.
+        llm_output = response.text
+        match = re.fullmatch(
+            r"\s*(?:<analysis>[\s\S]*?</analysis>\s*)?<summary>([\s\S]*?)</summary>\s*",
+            llm_output,
+        )
+        if (match is None or llm_output.count("<summary>") != 1
+                or llm_output.count("</summary>") != 1
+                or llm_output.count("<analysis>") != llm_output.count("</analysis>")
+                or llm_output.count("<analysis>") > 1):
+            raise LLMError("摘要缺少完整且唯一的 <summary> 标签")
+        summary = match.group(1).strip()
+        if not summary:
+            raise LLMError("摘要正文为空")
+        if conversation.history != history_snapshot:
+            raise LLMError("生成摘要期间会话已改变，请重试")
+    except Exception as e:
         if breaker is not None:
             breaker.record_failure()
-        return "摘要生成失败：多次重试后仍超出上下文限制"
+        return f"摘要生成失败: {str(e) or type(e).__name__}"
 
-    summary = extract_summary(llm_output)
-    attachment = build_recovery_attachment(recovery, tool_schemas)
     # 重建 = 摘要(user) + 尾部原文。
     new_messages = build_compact_messages(
         summary,

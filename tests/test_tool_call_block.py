@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import pytest
+from textual.app import App
+
 from nanocursor.app import ToolCallBlock, _format_detail
+
+
+@pytest.fixture(autouse=True)
+def app_context():
+    with App()._context():
+        yield
 
 
 def test_format_detail_colors_edit_file_diff_lines():
@@ -35,10 +44,11 @@ def test_edit_file_block_auto_expands_on_success():
     assert "hello" in block.render().plain
 
 
-def test_edit_file_block_stays_collapsed_on_error():
+def test_edit_file_block_expands_on_error():
     block = ToolCallBlock("EditFile", {"file_path": "foo.py"})
     block.set_result("Error: old_string not found in file", True, 0.1)
-    assert block._collapsed is True
+    assert block._collapsed is False
+    assert "old_string not found" in block.render().plain
 
 
 def test_other_tools_still_default_collapsed():

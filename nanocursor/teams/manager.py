@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from contextlib import asynccontextmanager
+from typing import Any
 
-from nanocursor.teams.backend_detect import BackendDetectionError, detect_backend
+from nanocursor.teams.backend_detect import detect_backend
 from nanocursor.teams.mailbox import Mailbox, create_message
 from nanocursor.teams.models import (
     AgentTeam,
@@ -19,9 +19,6 @@ from nanocursor.teams.registry import AgentNameRegistry
 from nanocursor.teams.shared_task import SharedTaskStore
 from nanocursor.teams.spawn_inprocess import InProcessTeammateHandle
 
-if TYPE_CHECKING:
-    from nanocursor.agent import Agent
-
 log = logging.getLogger(__name__)
 
 
@@ -30,7 +27,7 @@ class TeamError(Exception):
 
 
 class TeamManager:
-    def __init__(self, worktree_manager: Any = None, trace_manager: Any = None) -> None:
+    def __init__(self, worktree_manager: Any = None, trace_manager: Any = None, task_manager: Any = None) -> None:
         self._teams: dict[str, AgentTeam] = {}
         self._task_stores: dict[str, SharedTaskStore] = {}
         self._mailboxes: dict[str, Mailbox] = {}
@@ -39,6 +36,8 @@ class TeamManager:
         self._detected_backend: BackendType | None = None
         self._worktree_manager = worktree_manager
         self._trace_manager = trace_manager
+        self._task_manager = task_manager
+        self._spawn_locks: dict[str, asyncio.Lock] = {}
         self._teammate_team_map: dict[str, str] = {}  # agent_id -> team_name
 
     def detect_backend(
@@ -70,6 +69,7 @@ class TeamManager:
             lead_agent_id=lead_agent_id,
             config_path=config_path,
             description=description,
+            session_id=getattr(self._task_manager, "current_session_id", ""),
         )
         team.save()
 
@@ -129,6 +129,8 @@ class TeamManager:
         team = self.get_team(team_name)
         if team is None:
             raise TeamError(f"Team '{team_name}' not found")
+        if team.status != "active":
+            raise TeamError(f"Team '{team_name}' is {team.status}; new members are disabled")
         team.add_member(member)
         team.save()
 
@@ -165,47 +167,101 @@ class TeamManager:
         return self._pane_ids.get(agent_id)
 
     def delete_team(self, team_name: str) -> None:
+        """Compatibility entry point for an already stopped team; never erase work."""
         team = self.get_team(team_name)
         if team is None:
             raise TeamError(f"Team '{team_name}' not found")
 
         active = [m for m in team.members if m.is_active is not False]
+        if self._task_manager and self._task_manager.has_active_tasks(team_name=team_name):
+            raise TeamError("Team still has running tasks; await close_team instead")
         if active:
             names = ", ".join(m.name for m in active)
             raise TeamError(f"Cannot delete team: active members: {names}")
 
-        for member in list(team.members):
-            AgentNameRegistry.instance().unregister(member.name)
+        if any(not handle.done for member in team.members
+               if (handle := self._inprocess_handles.get(member.agent_id)) is not None):
+            raise TeamError("Team still has running handles; await close_team instead")
+        team.status = "closed"
+        try:
+            team.save()
+        except Exception:
+            team.status = "closing"
+            raise
 
-            handle = self._inprocess_handles.pop(member.agent_id, None)
-            if handle and not handle.done:
-                handle.cancel()
+    @asynccontextmanager
+    async def spawn_guard(self, team_name: str):
+        async with self._spawn_locks.setdefault(team_name, asyncio.Lock()):
+            team = self.get_team(team_name)
+            if team is None or team.status != "active":
+                raise TeamError(f"Team '{team_name}' is not active; no teammate was started")
+            yield team
 
-            pane_id = self._pane_ids.pop(member.agent_id, None)
-            if pane_id:
-                self._kill_pane(pane_id, member.backend_type)
-
-            if member.worktree_path:
-                self._cleanup_worktree(member.worktree_path)
-
-            if self._trace_manager:
-                self._trace_manager.remove(member.agent_id)
-
-        mailbox = self.get_mailbox(team_name)
-        if mailbox:
-            mailbox.cleanup_all()
-
-        team_dir = resolve_team_dir(team_name)
-        self._remove_dir(team_dir)
-
-        self._teams.pop(team_name, None)
-        self._task_stores.pop(team_name, None)
-        self._mailboxes.pop(team_name, None)
-
-        log.info("Deleted team '%s'", team_name)
+    async def close_team(self, team_name: str, timeout: float = 5.0) -> AgentTeam:
+        team = self.get_team(team_name)
+        if team is None:
+            raise TeamError(f"Team '{team_name}' not found")
+        if team.status == "closed":
+            return team
+        team.status = "closing"
+        team.close_error = ""
+        # Persist the refusal to dispatch before any await. Failure leaves all files.
+        team.save()
+        lock = self._spawn_locks.setdefault(team_name, asyncio.Lock())
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError:
+            team.close_error = "A teammate is still starting; retry closing after it stops"
+            team.save()
+            return team
+        try:
+            stopped = True
+            if self._task_manager is not None:
+                stopped = await self._task_manager.shutdown(team_name=team_name, timeout=timeout)
+            handles = {handle.task for member in team.members
+                       if (handle := self._inprocess_handles.get(member.agent_id)) is not None
+                       and not handle.done}
+            for task in handles:
+                if not task.cancelling():
+                    task.cancel()
+            if handles:
+                _, pending = await asyncio.wait(handles, timeout=timeout)
+                stopped = stopped and not pending
+            for member in team.members:
+                bg = self._task_manager.get(member.task_id) if self._task_manager and member.task_id else None
+                if bg is None and self._task_manager:
+                    bg = next((task for task in self._task_manager.list_tasks()
+                               if getattr(task.agent, "agent_id", None) == member.agent_id
+                               and getattr(task.agent, "team_name", None) == team_name), None)
+                if bg is not None:
+                    member.result = bg.result
+                    member.task_id = bg.id
+                    member.is_active = any(
+                        task.id == bg.id for task in self._task_manager.active_tasks(team_name=team_name))
+                elif member.agent_id in self._inprocess_handles:
+                    handle = self._inprocess_handles[member.agent_id]
+                    member.is_active = not handle.done
+                    member.result = handle.result or member.result
+                elif member.is_active:
+                    # External/legacy tasks have no verifiable local handle. Preserve
+                    # their records and do not claim they are stopped.
+                    stopped = False
+                if member.is_active is False:
+                    AgentNameRegistry.instance().unregister(member.name)
+            team.status = "closed" if stopped else "closing"
+            team.close_error = "" if stopped else "Some tasks are not confirmed stopped; all worktrees and branches are retained"
+            try:
+                team.save()
+            except Exception:
+                team.status = "closing"
+                team.close_error = "Tasks were checked, but saving the recovery record failed; retry closing"
+                raise
+            return team
+        finally:
+            lock.release()
 
     def list_teams(self) -> list[str]:
-        return list(self._teams.keys())
+        return [name for name, team in self._teams.items() if team.status != "closed"]
 
     def get_team_for_teammate(self, agent_id: str) -> str | None:
         if agent_id in self._teammate_team_map:
@@ -217,11 +273,11 @@ class TeamManager:
         return None
 
 
-    def drain_lead_mailbox(self) -> list[str]:
+    def drain_lead_mailbox(self, session_id: str | None = None) -> list[str]:
         notes: list[str] = []
         for team_name in list(self._teams.keys()):
             team = self.get_team(team_name)
-            if team is None:
+            if team is None or team.status != "active" or (session_id is not None and team.session_id != session_id):
                 continue
             mailbox = self.get_mailbox(team_name)
             if mailbox is None:
@@ -264,27 +320,3 @@ class TeamManager:
                 kill_pane(pane_id)
         except Exception as e:
             log.warning("Failed to kill pane %s: %s", pane_id, e)
-
-    def _cleanup_worktree(self, worktree_path: str) -> None:
-        import subprocess
-        try:
-            subprocess.run(
-                ["git", "worktree", "remove", worktree_path, "--force"],
-                capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            log.warning("git worktree remove failed for %s: %s", worktree_path, e)
-            import shutil
-            try:
-                if Path(worktree_path).exists():
-                    shutil.rmtree(worktree_path, ignore_errors=True)
-            except Exception:
-                pass
-
-    def _remove_dir(self, path: Path) -> None:
-        import shutil
-        try:
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-        except Exception as e:
-            log.warning("Failed to remove directory %s: %s", path, e)

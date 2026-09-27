@@ -13,6 +13,7 @@ from nanocursor.commands.handlers.session import SESSION_COMMAND
 from nanocursor.commands.handlers.skill import SKILL_COMMAND
 from nanocursor.commands.handlers.rewind import REWIND_COMMAND
 from nanocursor.commands.handlers.status import STATUS_COMMAND
+from nanocursor.commands.handlers.tools import TOOLS_COMMAND
 from nanocursor.commands.registry import CommandRegistry
 
 
@@ -29,6 +30,7 @@ ALL_COMMANDS = [
     SANDBOX_COMMAND,
     REWIND_COMMAND,
     STATUS_COMMAND,
+    TOOLS_COMMAND,
     SKILL_COMMAND,
 ]
 

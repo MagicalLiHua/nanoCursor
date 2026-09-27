@@ -32,8 +32,10 @@ def done(i, text):
 async def responses(items):
     client = OpenAIClient.__new__(OpenAIClient)
     client.model = "offline"
+    client.max_output_tokens = 1024
     client._request_options = {}
-    client._client = NS(responses=NS(create=AsyncMock(return_value=events(items))))
+    complete = NS(type="response.completed", response=NS(usage=None))
+    client._client = NS(responses=NS(create=AsyncMock(return_value=events([*items, complete]))))
     return [e async for e in client.stream(ConversationManager()) if isinstance(e, ToolCallComplete)]
 
 

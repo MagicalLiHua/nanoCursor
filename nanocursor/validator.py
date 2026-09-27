@@ -304,6 +304,31 @@ def validate_approval(raw: object) -> dict:
     return {"mode": mode, "provider": provider, "timeout_seconds": float(timeout)}
 
 
+def validate_memory(raw: object) -> dict:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict) or set(raw) - {"consolidation", "recall"}:
+        raise ConfigError("'memory' must contain only consolidation and recall settings")
+    consolidation = raw.get("consolidation", {})
+    if not isinstance(consolidation, dict) or set(consolidation) - {"enabled"}:
+        raise ConfigError("'memory.consolidation' must contain only enabled")
+    recall = raw.get("recall", {})
+    if not isinstance(recall, dict) or set(recall) - {"mode", "max_context_tokens", "model_timeout_ms"}:
+        raise ConfigError("'memory.recall' supports mode, max_context_tokens and model_timeout_ms")
+    mode = recall.get("mode", "local")
+    if not isinstance(mode, str) or mode not in {"off", "local", "model"}:
+        raise ConfigError("'memory.recall.mode' must be off, local or model")
+    cleaned = {"mode": mode}
+    for key, default, minimum, maximum in (("max_context_tokens", 4096, 128, 16384),
+                                            ("model_timeout_ms", 2000, 100, 10000)):
+        value = recall.get(key, default)
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigError(f"'memory.recall.{key}' must be an integer from {minimum} to {maximum}")
+        cleaned[key] = value
+    return {"consolidation": {"enabled": validate_bool_field(
+        consolidation.get("enabled", False), "memory.consolidation.enabled")}, "recall": cleaned}
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
@@ -320,6 +345,8 @@ def validate_config_structure(raw: object) -> dict:
         "permission_mode": validate_permission_mode(raw.get("permission_mode", "default")),
         "mcp_servers": validate_mcp_servers(raw.get("mcp_servers")),
         "hooks": validate_hooks(raw.get("hooks")),
+        "enable_teams": validate_bool_field(raw.get("enable_teams", False), "enable_teams"),
+        "memory": validate_memory(raw.get("memory")),
         "enable_fork": validate_bool_field(raw.get("enable_fork", False), "enable_fork"),
         "enable_verification_agent": validate_bool_field(
             raw.get("enable_verification_agent", False), "enable_verification_agent"

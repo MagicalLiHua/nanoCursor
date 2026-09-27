@@ -118,7 +118,8 @@ async def test_skill_fork_inherits_rejecting_hook_and_permissions(tmp_path):
                    permission_checker=checker(tmp_path), hook_engine=HookEngine([hook]))
     await SkillExecutor(parent, parent.client, "anthropic").execute_fork(
         SkillDef(name="test", description="test", mode="fork", context="none"), "task")
-    assert probe.count == 0 and hook.executed
+    # Unsupported tools are rejected before hooks; parent hook state is isolated.
+    assert probe.count == 0 and not hook.executed
     assert parent.spawn_allowed
 
 

@@ -217,7 +217,7 @@ class TestSkillLoader:
         assert skill.description == "v2"
         assert "v2" in skill.prompt_body
 
-    def test_hot_reload_fallback_on_error(self, tmp_path: Path) -> None:
+    def test_hot_reload_stops_on_error(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / ".nanocursor" / "skills"
         skills_dir.mkdir(parents=True)
         f = skills_dir / "custom.md"
@@ -233,8 +233,9 @@ class TestSkillLoader:
 
         f.write_text("broken content no frontmatter")
         skill = loader.get("custom")
-        assert skill is not None
-        assert skill.description == "good"
+        assert skill is None
+        assert "frontmatter" in loader.diagnostics["custom"]
+        assert not loader.get_catalog()
 
     def test_directory_skill_detected(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / ".nanocursor" / "skills"

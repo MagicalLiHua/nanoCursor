@@ -32,14 +32,12 @@ async def handle_skill(ctx: CommandContext) -> None:
 
 def _handle_list(ctx: CommandContext, loader: SkillLoader) -> None:
     catalog = loader.get_catalog()
-    if not catalog:
-        ctx.ui.add_system_message("没有已加载的 Skill")
-        return
-
-    lines = ["已加载的 Skill："]
+    lines = ["已加载的 Skill：" if catalog else "没有可运行的 Skill"]
     for name, desc in catalog:
         source = loader.get_source_label(name)
         lines.append(f"  {name:<20} {desc}  [{source}]")
+    for name, error in getattr(loader, "diagnostics", {}).items():
+        lines.append(f"  {name} [不可用]: {error}")
     ctx.ui.add_system_message("\n".join(lines))
 
 
@@ -50,7 +48,7 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
 
     skill = loader.get(name)
     if skill is None:
-        ctx.ui.add_system_message(f"未找到 Skill：{name}")
+        ctx.ui.add_system_message(f"Skill 不可用：{name}\n{getattr(loader, 'diagnostics', {}).get(name, '未找到定义')}")
         return
 
     source = loader.get_source_label(name)
@@ -60,10 +58,18 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
         f"Mode: {skill.mode}",
         f"Context: {skill.context}",
         f"Model: {skill.model or '(default)'}",
+        f"Provider: {skill.provider or '(inherit)'}",
+        f"Tools: {list(skill.tools) if skill.tools is not None else '(inherit fork-safe subset)'}",
         f"Source: {source}",
         f"Path: {skill.source_path or '(builtin)'}",
         f"Directory: {skill.is_directory}",
     ]
+    executor = ctx.config.get("skill_executor")
+    if executor:
+        try:
+            lines.append(executor.describe(skill))
+        except ValueError as exc:
+            lines.append(f"Unavailable: {exc}")
     ctx.ui.add_system_message("\n".join(lines))
 
 

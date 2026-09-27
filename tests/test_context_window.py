@@ -4,7 +4,7 @@
   1. 配置中显式提供的 context_window（> 0）——显式覆盖。
   2. 从 provider 的 /v1/models 端点自动获取的值（仅 anthropic）。
   3. 内置的「模型名 -> window」映射表（子串匹配）。
-  4. 保守默认值（claude -> 200000，否则 -> 128000）。
+  4. 通用回退值 200000，已知模型的映射优先。
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class TestConfigPriority:
         assert p.get_context_window() == 4096
 
     def test_explicit_config_wins_over_default(self):
-        # "mystery-model" 没有映射表项 → 本会默认到 128000。
+        # "mystery-model" 没有映射表项 → 本会默认到 200000。
         p = _provider(model="mystery-model", context_window=321_000)
         assert p.get_context_window() == 321_000
 
@@ -94,7 +94,7 @@ class TestMappingTable:
 
 
 # ---------------------------------------------------------------------------
-# 第 4 层 —— 保守默认值
+# 第 4 层 —— 通用回退值
 # ---------------------------------------------------------------------------
 
 class TestDefaults:
@@ -102,8 +102,9 @@ class TestDefaults:
         # 没有其它线索的 claude 名称会命中 "claude" 映射表项。
         assert _provider(model="claude-future-99").get_context_window() == 200_000
 
-    def test_unknown_model_default(self):
-        assert _provider(model="some-llm-v2").get_context_window() == 128_000
+    @pytest.mark.parametrize("protocol", ["anthropic", "openai", "openai-compat"])
+    def test_unknown_model_default(self, protocol):
+        assert _provider(protocol=protocol, model="some-llm-v2").get_context_window() == 200_000
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +145,8 @@ class TestAutoFetch:
         fake.fetch_model_context_window = AsyncMock(return_value=None)
         with patch("nanocursor.client.create_client", return_value=fake):
             await resolve_context_window(p)
-        # 既没获取到、也没匹配到 → 使用保守默认值。
-        assert p.get_context_window() == 128_000
+        # 既没获取到、也没匹配到 → 使用通用回退值。
+        assert p.get_context_window() == 200_000
 
     @pytest.mark.asyncio
     async def test_client_construction_failure_degrades(self):

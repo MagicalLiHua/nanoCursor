@@ -736,13 +736,15 @@ class TestConversationInjection:
         conv.inject_environment("env info")
         conv.inject_long_term_memory("project rules", "user prefs")
 
-        assert len(conv.history) == 2
+        assert len(conv.history) == 3
         assert conv.history[0].content == "env info"
         assert "<system-reminder>" in conv.history[1].content
         assert "nanocursorMd" in conv.history[1].content
         assert "project rules" in conv.history[1].content
-        assert "autoMemory" in conv.history[1].content
-        assert "user prefs" in conv.history[1].content
+        assert "autoMemory" in conv.history[2].content
+        assert "user prefs" in conv.history[2].content
+        assert conv.history[1].memory_context is None
+        assert conv.history[2].memory_context["kind"] == "index"
         assert "currentDate" in conv.history[1].content
         assert conv.ltm_injected is True
 
@@ -750,7 +752,7 @@ class TestConversationInjection:
         conv = ConversationManager()
         conv.inject_long_term_memory("rules", "mems")
         conv.inject_long_term_memory("rules2", "mems2")
-        assert sum(1 for m in conv.history if "<system-reminder>" in m.content) == 1
+        assert sum(1 for m in conv.history if "<system-reminder>" in m.content) == 2
 
     def test_inject_instructions_only(self) -> None:
         conv = ConversationManager()

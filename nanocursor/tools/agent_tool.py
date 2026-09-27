@@ -32,11 +32,10 @@ class AgentToolParams(BaseModel):
     team_name: str | None = Field(
         default=None,
         description=(
-            "REQUIRED when creating team members. Spawns the agent as a long-running "
-            "teammate under this team (created via TeamCreate). Unlike regular sub-agents, "
-            "team members run in their own terminal, persist after the lead returns, and "
-            "communicate with each other via SendMessage. Without team_name the agent "
-            "runs as a one-shot sub-agent that blocks and returns inline."
+            "Experimental Team name (requires enable_teams: true). "
+            "Creates an isolated teammate in a team created via TeamCreate. "
+            "Messaging and persistent follow-up are not stable. "
+            "Omit for an ordinary sub-agent."
         ),
     )
 
@@ -86,6 +85,7 @@ class AgentTool(Tool):
         provider_config: Any = None,
         worktree_manager: Any = None,
         team_manager: Any = None,
+        enable_teams: bool = False,
     ) -> None:
         self._agent_loader = agent_loader
         self._task_manager = task_manager
@@ -95,7 +95,18 @@ class AgentTool(Tool):
         self._provider_config = provider_config
         self._worktree_manager = worktree_manager
         self._team_manager = team_manager
+        self._enable_teams = enable_teams
+        if not enable_teams:
+            self.description = self.description.replace(
+                "Use team_name to spawn a teammate in an existing team.", ""
+            ).strip()
         self.query_source: str = ""
+
+    def get_schema(self) -> dict[str, Any]:
+        schema = super().get_schema()
+        if not self._enable_teams:
+            schema["input_schema"].get("properties", {}).pop("team_name", None)
+        return schema
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]
@@ -107,9 +118,22 @@ class AgentTool(Tool):
             return ToolResult("Permission denied: sub-agents cannot create any further agents.", True)
 
         if p.team_name:
+            if not self._enable_teams:
+                return ToolResult("Experimental Teams are disabled. Set enable_teams: true to enable them.", True)
             if p.isolation == "none":
                 return ToolResult("Team members require worktree isolation.", True)
-            return await self._execute_as_teammate(p)
+            if self._team_manager is None:
+                return ToolResult("TeamManager not configured.", True)
+            from nanocursor.teams.manager import TeamError
+            try:
+                async with self._team_manager.spawn_guard(p.team_name):
+                    return await self._execute_as_teammate(p)
+            except TeamError as exc:
+                return ToolResult(str(exc), True)
+            except Exception as exc:
+                team = self._team_manager.get_team(p.team_name)
+                paths = ", ".join(member.worktree_path for member in team.members) if team else ""
+                return ToolResult(f"Failed to start teammate: {exc}. Existing worktrees retained: {paths}", True)
 
         from nanocursor.agents.fork import ForkError, build_forked_messages
         from nanocursor.agents.parser import AgentDef
@@ -345,6 +369,8 @@ class AgentTool(Tool):
         team = self._team_manager.get_team(p.team_name)
         if team is None:
             return ToolResult(output=f"Team '{p.team_name}' not found. Create it first with TeamCreate.", is_error=True)
+        if team.status != "active":
+            return ToolResult(f"Team '{p.team_name}' is {team.status}; spawning is disabled", True)
 
         base_name = p.name or p.subagent_type or "worker"
         existing_names = {m.name for m in team.members}
@@ -397,6 +423,18 @@ class AgentTool(Tool):
             wt = await self._worktree_manager.create(wt_name, "HEAD")
         except Exception as e:
             return ToolResult(output=f"Failed to create worktree for teammate: {e}", is_error=True)
+
+        # Retain the path before any later setup can fail or close can complete.
+        member = TeammateInfo(
+            name=teammate_name, agent_id="", agent_type=definition.agent_type,
+            model=p.model or definition.model, worktree_path=wt.path,
+            branch=getattr(wt, "branch", ""), backend_type=BackendType.IN_PROCESS.value,
+            is_active=False,
+        )
+        team.add_member(member)
+        team.save()
+        if team.status != "active":
+            return ToolResult(f"Team is closing; no task started. Worktree retained at {wt.path}.", True)
 
         # 3. 选择 LLM
         client = self._select_llm(p, definition)
@@ -467,16 +505,10 @@ class AgentTool(Tool):
         # 7. 注册名称和成员信息
         AgentNameRegistry.instance().register(teammate_name, agent_id)
 
-        member = TeammateInfo(
-            name=teammate_name,
-            agent_id=agent_id,
-            agent_type=definition.agent_type,
-            model=p.model or definition.model,
-            worktree_path=wt.path,
-            backend_type=backend.value,
-            is_active=True,
-        )
-        self._team_manager.register_member(p.team_name, member)
+        member.agent_id = agent_id
+        member.backend_type = backend.value
+        member.is_active = True
+        team.save()
 
         # 8. 按后端类型启动队友
         if backend in (BackendType.TMUX, BackendType.ITERM2):
@@ -491,6 +523,8 @@ class AgentTool(Tool):
             name=teammate_name,
             fork_conversation=conversation if is_fork else None,
         )
+        member.task_id = task_id
+        team.save()
 
         return ToolResult(
             output=(
@@ -539,6 +573,9 @@ class AgentTool(Tool):
                 )
         except Exception as e:
             log.warning("Pane spawn failed, falling back to in-process: %s", e)
+            member.is_active = False
+            member.result = f"Pane spawn failed: {e}"
+            team.save()
             return ToolResult(
                 output=f"Pane spawn failed ({e}), teammate not started. Retry or set teammate_mode to in-process.",
                 is_error=True,
