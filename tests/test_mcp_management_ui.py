@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from nanocursor.agent import PermissionResponse
 from nanocursor.permission_dialog import InlinePermissionWidget
 from nanocursor.status import collect_status
 from nanocursor.tools.base import StreamEnd, TextDelta, ToolCallComplete
@@ -41,35 +44,49 @@ async def test_model_can_connect_discover_call_and_stop_in_interactive_ui(memory
     async with app.run_test(size=size) as pilot:
         assert app.command_registry.find("tools") is not None
         await command(app, "连接文档 MCP 并查询")
-        approvals = 0
+        approvals = []
         for _ in range(100):
             await pilot.pause(0.01)
             dialogs = app.query(InlinePermissionWidget)
-            if dialogs:
+            request = getattr(app, "_pending_perm_request", None)
+            if dialogs and request is not None and not request.future.done():
                 dialog = dialogs.first()
+                assert dialog._tool_name == request.tool_name
                 if dialog._tool_name == "ManageMCP":
                     assert len(dialog._options) == 2
                     assert "https://docs.example/mcp" in dialog._description
-                approvals += 1
+                # Mount/focus and DOM removal are asynchronous. Count the
+                # resolved request, not how often a widget is still visible.
+                dialog.focus()
                 await pilot.press("enter")
+                assert await asyncio.wait_for(asyncio.shield(request.future), 2) == PermissionResponse.ALLOW
+                approvals.append(request.tool_name)
             if app._agent_task is None or app._agent_task.done():
                 break
         assert app._agent_task is None or app._agent_task.done()
-        assert approvals == 2  # ManageMCP + actual MCP tool use.
+        assert approvals == ["ManageMCP", "mcp_docs_search"]
         assert collect_status(app).mcp_connected == 1
         assert "mcp_docs_search" in schemas[2]
         await command(app, "/tools enabled")
         text = "\n".join(str(widget.render()) for widget in app.query("#chat-area Static"))
         assert "mcp_docs_search" in text and "已启用" in text
         await command(app, "关闭文档 MCP")
+        stop_approvals = []
         for _ in range(100):
             await pilot.pause(0.01)
             dialogs = app.query(InlinePermissionWidget)
-            if dialogs:
+            request = getattr(app, "_pending_perm_request", None)
+            if dialogs and request is not None and not request.future.done():
+                dialog = dialogs.first()
+                assert dialog._tool_name == request.tool_name
+                dialog.focus()
                 await pilot.press("enter")
+                assert await asyncio.wait_for(asyncio.shield(request.future), 2) == PermissionResponse.ALLOW
+                stop_approvals.append(request.tool_name)
             if app._agent_task is None or app._agent_task.done():
                 break
         assert app._agent_task is None or app._agent_task.done()
+        assert stop_approvals == ["ManageMCP"]
         assert not batches and clients[0].closed
         assert collect_status(app).mcp_connected == 0
         assert "mcp_docs_search" not in schemas[-1]
