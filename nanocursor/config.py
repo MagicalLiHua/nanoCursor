@@ -134,7 +134,7 @@ class MCPServerConfig:
 
 @dataclass
 class WorktreeConfig:
-    symlink_directories: list[str] = field(default_factory=lambda: ["node_modules", ".venv", "vendor"])
+    symlink_directories: list[str] = field(default_factory=list)
     stale_cleanup_interval: int = 3600
     stale_cutoff_hours: int = 24
 

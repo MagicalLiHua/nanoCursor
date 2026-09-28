@@ -657,6 +657,8 @@ class TestMemoryManager:
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
+        monkeypatch.setenv("NANOCURSOR_HOME", str(fake_home / ".nanocursor"))
+
         # 用户级记忆
         user_mem_dir = fake_home / ".nanocursor" / "memory"
         user_mem_dir.mkdir(parents=True)

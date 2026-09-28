@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel, Field
 
 from nanocursor.tools.base import Tool, ToolResult
-from nanocursor.worktree.changes import count_worktree_changes
 
 if TYPE_CHECKING:
     from nanocursor.worktree.manager import WorktreeManager
@@ -13,14 +12,13 @@ if TYPE_CHECKING:
 
 class ExitWorktreeParams(BaseModel):
     action: str = Field(
-        description='"keep" leaves the worktree and branch on disk; "remove" deletes both.',
+        default="keep",
+        description='"keep" preserves files and branch. Destructive removal requires a user /worktree command.',
     )
     discard_changes: Optional[bool] = Field(
         default=None,
         description=(
-            'Required true when action is "remove" and the worktree has '
-            "uncommitted files or unmerged commits. "
-            "The tool will refuse and list them otherwise."
+            "Legacy compatibility only; this flag cannot authorize deletion."
         ),
     )
 
@@ -48,7 +46,7 @@ class ExitWorktreeTool(Tool):
                     "No-op: there is no active EnterWorktree session to exit. "
                     "This tool only operates on worktrees created by EnterWorktree "
                     "in the current session — it will not touch worktrees created "
-                    "manually or in a previous session. No filesystem changes were made."
+                        "manually. No filesystem changes were made."
                 ),
                 is_error=True,
             )
@@ -60,37 +58,19 @@ class ExitWorktreeTool(Tool):
                 is_error=True,
             )
 
-        discard = params.discard_changes or False
-
-        if action == "remove" and not discard:
-            changes = count_worktree_changes(
-                session.worktree_path, session.original_head_commit
+        if action == "remove":
+            return ToolResult(
+                output="Removal requires the user to run /worktree exit --remove and confirm the displayed checkout. "
+                       "Model-supplied discard_changes cannot authorize deletion. Use action keep to preserve this work.",
+                is_error=True,
             )
-            if changes.uncommitted > 0 or changes.new_commits > 0:
-                parts = []
-                if changes.uncommitted > 0:
-                    word = "file" if changes.uncommitted == 1 else "files"
-                    parts.append(f"{changes.uncommitted} uncommitted {word}")
-                if changes.new_commits > 0:
-                    word = "commit" if changes.new_commits == 1 else "commits"
-                    parts.append(f"{changes.new_commits} {word}")
-                return ToolResult(
-                    output=(
-                        f"Worktree has {' and '.join(parts)}. "
-                        "Removing will discard this work permanently. "
-                        "Confirm with the user, then re-invoke with "
-                        'discard_changes: true — or use action: "keep" '
-                        "to preserve the worktree."
-                    ),
-                    is_error=True,
-                )
 
         worktree_path = session.worktree_path
         original_cwd = session.original_cwd
         wt_name = session.worktree_name
 
         try:
-            await self._manager.exit(wt_name, action=action, discard_changes=discard)
+            await self._manager.exit(wt_name, action=action)
         except Exception as e:
             return ToolResult(
                 output=f"Error exiting worktree: {e}", is_error=True

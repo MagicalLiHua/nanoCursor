@@ -287,13 +287,11 @@ async def test_rewind_then_refresh_and_resume_preserves_memory_sources(memory_ap
         await command(app, "Python version")
         await app._agent_task
         checkpoint = deepcopy(app.conversation.history)
-        # Capture the same host checkpoint API used by completed turns.
-        app.agent.file_history.make_snapshot(len(checkpoint), "memory checkpoint", conversation=checkpoint)
-        checkpoint_number = len(app.agent.file_history.get_snapshots())
+        snapshot = app.agent.file_history.begin_checkpoint(len(checkpoint), "memory checkpoint", conversation=checkpoint)
         (root / "alpha.md").write_text(render_memory("alpha", "Python", "project", "Python NEW_VERSION"))
         await command(app, "Python version")
         await app._agent_task
-        await command(app, f"/rewind {checkpoint_number} 2")
+        await command(app, f"/rewind {snapshot.checkpoint_id} 2 apply")
         assert [m.memory_context for m in app.conversation.history if owned(m)] == [m.memory_context for m in checkpoint if owned(m)]
         await command(app, "Python version")
         await app._agent_task

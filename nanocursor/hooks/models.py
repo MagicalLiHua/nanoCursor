@@ -24,6 +24,7 @@ class Action:
 class ActionResult:
     output: str = ""
     success: bool = True
+    outcome_unknown: bool = False
 
 
 @dataclass

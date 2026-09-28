@@ -29,6 +29,7 @@ class MCPClient:
         self._owner: asyncio.Task | None = None
         self._ready: asyncio.Future | None = None
         self._stop = asyncio.Event()
+        self._close_error: BaseException | None = None
 
 
     @property
@@ -49,6 +50,7 @@ class MCPClient:
         if self._owner is None or self._owner.done():
             self._ready = asyncio.get_running_loop().create_future()
             self._stop = asyncio.Event()
+            self._close_error = None
             self._owner = asyncio.create_task(self._serve(), name=f"mcp:{self.name}")
         try:
             await asyncio.shield(self._ready)
@@ -77,6 +79,10 @@ class MCPClient:
                 # The connecting caller may already have been cancelled.
                 self._ready.exception()
             elif not isinstance(exc, asyncio.CancelledError):
+                # The owner task cannot propagate an exception into the task
+                # that requested shutdown. Keep it until close() can report
+                # that transport cleanup was not confirmed.
+                self._close_error = exc
                 logger.debug("MCP connection closed: %s", self.name, exc_info=True)
         finally:
             self._alive = False
@@ -153,3 +159,5 @@ class MCPClient:
                 await asyncio.gather(owner, return_exceptions=True)
                 raise
             self._owner = None
+            if self._close_error is not None:
+                raise self._close_error

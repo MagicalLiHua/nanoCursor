@@ -123,7 +123,9 @@ class RemoteServer:
 
     async def run(self) -> None:
         """启动 HTTP + WebSocket 服务器。"""
-        # 初始化 Agent
+        from nanocursor.config import ConfigError
+        raise ConfigError("Browser execution is deferred until it supports durable recovery. Use local nanocursor or -p.")
+        # Kept as a reference for the deferred browser implementation.
         self._init_agent()
 
         # 初始化 MCP（如果有配置）
@@ -224,6 +226,8 @@ class RemoteServer:
     # ------------------------------------------------------------------
 
     def _init_agent(self) -> None:
+        from nanocursor.config import ConfigError
+        raise ConfigError("Browser execution is deferred; use the protected local CLI.")
         """初始化 Agent 及相关子系统。"""
         provider = self.providers[0]
         work_dir = str(self.workspace.active_cwd)

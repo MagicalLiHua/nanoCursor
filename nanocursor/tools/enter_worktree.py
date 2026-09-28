@@ -61,7 +61,10 @@ class EnterWorktreeTool(Tool):
         return ToolResult(
             output=(
                 f"Created worktree at {session.worktree_path}{branch_info}. "
+                f"Creation baseline: {wt.head_commit}; uncommitted source files are not included. "
                 "The session is now working in the worktree. "
-                "Use ExitWorktree to leave mid-session, or exit the session to be prompted."
+                "Use ExitWorktree to leave; files and branch are kept by default. "
+                + (f"Explicitly shared directories: {', '.join(self._manager.symlink_directories)}. "
+                   if self._manager.symlink_directories else "Dependencies are independent; install them in this worktree if needed.")
             )
         )

@@ -118,7 +118,7 @@ class TestFileCache:
 class TestWorktreeConfig:
     def test_defaults(self):
         cfg = WorktreeConfig()
-        assert "node_modules" in cfg.symlink_directories
+        assert cfg.symlink_directories == []
         assert cfg.stale_cleanup_interval == 3600
         assert cfg.stale_cutoff_hours == 24
 
@@ -224,7 +224,8 @@ def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(path), capture_output=True)
 
 @pytest.fixture
-def git_repo(tmp_path):
+def git_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("NANOCURSOR_HOME", str(tmp_path / "state"))
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -235,6 +236,7 @@ def manager(git_repo):
     return WorktreeManager(
         repo_root=str(git_repo),
         symlink_directories=[],
+        removal_guard=lambda wt: None,
     )
 
 class TestWorktreeManager:
@@ -242,7 +244,7 @@ class TestWorktreeManager:
     async def test_create(self, manager, git_repo):
         wt = await manager.create("test-feature")
         assert wt.name == "test-feature"
-        assert wt.branch == "worktree-test-feature"
+        assert wt.branch.startswith("worktree-test-feature-")
         assert Path(wt.path).exists()
         assert (Path(wt.path) / "README.md").exists()
 
@@ -260,15 +262,15 @@ class TestWorktreeManager:
     @pytest.mark.asyncio
     async def test_create_nested_slug(self, manager):
         wt = await manager.create("team/alice")
-        assert wt.branch == "worktree-team+alice"
+        assert wt.branch.startswith("worktree-team+alice-")
         assert Path(wt.path).exists()
 
     @pytest.mark.asyncio
     async def test_fast_recovery(self, manager):
         wt1 = await manager.create("recover")
         path = wt1.path
-        manager.active.clear()
-        wt2 = await manager.create("recover")
+        restored = WorktreeManager(manager.repo_root)
+        wt2 = restored.active["recover"]
         assert wt2.path == path
         assert wt2.head_commit == wt1.head_commit
 
@@ -298,7 +300,8 @@ class TestWorktreeManager:
     async def test_exit_remove_clean(self, manager):
         wt = await manager.create("exit-rm")
         await manager.enter("exit-rm")
-        await manager.exit("exit-rm", action="remove", discard_changes=True)
+        approval = manager.prepare_removal("exit-rm")
+        await manager.exit("exit-rm", action="remove", confirmation_token=approval.token)
         assert "exit-rm" not in manager.active
 
     @pytest.mark.asyncio
@@ -306,7 +309,7 @@ class TestWorktreeManager:
         wt = await manager.create("exit-protect")
         (Path(wt.path) / "new_file.txt").write_text("changes")
         await manager.enter("exit-protect")
-        with pytest.raises(WorktreeError, match="has changes"):
+        with pytest.raises(WorktreeError, match="single-use user confirmation"):
             await manager.exit("exit-protect", action="remove", discard_changes=False)
 
     @pytest.mark.asyncio
@@ -354,11 +357,11 @@ class TestChangeDetection:
         assert changes.new_commits > 0
 
     @pytest.mark.asyncio
-    async def test_auto_cleanup_removes_clean(self, manager):
+    async def test_auto_cleanup_keeps_clean(self, manager):
         wt = await manager.create("auto-clean")
         result = await manager.auto_cleanup("auto-clean", wt.head_commit)
-        assert not result.kept
-        assert "auto-clean" not in manager.active
+        assert result.kept
+        assert "auto-clean" in manager.active
 
     @pytest.mark.asyncio
     async def test_auto_cleanup_keeps_dirty(self, manager):

@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from nanocursor.tools.file_io import atomic_write, path_lock
-from nanocursor.tools.runtime import resolve_workspace_path
+from nanocursor.tools.file_io import atomic_write, file_history_context, path_lock, read_bounded_text, validate_regular_path
+from nanocursor.tools.runtime import current_runtime, resolve_workspace_path
 from nanocursor.tools.base import Tool, ToolResult
 from nanocursor.tools.diff import build_diff
 
@@ -37,7 +37,13 @@ class EditFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        path = resolve_workspace_path(params.file_path)
+        try:
+            context = current_runtime()
+            validate_regular_path(params.file_path, cwd=context.cwd if context else None)
+            path = resolve_workspace_path(params.file_path)
+            history, operation_id = file_history_context(self.file_history)
+        except Exception as exc:
+            return ToolResult(output=f"Error editing file: {exc}", is_error=True)
         with path_lock(path):
             if not path.exists():
                 return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
@@ -49,7 +55,7 @@ class EditFile(Tool):
                     return ToolResult(output=err_msg, is_error=True)
 
             try:
-                content = path.read_text(encoding="utf-8")
+                content = read_bounded_text(path)
             except Exception as e:
                 return ToolResult(output=f"Error reading file: {e}", is_error=True)
 
@@ -64,11 +70,17 @@ class EditFile(Tool):
 
             new_content = content.replace(params.old_string, params.new_string, 1)
             try:
-                if self.file_history is not None:
-                    self.file_history.track_edit(str(path))
+                edit_id = history.prepare_edit(str(path), new_content, operation_id=operation_id,
+                                               expected_content=content) if history else None
+                if self._state_cache:
+                    ok, err_msg = self._state_cache.check(str(path.resolve()))
+                    if not ok:
+                        return ToolResult(output=err_msg, is_error=True)
+                if history:
+                    history.verify_prepared(edit_id)
                 atomic_write(path, new_content)
-                if self.file_history is not None:
-                    self.file_history.record_edit(str(path))
+                if history:
+                    history.applied_edit(edit_id)
                 if self._cache is not None:
                     self._cache.invalidate(str(path.resolve()))
                 if self._state_cache:
@@ -84,4 +96,5 @@ class EditFile(Tool):
             f"Updated {params.file_path} with {diff.additions} {addition_word} "
             f"and {diff.removals} {removal_word}"
         )
-        return ToolResult(output=f"{summary}\n{diff.text}")
+        coverage = "\nThis project-external edit is not covered by workspace checkpoints." if history and edit_id is None else ""
+        return ToolResult(output=f"{summary}\n{diff.text}{coverage}")

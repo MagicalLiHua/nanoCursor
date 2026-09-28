@@ -11,6 +11,7 @@ from nanocursor.mcp.client import MCPClient
 from nanocursor.mcp.tool_wrapper import MCPToolWrapper
 from nanocursor.tools import ToolRegistry
 from nanocursor.tools.base import Tool
+from nanocursor.recovery import RecoveryError, current_runtime
 
 @dataclass
 class ServerInfo:
@@ -38,6 +39,8 @@ class MCPManager:
         self.work_dir = work_dir
         self.on_change = on_change
         self.connect_timeout = 30.0
+        self.recovery = None
+        self._lifetimes = {}
 
     def load_configs(self, configs: list[MCPServerConfig]) -> None:
         for cfg in configs:
@@ -70,6 +73,14 @@ class MCPManager:
                 self._registry = registry
             await self._stop(config.name)
             self.remember_disabled(config)
+            runtime = current_runtime() or self.recovery
+            operation_id = runtime.begin_operation("mcp_server", config.name,
+                                                   {"transport": "stdio" if config.is_stdio else "http", "command": config.command,
+                                                    "args": list(config.args), "url": config.url,
+                                                    "environment_keys": sorted(config.env)},
+                                                   cwd=self.work_dir) if runtime else None
+            if runtime:
+                self._lifetimes[config.name] = (runtime, operation_id)
             client = MCPClient(deepcopy(config))
             client.work_dir = self.work_dir
             self._clients[config.name] = client
@@ -93,7 +104,10 @@ class MCPManager:
                 self._disabled.discard(config.name)
                 self._changed()
                 return ConnectResult(wrappers, [ServerInfo(config.name, client.instructions)])
-            except BaseException:
+            except BaseException as exc:
+                if runtime:
+                    runtime.mark_unknown(operation_id, f"MCP startup interrupted: {type(exc).__name__}: {exc}")
+                    self._lifetimes.pop(config.name, None)
                 await self._stop(config.name)
                 raise
 
@@ -109,6 +123,16 @@ class MCPManager:
             if client is not None:
                 await client.close()
                 self._clients.pop(name, None)
+            lifetime = self._lifetimes.pop(name, None)
+            if lifetime:
+                runtime, operation_id = lifetime
+                runtime.finish_operation(operation_id, "MCP connection closed; previously invoked calls retain their own outcomes")
+        except BaseException as exc:
+            lifetime = self._lifetimes.pop(name, None)
+            if lifetime:
+                runtime, operation_id = lifetime
+                runtime.mark_unknown(operation_id, f"MCP shutdown unconfirmed: {type(exc).__name__}: {exc}")
+            raise
         finally:
             self._changed()
 
@@ -125,6 +149,8 @@ class MCPManager:
                 connected = await self.start(config)
                 result.tools.extend(connected.tools)
                 result.servers.extend(connected.servers)
+            except RecoveryError:
+                raise
             except Exception as exc:
                 # Startup failure is not an explicit user disable.
                 self._disabled.discard(name)

@@ -100,8 +100,9 @@ class MemoryCatalog:
 
 
 class _Directory:
-    def __init__(self, fd: int) -> None:
+    def __init__(self, fd: int, path: Path | None = None) -> None:
         self.fd = fd
+        self.path = path
 
     @contextmanager
     def parent(self, relative: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
@@ -112,6 +113,7 @@ class _Directory:
                 if create:
                     try:
                         os.mkdir(component, 0o700, dir_fd=fd)
+                        os.fsync(fd)
                     except FileExistsError:
                         pass
                 child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -169,6 +171,37 @@ class _Directory:
             return info.st_ino, info.st_mtime_ns, info.st_size
 
     def write(self, relative: str, content: str, *, new: bool = False) -> None:
+        from nanocursor.recovery import current_runtime, RecoveryError
+        runtime = current_runtime()
+        if runtime is None:
+            return self._write(relative, content, new=new)
+        runtime.ensure_ready()
+        data = content.encode("utf-8")
+        if len(data) > MAX_FILE_BYTES:
+            raise MemoryStorageError("Memory exceeds the size limit")
+        # Store exact candidate bytes before granting permission to publish.
+        content_id = runtime.store.put_blob(data)
+        operation = runtime.begin_operation("maintenance", "memory.write", {
+            "directory": str(self.path) if self.path else None,
+            "relative_path": relative, "new": new,
+            "content_blob": content_id, "expected_after_sha256": digest(content),
+        })
+        try:
+            with runtime.operation_context(operation):
+                self._write(relative, content, new=new)
+            runtime.finish_operation(operation, {"publication": "replaced_and_synced", "sha256": digest(content)})
+        except RecoveryError:
+            raise
+        except BaseException as exc:
+            if isinstance(exc, MemoryPublishedError):
+                runtime.store.put_metadata("maintenance_observation", operation, {
+                    "publication": "replacement_observed_fsync_unconfirmed", "sha256": digest(content),
+                    "directory": str(self.path), "relative_path": relative,
+                })
+            runtime.mark_unknown(operation, f"Memory publication interrupted: {type(exc).__name__}: {exc}")
+            raise
+
+    def _write(self, relative: str, content: str, *, new: bool = False) -> None:
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise MemoryStorageError("Memory exceeds the size limit")
@@ -204,6 +237,29 @@ class _Directory:
                     os.unlink(temporary, dir_fd=parent)
                 except FileNotFoundError:
                     pass
+
+    def remove(self, relative: str) -> None:
+        from nanocursor.recovery import current_runtime, RecoveryError
+        runtime = current_runtime()
+        operation = runtime.begin_operation("maintenance", "memory.remove", {
+            "directory": str(self.path) if self.path else None, "relative_path": relative,
+        }) if runtime else None
+        try:
+            with self.parent(relative) as (parent, name):
+                try:
+                    os.unlink(name, dir_fd=parent)
+                    removed = True
+                except FileNotFoundError:
+                    removed = False
+                os.fsync(parent)
+            if runtime:
+                runtime.finish_operation(operation, {"removed": removed, "directory_synced": True})
+        except RecoveryError:
+            raise
+        except BaseException as exc:
+            if runtime:
+                runtime.mark_unknown(operation, f"Memory removal interrupted: {type(exc).__name__}: {exc}")
+            raise
 
     def files(self) -> list[str]:
         found: list[str] = []
@@ -309,6 +365,10 @@ class MemoryStore:
         if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
             raise MemoryStorageError("Safe memory storage requires POSIX no-follow directory operations")
         if create:
+            from nanocursor.recovery import current_runtime
+            runtime = current_runtime()
+            if runtime:
+                runtime.ensure_ready()
             self.trust_root.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.trust_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -321,7 +381,7 @@ class MemoryStore:
                 child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd)
                 fd = child
-            yield _Directory(fd)
+            yield _Directory(fd, self.path)
         finally:
             os.close(fd)
 
@@ -515,17 +575,8 @@ class MemoryStore:
     def clear(self) -> None:
         try:
             with self.open() as directory, directory.lock():
-                for name in directory.files() + [ENTRYPOINT_NAME]:
-                    with directory.parent(name) as (parent, basename):
-                        try:
-                            os.unlink(basename, dir_fd=parent)
-                        except FileNotFoundError:
-                            pass
-                for name in (".consolidation-state.json",):
-                    try:
-                        os.unlink(name, dir_fd=directory.fd)
-                    except FileNotFoundError:
-                        pass
+                for name in directory.files() + [ENTRYPOINT_NAME, ".consolidation-state.json"]:
+                    directory.remove(name)
         except FileNotFoundError:
             return
 

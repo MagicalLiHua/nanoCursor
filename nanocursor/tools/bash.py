@@ -6,6 +6,9 @@ import re
 import shlex
 import signal
 import shutil
+import time
+
+from nanocursor.recovery import RecoveryError, current_runtime as recovery_runtime
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -209,13 +212,19 @@ class Bash(Tool):
             if proc is not None:
                 await _terminate_process_group(proc)
             raise
+        except RecoveryError:
+            if proc is not None:
+                await _terminate_process_group(proc)
+            raise
         except Exception as e:
             if proc is not None:
                 await _terminate_process_group(proc)
-            return ToolResult(output=f"Error executing command: {e}", is_error=True)
+            return ToolResult(output=f"Error executing command: {e}", is_error=True,
+                              outcome_unknown=proc is not None)
 
         # 非零退出码时追加退出码信息，但 is_error 始终为 False
         # 只有超时和异常才设置 is_error=True
+        _record_process(proc)
         exit_code = proc.returncode or 0
         if exit_code != 0:
             hint = _exit_code_hint(params.command, exit_code)
@@ -233,7 +242,13 @@ class Bash(Tool):
 async def _spawn_owned_shell(command: str, **kwargs: object) -> asyncio.subprocess.Process:
     creation = asyncio.create_task(asyncio.create_subprocess_shell(command, **kwargs))
     try:
-        return await asyncio.shield(creation)
+        proc = await asyncio.shield(creation)
+        try:
+            _record_process(proc)
+        except RecoveryError:
+            await _terminate_process_group(proc)
+            raise
+        return proc
     except asyncio.CancelledError:
         # Cancellation can arrive after fork but before the Process is returned.
         # Finish acquiring ownership before terminating the new process group.
@@ -273,3 +288,19 @@ async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
         if drains:
             await asyncio.gather(*drains, return_exceptions=True)
+        runtime = recovery_runtime()
+        if not runtime or not runtime.store.failed:
+            _record_process(proc)
+
+
+def _record_process(proc: asyncio.subprocess.Process) -> None:
+    runtime = recovery_runtime()
+    if runtime and runtime.current_operation_id:
+        previous = runtime.store.get_metadata("process", runtime.current_operation_id, {})
+        runtime.store.put_metadata("process", runtime.current_operation_id, {
+            "pid": proc.pid, "pgid": proc.pid if os.name == "posix" else None,
+            "started_at": previous.get("started_at", time.time()),
+            "observed_at": time.time(), "exit_code": proc.returncode,
+            "owner_token": runtime.owner_token,
+            "notice": "Process identity is a historical clue, not permission to kill this PID after restart.",
+        })

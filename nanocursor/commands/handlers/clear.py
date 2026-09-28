@@ -18,15 +18,6 @@ async def handle_clear(ctx: CommandContext) -> None:
             ctx.session.close()
         ctx.config["set_session"](new_session)
 
-        # 用新 session ID 重建 file history
-        if ctx.agent:
-            from nanocursor.filehistory import FileHistory
-            file_history = FileHistory(getattr(ctx.agent, "session_work_dir", ctx.agent.work_dir), new_session.session_id)
-            ctx.agent.file_history = file_history
-            for tool in ctx.agent.registry.list_tools():
-                if hasattr(tool, "file_history"):
-                    tool.file_history = file_history
-
     ctx.config["set_conversation"](ConversationManager())
 
     if ctx.agent:

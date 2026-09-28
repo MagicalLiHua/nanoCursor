@@ -399,6 +399,10 @@ class MemoryManager:
         使用裸 LLM 调用 + 结构化输出解析，发送已有记忆 manifest 做去重。
         """
         from nanocursor.client import collect_text_response
+        from nanocursor.recovery import current_runtime, RecoveryError
+        runtime = current_runtime()
+        if runtime:
+            runtime.ensure_ready()
 
         captured_count = len(conversation.history)
         recent = conversation.history[self._last_extraction_msg_count:captured_count]
@@ -453,6 +457,8 @@ class MemoryManager:
         extract_conv.history = [Message(role="user", content=prompt)]
 
         try:
+            if runtime:
+                runtime.ensure_ready()
             response = await collect_text_response(
                 client, extract_conv, system="You are a memory extraction assistant."
             )
@@ -483,6 +489,8 @@ class MemoryManager:
             for scope, memories in grouped.items():
                 stores[scope].write_memories(memories, snapshots[scope])
             self._last_extraction_msg_count = captured_count
+        except RecoveryError:
+            raise
         except MemoryPublishedError as exc:
             logger.warning("Memory extraction index published but durability confirmation failed: %s", exc)
         except Exception as exc:

@@ -217,7 +217,7 @@ def validate_bool_field(value: object, field_name: str) -> bool:
 def validate_worktree(raw_wt: dict | None) -> dict:
     """校验 worktree 配置段，返回清洗后的配置字典。"""
     defaults = {
-        "symlink_directories": ["node_modules", ".venv", "vendor"],
+        "symlink_directories": [],
         "stale_cleanup_interval": 3600,
         "stale_cutoff_hours": 24,
     }

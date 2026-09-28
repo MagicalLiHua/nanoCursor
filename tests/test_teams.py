@@ -164,7 +164,8 @@ class TestModels:
         ))
         assert team.all_idle() is False
 
-    def test_unique_team_name(self, tmp_dir):
+    def test_unique_team_name(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv("NANOCURSOR_HOME", str(Path(tmp_dir) / ".nanocursor"))
         with patch("nanocursor.teams.models.Path.home", return_value=Path(tmp_dir)):
             name1 = unique_team_name("my-team")
             assert name1 == "my-team"

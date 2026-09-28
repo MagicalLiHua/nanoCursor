@@ -16,10 +16,10 @@ def create_worktree_command(manager: WorktreeManager) -> Command:
         if not args:
             ctx.ui.add_system_message(
                 "用法:\n"
-                "  /worktree create <name> [base-branch]\n"
+                "  /worktree create <name> [base-branch] [--from-commit]\n"
                 "  /worktree list\n"
                 "  /worktree enter <name>\n"
-                "  /worktree exit [--remove] [--discard]\n"
+                "  /worktree exit [--remove [--confirm <token>]]\n"
                 "  /worktree status"
             )
             return
@@ -57,14 +57,19 @@ async def _handle_create(
     args: list[str],
 ) -> None:
     if not args:
-        ctx.ui.add_system_message("用法: /worktree create <name> [base-branch]")
+        ctx.ui.add_system_message("用法: /worktree create <name> [base-branch] [--from-commit]")
         return
 
-    name = args[0]
-    base_branch = args[1] if len(args) > 1 else "HEAD"
+    accept_base = "--from-commit" in args
+    values = [arg for arg in args if arg != "--from-commit"]
+    if not values or len(values) > 2 or any(arg.startswith("--") for arg in values):
+        ctx.ui.add_system_message("用法: /worktree create <name> [base-branch] [--from-commit]")
+        return
+    name = values[0]
+    base_branch = values[1] if len(values) > 1 else "HEAD"
 
     try:
-        wt = await manager.create(name, base_branch)
+        wt = await manager.create(name, base_branch, accept_committed_base=accept_base)
     except Exception as e:
         ctx.ui.add_system_message(f"创建 worktree 失败: {e}")
         return
@@ -83,7 +88,9 @@ async def _handle_create(
         f"已创建并进入 worktree: {name}\n"
         f"路径: {wt.path}\n"
         f"分支: {wt.branch}\n"
-        f"基于: {base_branch}"
+        f"基于提交: {wt.head_commit}（{base_branch}，不包含原目录未提交内容）\n"
+        + (f"显式共享目录: {', '.join(manager.symlink_directories)}"
+           if manager.symlink_directories else "依赖目录独立；按需在新目录安装依赖。")
     )
 
 
@@ -101,6 +108,8 @@ def _handle_list(ctx: CommandContext, manager: WorktreeManager) -> None:
             f"  {wt.name}{marker}\n"
             f"    路径: {wt.path}\n"
             f"    分支: {wt.branch}\n"
+            f"    创建基线: {wt.head_commit}\n"
+            f"    状态: {wt.state}\n"
             f"    创建: {wt.created.strftime('%Y-%m-%d %H:%M:%S')}"
         )
     ctx.ui.add_system_message("\n".join(lines))
@@ -136,18 +145,37 @@ async def _handle_exit(
         return
 
     remove = "--remove" in args
-    discard = "--discard" in args
     action = "remove" if remove else "keep"
 
     try:
-        await manager.exit(session.worktree_name, action=action, discard_changes=discard)
+        token = None
+        if "--confirm" in args:
+            position = args.index("--confirm")
+            if position + 1 >= len(args):
+                raise ValueError("--confirm 后需要本次显示的确认码")
+            token = args[position + 1]
+        if remove and token is None:
+            approval = manager.prepare_removal(session.worktree_name)
+            ctx.ui.add_system_message(
+                f"请确认本次删除对象：\n{approval.summary}\n"
+                "默认保留；取消可使用 /worktree exit。确认后请输入：\n"
+                f"/worktree exit --remove --confirm {approval.token}\n"
+                "确认码 5 分钟内单次有效；目录内容变化后需要重新确认。"
+            )
+            return
+        await manager.exit(session.worktree_name, action=action, confirmation_token=token)
         if ctx.agent:
             ctx.agent.set_work_dir(session.original_cwd)
         msg = f"已退出 worktree: {session.worktree_name}"
         if remove:
             msg += "（已删除）"
+        else:
+            wt = manager.active[session.worktree_name]
+            msg += f"\n成果保留在: {wt.path}\n分支: {wt.branch}\n基线: {wt.head_commit}"
         ctx.ui.add_system_message(msg)
     except Exception as e:
+        if manager.current_session is None and ctx.agent:
+            ctx.agent.set_work_dir(session.original_cwd)
         ctx.ui.add_system_message(f"退出 worktree 失败: {e}")
 
 
@@ -164,5 +192,7 @@ def _handle_status(ctx: CommandContext, manager: WorktreeManager) -> None:
         f"  路径: {session.worktree_path}",
         f"  原始目录: {session.original_cwd}",
         f"  原始分支: {session.original_branch}",
+        f"  创建基线: {session.original_head_commit}",
+        f"  工作区身份: {session.workspace_id}",
     ]
     ctx.ui.add_system_message("\n".join(lines))

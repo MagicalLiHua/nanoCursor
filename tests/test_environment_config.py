@@ -164,8 +164,15 @@ def test_environment_reaches_noninteractive_and_remote_entrypoints(environment, 
          patch("nanocursor.setup.run_setup", side_effect=AssertionError("no setup")):
         prompt.return_value = 0
         server.return_value.run = AsyncMock()
+        if remote:
+            with pytest.raises(SystemExit) as failure:
+                main()
+            assert failure.value.code == 1
+            server.assert_not_called()
+            prompt.assert_not_called()
+            return
         main()
-    provider = server.call_args.kwargs["providers"][0] if remote else prompt.call_args.args[0].selected_provider
+    provider = prompt.call_args.args[0].selected_provider
     assert provider.name == "env:deepseek" and provider.model == "deepseek-model"
     assert not (environment[0] / "config.yaml").exists()
 

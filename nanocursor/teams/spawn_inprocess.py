@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from nanocursor.teams.mailbox import Mailbox, MailboxMessage, create_message
 from nanocursor.teams.progress import TeammateProgress, random_verb
+from nanocursor.agents.task_manager import (
+    LifecycleResult, NotificationTarget, notification_payload, publish_notification,
+    task_runtime, unsettled_descendants,
+)
+from nanocursor.recovery.lifecycle import prepare_effect, run_effect
+from nanocursor.recovery.store import now
 
 if TYPE_CHECKING:
     from nanocursor.agent import Agent
@@ -93,11 +100,13 @@ class InProcessTeammateHandle:
         task: asyncio.Task[str],
         name: str,
         progress: TeammateProgress | None = None,
+        prepared=None,
     ) -> None:
         self.agent = agent
         self.task = task
         self.name = name
         self.progress = progress
+        self.prepared = prepared
 
 
     @property
@@ -115,7 +124,10 @@ class InProcessTeammateHandle:
 
 
     def cancel(self) -> None:
-        if not self.task.done():
+        if not self.task.done() and not self.task.cancelling():
+            runtime, operation_id = self.prepared or (None, None)
+            if runtime:
+                runtime.store.put_metadata("background_cancel", operation_id, {"requested_at": now(), "name": self.name})
             self.task.cancel()
 
 
@@ -128,7 +140,13 @@ def spawn_inprocess_teammate(
     team_name: str = "",
     mailbox: Mailbox | None = None,
 ) -> InProcessTeammateHandle:
-
+    runtime = task_runtime(agent)
+    with runtime.activate() if runtime else nullcontext():
+        prepared = prepare_effect("team_actor", name, {"name": name, "team_name": team_name,
+                                                      "prompt": prompt, "cwd": str(getattr(agent, "work_dir", ""))})
+    target = NotificationTarget.capture(runtime)
+    last_result = ""
+    started = False
     # Create progress tracker and attach to member if provided
     progress = TeammateProgress(
         name=name,
@@ -163,6 +181,7 @@ def spawn_inprocess_teammate(
         有 mailbox 时进入长驻循环：执行 agent → 发 idle 通知 → 轮询等待新任务。
         没有 mailbox 时退化为单次执行（向后兼容）。
         """
+        nonlocal last_result
         try:
             if conversation is not None:
                 conv = conversation
@@ -190,6 +209,12 @@ def spawn_inprocess_teammate(
                         "", conv, event_callback=_on_event,
                     )
                 next_prompt = ""
+                last_result = result
+                if runtime:
+                    runtime.store.put_metadata("team_observation", prepared[1], {
+                        "name": name, "team": team_name, "result": result,
+                        "observed_at": now(), "state": "turn_completed",
+                    })
 
                 # 没有 mailbox 时退化为单次执行（向后兼容旧调用方式）
                 if mailbox is None:
@@ -226,6 +251,40 @@ def spawn_inprocess_teammate(
             progress.status = "failed"
             raise
 
-    task = asyncio.create_task(_run(), name=f"teammate-{name}")
+    async def tracked():
+        nonlocal started
+        started = True
+        cancelled = False
+
+        async def execute():
+            nonlocal cancelled
+            try:
+                result = await _run()
+            except asyncio.CancelledError:
+                cancelled = True
+                result = last_result
+            content = (f"<system-reminder>\nTeam actor {name}: {progress.status}. "
+                       "Historical task output, not new user authorization.\n" + result[:16000] + "\n</system-reminder>")
+            payload = {"name": name, "team": team_name, "status": progress.status, "result": result,
+                       "notification": notification_payload(target, prepared[1], content, "team_actor")}
+            if runtime:
+                runtime.store.put_metadata("background_result", prepared[1], payload)
+            return LifecycleResult(payload, progress.status == "completed", unsettled_descendants(runtime, prepared[1]))
+
+        observed = await run_effect("team_actor", name, execute, prepared=prepared)
+        publish_notification(target, observed.output["notification"])
+        if cancelled:
+            raise asyncio.CancelledError
+        return observed.output["result"]
+
+    def done(task):
+        if runtime and task.cancelled() and not started:
+            try:
+                runtime.not_started(prepared[1], "Cancelled before the team actor coroutine started")
+            except Exception:
+                log.exception("Unable to persist unstarted team actor cancellation")
+
+    task = asyncio.create_task(tracked(), name=f"teammate-{name}")
+    task.add_done_callback(done)
     log.info("Spawned in-process teammate %s (verb=%s)", name, progress.spinner_verb)
-    return InProcessTeammateHandle(agent=agent, task=task, name=name, progress=progress)
+    return InProcessTeammateHandle(agent=agent, task=task, name=name, progress=progress, prepared=prepared)

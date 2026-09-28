@@ -98,6 +98,7 @@ class MCPToolWrapper(Tool):
             return ToolResult(
                 output=f"MCP tool call failed: {e}",
                 is_error=True,
+                outcome_unknown=True,
             )
 
         text = _extract_text(result.content)

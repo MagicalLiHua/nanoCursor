@@ -18,7 +18,7 @@ async def test_streaming_session_mutations_preserve_reply_and_input(setup, monke
     app = make_app(setup)
     entered, release = asyncio.Event(), asyncio.Event()
     original = app.session
-    async def run(conv):
+    async def run(conv, **kwargs):
         entered.set()
         yield StreamText('partial')
         await release.wait()

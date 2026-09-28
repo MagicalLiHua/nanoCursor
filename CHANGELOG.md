@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added durable execution intents, observed results, generation-aware session projection and project recovery gates. Incomplete model streams no longer start tool batches; unknown outcomes require an explicit user acknowledgement and are never silently replayed.
+- Added `/recover` and the model-free `nanocursor recover` entrypoint, with structured recovery reports and noninteractive exit codes 3 (`recovery_required`) and 4 (`recovery_storage_error`). Connected Hooks, background/Skill/Team lifecycles, MCP and maintenance paths to the shared execution record; retained historical result timestamps and stopped the deferred browser execution entrypoint.
+- Persisted task-start file checkpoints and before/expected-after versions in the shared recovery store. Added stable-ID restore previews, explicit `apply`, resumable per-file restore progress, idempotent conversation boundaries and durable external-edit barriers. File rollback covers built-in file tools; Bash, MCP, Git and project-external effects remain outside its guarantee.
+- Added checkpoint retention/occupancy commands and pinning; preserved file versions, unfinished restores and referenced session evidence. Reject linked/special file targets and block protected writes when backup publication fails.
+- Hardened Worktree creation and removal: preserve existing branches, record the original commit and workspace identity, treat Git query failures as unknown, retain failed/ignored/unmerged outcomes, and require a content-bound user decision before removal. Added `--worktree` with explicit committed-baseline acceptance for dirty sources; dependency sharing and ignored-file copying are now opt-in.
+
 - Added the main-interactive `ManageMCP` tool to configure/start, stop and inspect MCP servers, with persistent user settings, single-use approval prompts, conflict checks and disabled-on-failure startup state. Stopped services revoke tools without implicit reconnect; MCP transports now own their connection and cleanup in the same task.
 - Added `/tools [all|enabled|disabled]` to list tool sources, enablement and deferred discovery state without a model request; `/mcp` also distinguishes explicitly stopped services.
 
@@ -27,7 +33,6 @@
 - Added opt-in model-assisted Bash approval for the main interactive agent, with manual fallback and explicit permission rules preserved.
 - Preserved parent permission rules in Team workers and rejected malformed permission files at startup and execution.
 - Stopped noninteractive tasks when approval is required; added nonzero terminal failure statuses and tool-ID-based result summaries.
-- Restored completed-turn file and conversation checkpoints, detected external edits and damaged backups, and persisted rewound conversations across session resume.
 - Kept persisted tool outputs available after compaction instead of deleting files still referenced by conversations.
 - Bounded Bash capture and file/search reads, sent output previews to the UI, and distinguished recoverable compaction warnings from fatal errors in CLI and evaluation runs.
 - Added an acceptEdits shortcut to ordinary WriteFile/EditFile approval prompts, with immediate status updates and existing command/path/rule checks preserved.

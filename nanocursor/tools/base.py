@@ -17,6 +17,9 @@ ToolCategory = Literal["read", "write", "command"]
 class ToolResult:
     output: str
     is_error: bool = False
+    # Transport loss is different from a known tool error: effects may exist
+    # even though the caller never received the result.
+    outcome_unknown: bool = False
 
 
 class Tool(ABC):

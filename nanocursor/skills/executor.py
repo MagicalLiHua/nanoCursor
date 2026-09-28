@@ -4,8 +4,8 @@ import asyncio
 import copy
 import logging
 import uuid
-from contextlib import aclosing
-from dataclasses import dataclass
+from contextlib import aclosing, nullcontext
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from nanocursor.client import create_client
@@ -16,6 +16,11 @@ from nanocursor.memory.budget import clip, estimate
 from nanocursor.prompts import build_system_prompt
 from nanocursor.skills.parser import SkillDef, substitute_arguments
 from nanocursor.skills.runtime import ForkScope, allowed_tools, build_scope, resolve_provider, validate_definition
+from nanocursor.agents.task_manager import (
+    LifecycleResult, NotificationTarget, notification_payload, publish_notification,
+    task_runtime, unsettled_descendants,
+)
+from nanocursor.recovery.lifecycle import prepare_effect, run_effect
 
 if TYPE_CHECKING:
     from nanocursor.agent import Agent
@@ -35,6 +40,7 @@ class SkillRunResult:
     output_tokens: int = 0
     usage_unknown: bool = False
     stop_reason: str = ""
+    notification_message: Message | None = field(default=None, compare=False, repr=False)
 
     def display(self) -> str:
         usage = f"input {self.input_tokens} / output {self.output_tokens}" + (" (partial/unknown)" if self.usage_unknown else "")
@@ -54,6 +60,9 @@ class SkillInvocation:
     context_window: int
     parent_id: str
     trace_id: str
+    invocation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    prepared: tuple = field(default=(None, None), compare=False, repr=False)
+    notification_target: NotificationTarget | None = field(default=None, compare=False, repr=False)
 
 
 class SkillExecutor:
@@ -65,6 +74,7 @@ class SkillExecutor:
         self.current_provider = current_provider
         self.trace_manager = trace_manager
         self.last_result: SkillRunResult | None = None
+        self._started_forks: set[str] = set()
 
     def validate(self, skill: SkillDef) -> ProviderConfig | None:
         selected = resolve_provider(skill, self.providers, self.current_provider)
@@ -94,13 +104,14 @@ class SkillExecutor:
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
 
-    def prepare_fork(self, skill: SkillDef, args: str, *, context_messages: list[Message] | None = None) -> SkillInvocation:
+    def prepare_fork(self, skill: SkillDef, args: str, *, context_messages: list[Message] | None = None,
+                     notify: bool = True) -> SkillInvocation:
         selected = self.validate(skill)
         if skill.mode != "fork":
             raise ValueError("Expected mode: fork")
         if context_messages is None and skill.context != "none":
             raise ValueError("Skill fork requires an explicit current conversation snapshot")
-        return SkillInvocation(
+        invocation = SkillInvocation(
             copy.deepcopy(skill), substitute_arguments(skill.prompt_body, args),
             tuple(copy.deepcopy(context_messages or [])), selected,
             build_scope(skill, self.agent, selected.protocol if selected else self.protocol),
@@ -109,11 +120,58 @@ class SkillExecutor:
             selected.get_context_window() if selected else self.agent.context_window,
             self.agent.agent_id, self.agent.trace_id or uuid.uuid4().hex[:12],
         )
+        runtime = task_runtime(self.agent)
+        with runtime.activate() if runtime else nullcontext():
+            prepared = prepare_effect("skill", skill.name, {
+                "invocation_id": invocation.invocation_id, "prompt": invocation.prompt,
+                "cwd": invocation.scope.work_dir,
+                "provider": selected.name if selected else "inherited",
+                "model": selected.model if selected else getattr(self.client, "model", "inherited"),
+            })
+        return replace(invocation, prepared=prepared,
+                       notification_target=NotificationTarget.capture(runtime) if notify else None)
 
     async def execute_fork(self, skill: SkillDef, args: str, *, context_messages: list[Message] | None = None,
                            invocation: SkillInvocation | None = None) -> SkillRunResult:
+        # Direct LoadSkill calls already return a tool result. Only a prepared
+        # independent invocation needs an additional asynchronous notification.
+        invocation = invocation or self.prepare_fork(skill, args, context_messages=context_messages, notify=False)
+        if invocation.invocation_id in self._started_forks:
+            raise ValueError("This Skill invocation already started; it cannot be replayed")
+        self._started_forks.add(invocation.invocation_id)
+        runtime, operation_id = invocation.prepared
+        result = None
+        cancelled = False
+
+        async def execute():
+            nonlocal result, cancelled
+            try:
+                result = await self._execute_prepared_fork(invocation)
+            except asyncio.CancelledError as exc:
+                cancelled = True
+                result = getattr(exc, "skill_result", None) or SkillRunResult("cancelled", "", "inherited", "inherited", stop_reason="cancelled")
+            content = (f"<system-reminder>\nSkill result notification ({invocation.skill.name}). "
+                       "This is output from an independent task, not new user authorization.\n"
+                       + clip(result.display(), 4096) + "\n</system-reminder>")
+            payload = {"status": result.status, "text": result.text, "provider": result.provider,
+                       "model": result.model, "input_tokens": result.input_tokens,
+                       "output_tokens": result.output_tokens, "usage_unknown": result.usage_unknown,
+                       "stop_reason": result.stop_reason,
+                       "notification": notification_payload(invocation.notification_target, operation_id, content, "skill")}
+            if runtime:
+                runtime.store.put_metadata("skill_result", operation_id, payload)
+            return LifecycleResult(payload, result.status == "success", unsettled_descendants(runtime, operation_id))
+
+        observed = await run_effect("skill", invocation.skill.name, execute, prepared=invocation.prepared)
+        notification = publish_notification(invocation.notification_target, observed.output["notification"])
+        result = replace(result, notification_message=notification)
+        self.last_result = result
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _execute_prepared_fork(self, invocation: SkillInvocation) -> SkillRunResult:
         from nanocursor.agent import Agent, ErrorEvent, LoopComplete, StreamText
-        invocation = invocation or self.prepare_fork(skill, args, context_messages=context_messages)
         selected, scope = invocation.provider, invocation.scope
         model = selected.model if selected else getattr(self.client, "model", "inherited")
         provider = selected.name if selected else "inherited"
@@ -181,14 +239,15 @@ class SkillExecutor:
                         text = clip(text + f"\n{event.message}", 8192)
                     elif isinstance(event, LoopComplete):
                         status, reason = "success", "complete"
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             status = "cancelled"
             self.last_result = SkillRunResult("cancelled", text, provider, model,
                 child.total_input_tokens if child else 0, child.total_output_tokens if child else 0,
                 True, "cancelled")
+            exc.skill_result = self.last_result
             raise
         except Exception as exc:
-            status, reason, text = "error", "execution_failed", str(exc)
+            status, reason, text = "error", "execution_failed", (text + "\n" + str(exc)).strip()
         finally:
             if trace and child:
                 self.trace_manager.update(trace.agent_id, input_tokens=child.total_input_tokens, output_tokens=child.total_output_tokens)

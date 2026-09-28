@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 import logging
 import time
 import uuid
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from nanocursor.client import LLMClient, LLMError
+from nanocursor.recovery import RecoveryError, RecoveryRequired, current_runtime as recovery_runtime
 from nanocursor.context import (
     CompactBoundary,
     CompactCircuitBreaker,
@@ -352,6 +353,8 @@ class StreamingExecutor:
     def _result(call: ToolCallComplete, task: asyncio.Task) -> _ToolExecResult:
         if task.cancelled():
             result = ToolResult("Tool execution cancelled; any completed side effects were not rolled back.", True)
+        elif isinstance(task.exception(), RecoveryError):
+            raise task.exception()
         elif task.exception() is not None:
             result = ToolResult(f"Tool execution error: {task.exception()}", True)
         else:
@@ -364,7 +367,14 @@ class StreamingExecutor:
                 task.cancel()
         if self._tasks:
             await asyncio.gather(*(task for _, task in self._tasks), return_exceptions=True)
-        return [self._result(call, task) for call, task in self._tasks]
+        results = []
+        for call, task in self._tasks:
+            try:
+                results.append(self._result(call, task))
+            except RecoveryError as exc:
+                results.append(_ToolExecResult(call.tool_id, call.tool_name,
+                    ToolResult(f"Execution stopped by recovery protection: {exc}", True, outcome_unknown=True), 0.0, False))
+        return results
 
 
 @dataclass
@@ -399,8 +409,10 @@ class Agent:
         session_work_dir: str | None = None,
         memory_recall_config: Any = None,
         execution_guard: Callable[[], str | None] | None = None,
+        recovery: Any = None,
     ) -> None:
         self.execution_guard = execution_guard
+        self.recovery = recovery
         self.client = client
         self.registry = registry
         self.protocol = protocol
@@ -527,6 +539,14 @@ class Agent:
             error=str(kwargs.get("error", "")),
         )
 
+    async def _run_hooks(self, event: str, context: HookContext) -> None:
+        ledger = self.recovery or recovery_runtime()
+        with ledger.activate() if ledger else nullcontext():
+            with bind_runtime(ToolRuntimeContext(cwd=Path(self.work_dir), agent_id=self.agent_id,
+                                                 sandbox_root=Path(self.sandbox_root) if self.sandbox_root else None,
+                                                 spawn_allowed=self.spawn_allowed, file_history=self.file_history)):
+                await self.hook_engine.run_hooks(event, context)
+
     def _infer_file_path(self, args: dict) -> str:
         return str(args.get("file_path", args.get("path", "")))
 
@@ -551,29 +571,73 @@ class Agent:
         from nanocursor.permissions import PathSandbox
         if self.approval_controller:
             self.approval_controller.revision += 1
+        if self.recovery:
+            self.recovery = self.recovery.switch(work_dir)
         self.work_dir = str(Path(work_dir).resolve())
         self.sandbox_root = self.work_dir if isolated else None
         self._file_versions.clear()
         if self.permission_checker:
+            self.permission_checker._session_allowed.clear()
             self.permission_checker.sandbox = PathSandbox(self.work_dir)
         callback = getattr(self, "on_work_dir_changed", None)
         if callback:
             callback(self.work_dir)
 
-    async def run(self, conversation: ConversationManager, *, interactive: bool = True) -> AsyncIterator[AgentEvent]:
-        try:
-            async for event in self._run(conversation, interactive=interactive):
-                yield event
-        finally:
-            # Also runs for provider failures and generator close, not only UI cancel.
-            cleanup = asyncio.create_task(self._close_pending_tool_turn(conversation))
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    continue
-            cleanup.result()
-            self._turn_expected_versions = None
+    async def run(self, conversation: ConversationManager, *, interactive: bool = True, source: str = "user") -> AsyncIterator[AgentEvent]:
+        runtime = self.recovery or recovery_runtime()
+        if runtime is not None:
+            runtime = runtime.child(self.work_dir)
+            self.recovery = runtime
+            if self.file_history is None or self.file_history.workspace_id != runtime.workspace_id:
+                from nanocursor.filehistory import FileHistory
+                self.file_history = runtime.file_history or FileHistory(
+                    self.work_dir, self.session_id or runtime.session_id or self.agent_id,
+                    store=runtime.store, workspace_id=runtime.workspace_id, generation=runtime.generation)
+                runtime.file_history = self.file_history
+        with runtime.activate() if runtime else nullcontext():
+            run_id = None
+            state = "interrupted"
+            try:
+                if runtime:
+                    run_id = runtime.begin_run(self.session_id or None,
+                                               source="subagent" if self.parent_id else source)
+                    # Child conversations are not appended to the parent's transcript.
+                    if not self.parent_id and conversation.history:
+                        runtime.persist_message(conversation.history[-1])
+                if self.file_history is not None and source != "notification" and (not self.parent_id or not self.file_history.has_snapshots()):
+                    latest = conversation.history[-1] if conversation.history else None
+                    self.file_history.begin_checkpoint(
+                        max(0, len(conversation.history) - 1),
+                        latest.content if latest and latest.role == "user" else "Agent run",
+                        conversation=conversation.history[:-1], run_id=run_id,
+                        generation=runtime.generation if runtime else None,
+                        env_injected=conversation.env_injected, ltm_injected=conversation.ltm_injected,
+                    )
+                async for event in self._run(conversation, interactive=interactive):
+                    yield event
+                state = "completed"
+            except RecoveryError as exc:
+                yield ErrorEvent(str(exc), code="recovery_required" if isinstance(exc, RecoveryRequired) else "recovery_storage_error")
+            finally:
+                # Always settle owned tasks, even when the consumer cancels a stream.
+                cleanup = asyncio.create_task(self._close_pending_tool_turn(conversation))
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
+                self._turn_expected_versions = None
+                if runtime and run_id:
+                    runtime.end_run(run_id, state=state)
+
+    def _persist_message(self, message) -> None:
+        runtime = self.recovery or recovery_runtime()
+        if runtime:
+            if self.parent_id:
+                runtime.persist_child_message(message, self.agent_id)
+            else:
+                runtime.persist_message(message)
 
     async def _close_pending_tool_turn(self, conversation: ConversationManager) -> None:
         pending = self._pending_tool_turn
@@ -581,18 +645,28 @@ class Agent:
             return
         results = await pending.executor.cancel_and_wait()
         response = pending.collector.response
-        if response.tool_calls:
-            if not pending.committed:
-                conversation.add_assistant_message(response.text, [
-                    ToolUseBlock(tc.tool_id, tc.tool_name, tc.arguments) for tc in response.tool_calls
-                ], thinking_blocks=[ConvThinkingBlock(tb.thinking, tb.signature) for tb in response.thinking_blocks])
+        if response.tool_calls and pending.committed:
+            by_id = {r.tool_id: r for r in results}
+            ledger = self.recovery or recovery_runtime()
+            if ledger:
+                for tc in response.tool_calls:
+                    known = ledger.result_record(tc.tool_id)
+                    if known:
+                        by_id[tc.tool_id] = _ToolExecResult(tc.tool_id, tc.tool_name,
+                            ToolResult(known["content"], known["is_error"]), 0.0, False)
             conversation.add_tool_results_message([
-                ToolResultBlock(r.tool_id, self._maybe_persist_or_truncate(r.tool_id, r.result.output), r.result.is_error)
-                for r in results
+                ToolResultBlock(tc.tool_id,
+                    self._maybe_persist_or_truncate(tc.tool_id, by_id[tc.tool_id].result.output)
+                    if tc.tool_id in by_id else "Interrupted before dispatch; this call was not executed or replayed.",
+                    by_id[tc.tool_id].result.is_error if tc.tool_id in by_id else True)
+                for tc in response.tool_calls
             ])
+            self._persist_message(conversation.history[-1])
         self._pending_tool_turn = None
 
     async def _run(self, conversation: ConversationManager, *, interactive: bool) -> AsyncIterator[AgentEvent]:
+        if self.recovery:
+            self.recovery.ensure_ready()
         self._current_conversation = conversation
         from nanocursor.memory.context import sync_memory
         from nanocursor.memory.recall import RecallOutcome
@@ -621,7 +695,7 @@ class Agent:
 
         if self.hook_engine:
             ctx = self._build_hook_context("session_start")
-            await self.hook_engine.run_hooks("session_start", ctx)
+            await self._run_hooks("session_start", ctx)
             for he in self._drain_hook_events():
                 yield he
 
@@ -644,7 +718,7 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_start")
-                await self.hook_engine.run_hooks("turn_start", ctx)
+                await self._run_hooks("turn_start", ctx)
                 for he in self._drain_hook_events():
                     yield he
 
@@ -655,7 +729,7 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("pre_send")
-                await self.hook_engine.run_hooks("pre_send", ctx)
+                await self._run_hooks("pre_send", ctx)
                 for he in self._drain_hook_events():
                     yield he
 
@@ -759,25 +833,27 @@ class Agent:
                 )
                 break
 
+            if self.recovery:
+                self.recovery.ensure_ready()
             collector = StreamCollector()
             executor = StreamingExecutor()
             self._pending_tool_turn = PendingToolTurn(collector, executor)
             self._turn_expected_versions = dict(self._file_versions)
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
             async for event in collector.consume(llm_stream):
-                if isinstance(event, ToolUseEvent):
-                    tc = collector.response.tool_calls[-1]
-                    tool = self.registry.get(tc.tool_name)
-                    approval = executor.request_permission if interactive else None
-                    executor.submit(tc, lambda tc=tc: self._execute_single_tool_direct(tc, approval),
-                                    concurrent=bool(tool and tool.is_concurrency_safe and tool.is_read_only))
                 yield event
 
             response = collector.response
+            conv_thinking = [ConvThinkingBlock(tb.thinking, tb.signature) for tb in response.thinking_blocks]
+            conversation.add_assistant_message(response.text, [
+                ToolUseBlock(tc.tool_id, tc.tool_name, tc.arguments) for tc in response.tool_calls
+            ], thinking_blocks=conv_thinking)
+            self._persist_message(conversation.history[-1])
+            self._pending_tool_turn.committed = bool(response.tool_calls)
 
             if self.hook_engine:
                 ctx = self._build_hook_context("post_receive", message=response.text)
-                await self.hook_engine.run_hooks("post_receive", ctx)
+                await self._run_hooks("post_receive", ctx)
                 for he in self._drain_hook_events():
                     yield he
 
@@ -796,14 +872,13 @@ class Agent:
             ]
 
             if response.stop_reason == "max_tokens" and not response.tool_calls:
-                if response.text:
-                    conversation.add_assistant_message(response.text, thinking_blocks=conv_thinking)
                 if output_recoveries < MAX_OUTPUT_TOKENS_RECOVERIES:
                     output_recoveries += 1
                     conversation.add_user_message(
                         "Output token limit hit. Resume directly from where you stopped. "
                         "Break remaining work into smaller pieces."
                     )
+                    self._persist_message(conversation.history[-1])
                     yield RetryEvent(
                         reason=f"max_tokens recovery {output_recoveries}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
                     )
@@ -816,9 +891,6 @@ class Agent:
 
             if not response.tool_calls:
                 self._pending_tool_turn = None
-                conversation.add_assistant_message(
-                    response.text, thinking_blocks=conv_thinking
-                )
                 # Final replies also become part of the current context. Anchor
                 # their usage before LoopComplete exposes the finished turn.
                 conversation.record_usage_anchor(
@@ -840,31 +912,21 @@ class Agent:
                         self.background_task_callback(task)
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
-                    await self.hook_engine.run_hooks("turn_end", ctx)
+                    await self._run_hooks("turn_end", ctx)
                     ctx = self._build_hook_context("session_end")
-                    await self.hook_engine.run_hooks("session_end", ctx)
+                    await self._run_hooks("session_end", ctx)
                     for he in self._drain_hook_events():
                         yield he
-                if self.file_history is not None:
-                    summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
-                    self.file_history.make_snapshot(len(conversation.history), summary, conversation=conversation.history,
-                                                    env_injected=conversation.env_injected,
-                                                    ltm_injected=conversation.ltm_injected)
                 yield LoopComplete(total_turns=iteration)
                 break
 
-            tool_uses = [
-                ToolUseBlock(
-                    tool_use_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    arguments=tc.arguments,
-                )
-                for tc in response.tool_calls
-            ]
-            conversation.add_assistant_message(
-                response.text, tool_uses, thinking_blocks=conv_thinking
-            )
-            self._pending_tool_turn.committed = True
+            for tc in response.tool_calls:
+                tool = self.registry.get(tc.tool_name)
+                approval = executor.request_permission if interactive else None
+                operation_id = self.recovery.begin_operation("tool", tc.tool_name, tc.arguments,
+                    cwd=self.work_dir, tool_call_id=tc.tool_id, state="planned") if self.recovery else None
+                executor.submit(tc, lambda tc=tc, operation_id=operation_id: self._execute_single_tool_direct(tc, approval, operation_id),
+                                concurrent=bool(tool and tool.is_concurrency_safe and tool.is_read_only))
             # 在 assistant 回复加入历史后锚定实际用量：基线（input + cache + output）
             # 覆盖到当前位置，因此下一轮迭代顶部的 auto-compact 检查只需对
             # 接下来追加的 tool results 做字符估算。
@@ -875,7 +937,7 @@ class Agent:
                 response.cache_creation,
             )
 
-            # 收集流式执行器中已提交的工具结果（工具在 LLM 流式输出期间已开始执行）
+            # Tool execution starts only after the full assistant envelope is durable.
             tool_results: list[ToolResultBlock] = []
             async for item in executor.iter_results():
                 if isinstance(item, PermissionRequest):
@@ -888,6 +950,7 @@ class Agent:
                 yield ToolResultEvent(br.tool_id, br.tool_name, content, br.result.is_error, br.elapsed)
 
             conversation.add_tool_results_message(tool_results)
+            self._persist_message(conversation.history[-1])
             self._pending_tool_turn = None
             parameter_error_turns = parameter_error_turns + 1 if any(
                 r.is_error and r.content.startswith(("Parameter JSON error:", "Parameter validation error:"))
@@ -912,7 +975,7 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_end")
-                await self.hook_engine.run_hooks("turn_end", ctx)
+                await self._run_hooks("turn_end", ctx)
                 for he in self._drain_hook_events():
                     yield he
             yield TurnComplete(turn=iteration)
@@ -942,6 +1005,7 @@ class Agent:
     async def _execute_single_tool_direct(
         self, tc: ToolCallComplete,
         approval: Callable[[ToolCallComplete], Awaitable[PermissionResponse]] | None = None,
+        operation_id: str | None = None,
     ) -> _ToolExecResult:
         start = time.monotonic()
         context = ToolRuntimeContext(
@@ -949,16 +1013,38 @@ class Agent:
             sandbox_root=Path(self.sandbox_root) if self.sandbox_root else None,
             spawn_allowed=self.spawn_allowed, file_versions=self._file_versions,
             expected_versions=self._turn_expected_versions if self._turn_expected_versions is not None else dict(self._file_versions),
+            file_history=self.file_history,
         )
-        with bind_runtime(context):
-            result = await self._execute_tool_core(tc, approval)
+        ledger = self.recovery or recovery_runtime()
+        if ledger and operation_id is None:
+            operation_id = ledger.begin_operation("tool", tc.tool_name, tc.arguments,
+                cwd=self.work_dir, tool_call_id=tc.tool_id, state="planned")
+        with ledger.activate() if ledger else nullcontext():
+            with ledger.operation_context(operation_id) if ledger else nullcontext():
+                with bind_runtime(context):
+                    try:
+                        result = await self._execute_tool_core(tc, approval, operation_id)
+                    except BaseException:
+                        if ledger and not ledger.store.failed:
+                            state = ledger.store.rows("SELECT state FROM operations WHERE operation_id=?", (operation_id,))[0]["state"]
+                            if state in {"planned", "waiting_approval"}:
+                                ledger.finish_not_started(operation_id, "Interrupted before dispatch; no authorization was reused")
+                        raise
+            if ledger:
+                state = ledger.store.rows("SELECT state FROM operations WHERE operation_id=?", (operation_id,))[0]["state"]
+                if state in {"planned", "waiting_approval"}:
+                    ledger.finish_not_started(operation_id, result.output, is_error=result.is_error)
         return _ToolExecResult(tc.tool_id, tc.tool_name, result, time.monotonic() - start,
                                self.registry.get(tc.tool_name) is None)
 
     async def _execute_tool_core(
         self, tc: ToolCallComplete,
         approval: Callable[[ToolCallComplete], Awaitable[PermissionResponse]] | None,
+        operation_id: str | None = None,
     ) -> ToolResult:
+        ledger = self.recovery or recovery_runtime()
+        if ledger:
+            ledger.ensure_ready()
         if self.execution_guard and (reason := self.execution_guard()):
             return ToolResult(reason, True)
         tool = self.registry.get(tc.tool_name)
@@ -966,6 +1052,8 @@ class Agent:
             return ToolResult(f"Error: unknown tool '{tc.tool_name}'", True)
         if not self.registry.is_enabled(tc.tool_name):
             return ToolResult(f"Error: tool '{tc.tool_name}' is disabled", True)
+        if tc.tool_name in {"EnterWorktree", "ExitWorktree"} and self._pending_tool_turn and len(self._pending_tool_turn.collector.response.tool_calls) != 1:
+            return ToolResult("Switch worktrees in a separate tool turn; this batch keeps its original working directory.", True)
         if tc.arguments_error:
             return ToolResult(f"Parameter JSON error: {tc.arguments_error}\nRaw arguments: {tc.raw_arguments}", True)
         try:
@@ -986,6 +1074,9 @@ class Agent:
             return ToolResult(reason, True)
         if not self.registry.is_enabled(tc.tool_name) or self.registry.get(tc.tool_name) is not tool:
             return ToolResult("Tool scope changed before execution", True)
+        execution_cwd, execution_sandbox = self.work_dir, self.sandbox_root
+        execution_mode = self.permission_mode
+        approved_once = False
         if self.permission_checker:
             controller = self.approval_controller
             smart = bool(controller and approval and self.parent_id is None
@@ -998,6 +1089,8 @@ class Agent:
             if decision.effect == "deny":
                 return ToolResult(f"Permission denied: {decision.reason}", True)
             if decision.effect == "ask":
+                if ledger:
+                    ledger.wait_for_approval(operation_id)
                 if approval is None:
                     return ToolResult("Permission denied: non-interactive agent cannot prompt user; authorize this operation in the main session", True)
                 request = None
@@ -1017,8 +1110,11 @@ class Agent:
                                    and tc.tool_name in {"WriteFile", "EditFile"}
                                    and tool.category == "write"
                                    and decision.source == "mode_fallback")
+                    reason = result.reason if result else decision.reason
+                    if tc.tool_name in {"WriteFile", "EditFile"} and not Path(file_path).is_relative_to(Path(self.work_dir)):
+                        reason += "；项目外写入不在本工作区检查点保护范围内"
                     prompt = PermissionCall(tc.tool_id, tc.tool_name, arguments,
-                                            approval_reason=result.reason if result else decision.reason,
+                                            approval_reason=reason,
                                             approval_cwd=self.work_dir,
                                             allow_always=not reviewed and getattr(tool, "allow_always", True),
                                             allow_edits=allow_edits)
@@ -1032,6 +1128,7 @@ class Agent:
                                 or self.registry.get(tc.tool_name) is not tool):
                             return ToolResult("Permission invalidated: enabling acceptEdits is not available for this request; retry the operation.", True)
                         self.set_permission_mode(PermissionMode.ACCEPT_EDITS)
+                        execution_mode = self.permission_mode
                         response = PermissionResponse.ALLOW
                     if response not in (PermissionResponse.ALLOW, PermissionResponse.ALLOW_ALWAYS):
                         if smart:
@@ -1039,6 +1136,7 @@ class Agent:
                         return ToolResult("Permission denied: 用户拒绝了此操作", True)
                     if reviewed and response == PermissionResponse.ALLOW_ALWAYS:
                         return ToolResult("Permission denied: automatic review permits single-use approval only", True)
+                approved_once = True
                 if request is not None:
                     # No await between this check and execute's preparation of
                     # the actual command. Changes require a fresh tool request.
@@ -1053,27 +1151,54 @@ class Agent:
                     content = extract_content(tc.tool_name, arguments)
                     self.permission_checker.rule_engine.append_local_rule(Rule(tc.tool_name, content, "allow"))
                     self.permission_checker.add_session_allow(tc.tool_name, content)
+        if (self.work_dir != execution_cwd or self.sandbox_root != execution_sandbox
+                or self.permission_mode != execution_mode or not self.registry.is_enabled(tc.tool_name)
+                or self.registry.get(tc.tool_name) is not tool):
+            return ToolResult("Permission invalidated: execution scope changed while awaiting approval; request a new operation.", True)
+        if self.permission_checker:
+            final_decision = self.permission_checker.check(tool, arguments)
+            if final_decision.effect == "deny" or (final_decision.effect == "ask" and not approved_once):
+                return ToolResult(f"Permission invalidated: {final_decision.reason}", True)
         result = ToolResult("Tool execution cancelled; side effects may already have occurred.", True)
         old_session = None
         if tc.tool_name in ("EnterWorktree", "ExitWorktree"):
             if not self.spawn_allowed:
                 return ToolResult("Sub-agents cannot change the parent worktree session.", True)
             old_session = tool._manager.get_current_session()
+        if ledger:
+            ledger.store.put_metadata("dispatch", operation_id, {"arguments": arguments, "cwd": self.work_dir})
+            ledger.start_operation(operation_id)
+        if self.file_history is not None and tc.tool_name not in {"WriteFile", "EditFile"} and not tool.is_read_only:
+            self.file_history.note_uncovered(f"{tc.tool_name}: changes outside built-in file checkpoints",
+                                             entry_id=operation_id)
         try:
-            result = await tool.execute(params)
+            with ledger.operation_context(operation_id) if ledger else nullcontext():
+                result = await tool.execute(params)
+            if ledger:
+                if result.outcome_unknown:
+                    ledger.mark_unknown(operation_id, result.output)
+                else:
+                    ledger.finish_operation(operation_id, result.output, is_error=result.is_error)
             if not result.is_error and tc.tool_name == "EnterWorktree":
                 session = tool._manager.get_current_session()
                 self.set_work_dir(session.worktree_path, isolated=True)
             elif not result.is_error and tc.tool_name == "ExitWorktree" and old_session:
                 self.set_work_dir(old_session.original_cwd)
-        except Exception as e:
-            result = ToolResult(f"Tool execution error: {e}", True)
-        finally:
-            if self.hook_engine:
-                ctx = self._build_hook_context("post_tool_use", tool_name=tc.tool_name,
-                                               tool_args=arguments, file_path=file_path,
-                                               error=result.output if result.is_error else "")
-                await self.hook_engine.run_hooks("post_tool_use", ctx)
+        except RecoveryError as exc:
+            if ledger and not ledger.store.failed:
+                ledger.mark_unknown(operation_id, f"Execution stopped by recovery protection: {exc}")
+            raise
+        except BaseException as exc:
+            if ledger:
+                ledger.mark_unknown(operation_id, f"Execution interrupted: {type(exc).__name__}: {exc}")
+            if not isinstance(exc, Exception):
+                raise
+            result = ToolResult(f"Tool execution error: {exc}; outcome requires recovery review.", True, outcome_unknown=True)
+        if self.hook_engine and not result.outcome_unknown:
+            ctx = self._build_hook_context("post_tool_use", tool_name=tc.tool_name,
+                                           tool_args=arguments, file_path=file_path,
+                                           error=result.output if result.is_error else "")
+            await self._run_hooks("post_tool_use", ctx)
         self._snapshot_for_recovery(tc, result)
         return result
 
@@ -1139,9 +1264,11 @@ class Agent:
 
         self._extracting = True
         try:
-            await self.memory_manager.extract(
-                self.client, conversation, self.protocol
-            )
+            if self.recovery:
+                self.recovery.ensure_ready()
+            await self.memory_manager.extract(self.client, conversation, self.protocol)
+        except RecoveryError:
+            raise
         except Exception as e:
             log.debug("Memory extraction failed: %s", e)
         finally:

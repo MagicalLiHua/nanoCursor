@@ -32,20 +32,20 @@ async def test_rewind_restores_completed_state_and_later_first_edits(tmp_path):
     existing.chmod(0o755)
     later.write_text("original")
     await write(writer, existing, "B")
-    history.make_snapshot(3, "B")
+    checkpoint = history.make_snapshot(3, "B")
     await write(writer, existing, "C")
     await write(writer, later, "changed")
     await write(writer, created, "new")
     history.make_snapshot(6, "C")
-    changed = history.rewind(0)
+    changed = history.rewind(checkpoint.checkpoint_id)
     assert set(changed) == {str(existing), str(later), str(created)}
     assert existing.read_text() == "B" and existing.stat().st_mode & 0o777 == 0o755
     assert later.read_text() == "original" and not created.exists()
-    assert history.rewind(0) == []
+    assert history.rewind(checkpoint.checkpoint_id) == []
     # Branching after a rewind must never overwrite an older immutable backup.
     await write(writer, existing, "D")
     history.make_snapshot(4, "D")
-    history.rewind(0)
+    history.rewind(checkpoint.checkpoint_id)
     assert existing.read_text() == "B"
 
 
@@ -55,12 +55,12 @@ async def test_external_edit_blocks_entire_restore(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     await write(writer, a, "first")
     await write(writer, b, "first")
-    history.make_snapshot(1, "first")
+    checkpoint = history.make_snapshot(1, "first")
     await write(writer, a, "second")
     await write(writer, b, "second")
     b.write_text("user changes")
     with pytest.raises(RewindError, match="outside the agent"):
-        history.rewind(0)
+        history.rewind(checkpoint.checkpoint_id)
     assert a.read_text() == "second" and b.read_text() == "user changes"
 
 
@@ -70,15 +70,15 @@ async def test_bad_backup_never_means_delete_file(tmp_path, damage):
     history, writer = state(tmp_path)
     path = tmp_path / "file"
     await write(writer, path, "first")
-    history.make_snapshot(1, "first")
-    backup = Path(history.get_snapshots()[0].backups[str(path)].backup_path)
+    checkpoint = history.make_snapshot(1, "first")
+    backup = Path(checkpoint.backups[str(path)].backup_path)
     await write(writer, path, "second")
     if damage == "missing":
         backup.unlink()
     else:
         backup.write_text("corrupt")
     with pytest.raises(RewindError, match="backup"):
-        history.rewind(0)
+        history.rewind(checkpoint.checkpoint_id)
     assert path.read_text() == "second"
 
 
@@ -87,13 +87,13 @@ async def test_rewind_does_not_follow_replaced_symlink(tmp_path):
     history, writer = state(tmp_path)
     path, other = tmp_path / "file", tmp_path / "other"
     await write(writer, path, "first")
-    history.make_snapshot(1, "first")
+    checkpoint = history.make_snapshot(1, "first")
     await write(writer, path, "second")
     other.write_text("private")
     path.unlink()
     path.symlink_to(other)
-    with pytest.raises(RewindError, match="outside the agent"):
-        history.rewind(0)
+    with pytest.raises(RewindError, match="symbolic links"):
+        history.rewind(checkpoint.checkpoint_id)
     assert other.read_text() == "private" and path.is_symlink()
 
 
@@ -105,7 +105,7 @@ async def test_rewind_conversation_after_compaction_persists_exact_state(tmp_pat
     conv.add_user_message("write first")
     conv.add_assistant_message("wrote first", thinking_blocks=[ThinkingBlock("reason", "signature")])
     await write(writer, path, "first")
-    history.make_snapshot(len(conv.history), "first", conversation=conv.history)
+    checkpoint = history.make_snapshot(len(conv.history), "first", conversation=conv.history)
     expected = copy.deepcopy(conv.history)
     await write(writer, path, "second")
     # Replacing/compacting the live history invalidates numeric indexes only;
@@ -117,7 +117,7 @@ async def test_rewind_conversation_after_compaction_persists_exact_state(tmp_pat
         session.append(message)
     a = agent(tmp_path)
     a.file_history = history
-    ctx = NS(agent=a, conversation=conv, session=session, args="1 1", ui=NS(add_system_message=Mock()), config={})
+    ctx = NS(agent=a, conversation=conv, session=session, args=f"{checkpoint.checkpoint_id} 1 apply", ui=NS(add_system_message=Mock()), config={})
     await _handle_rewind(ctx)
     assert path.read_text() == "first" and conv.history == expected
     session.close()
@@ -164,18 +164,27 @@ async def test_completed_agent_checkpoint_and_restore_options(tmp_path, option):
     a = agent(tmp_path, client, registry_for(writer))
     a.file_history = history
     conv, _ = await drive(a)
-    checkpoint_messages = copy.deepcopy(conv.history)
-    assert history.get_snapshots()[0].conversation == checkpoint_messages
+    checkpoint_messages = []
+    checkpoint = history.get_snapshots()[0]
+    assert checkpoint.conversation == checkpoint_messages
     await write(writer, path, "second")
     conv.add_user_message("later request")
     current_messages = copy.deepcopy(conv.history)
     controller = NS(authorization=NS(complete=True), revision=7, persist_authorization=Mock())
     a.approval_controller = controller
-    ctx = NS(agent=a, conversation=conv, session=None, args=f"1 {option}",
+    ctx = NS(agent=a, conversation=conv, session=None, args=f"{checkpoint.checkpoint_id} {option} apply",
              ui=NS(add_system_message=Mock()), config={})
     await _handle_rewind(ctx)
-    assert path.read_text() == ("second" if option == 2 else "first")
-    assert conv.history == (current_messages if option == 3 else checkpoint_messages)
+    if option == 2:
+        assert path.read_text() == "second"
+        assert "external effects were not undone" in conv.history[-1].content
+    else:
+        assert not path.exists()
+    if option == 3:
+        assert conv.history[:-1] == current_messages
+        assert "not covered" in conv.history[-1].content
+    elif option == 1:
+        assert conv.history == checkpoint_messages
     if option in (1, 2):
         assert not controller.authorization.complete and controller.revision == 8
         controller.persist_authorization.assert_called_once()

@@ -1,3 +1,3 @@
-from nanocursor.filehistory.history import FileHistory, Snapshot
+from nanocursor.filehistory.history import FileHistory, RestorePreview, RewindError, Snapshot
 
-__all__ = ["FileHistory", "Snapshot"]
+__all__ = ["FileHistory", "Snapshot", "RestorePreview", "RewindError"]

@@ -96,7 +96,8 @@ async def test_compat_eof_and_filter_are_not_success(finish, expected):
 
 
 @pytest.mark.asyncio
-async def test_failed_response_retains_already_executed_tool_without_replay(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure_after_completed_turn", [False, True])
+async def test_failed_response_respects_complete_envelope_boundary(tmp_path, monkeypatch, failure_after_completed_turn):
     import asyncio
 
     from nanocursor.agent import Agent, LoopComplete
@@ -121,11 +122,14 @@ async def test_failed_response_retains_already_executed_tool_without_replay(tmp_
                  item=NS(type="function_call", id="item", call_id="call", name="WriteFile"))
         yield NS(type="response.function_call_arguments.done", item_id="item", output_index=0,
                  arguments='{"file_path":"created.txt","content":"keep this result"}')
-        await asyncio.wait_for(written.wait(), timeout=2)
-        yield terminal("failed")
+        await asyncio.sleep(0)
+        yield terminal() if failure_after_completed_turn else terminal("failed")
 
     client = responses_client([])
-    client._client.responses.create = AsyncMock(return_value=stream())
+    responses = [stream()]
+    if failure_after_completed_turn:
+        responses.append(events([terminal("failed")]))
+    client._client.responses.create = AsyncMock(side_effect=responses)
     agent = Agent(client, registry, "openai", str(tmp_path), inject_environment_context=False)
     conversation = ConversationManager()
     conversation.add_user_message("Create a file")
@@ -133,13 +137,19 @@ async def test_failed_response_retains_already_executed_tool_without_replay(tmp_
     with pytest.raises(LLMError, match="model server failed"):
         async for event in agent.run(conversation, interactive=False):
             observed.append(event)
-    assert (tmp_path / "created.txt").read_text() == "keep this result"
-    assert len(writes) == 1 and not writes[0].is_error
     assert not any(isinstance(event, LoopComplete) for event in observed)
-    assert client._client.responses.create.await_count == 1
-    assert [tool.tool_use_id for message in conversation.history for tool in message.tool_uses] == ["call"]
+    calls = [tool.tool_use_id for message in conversation.history for tool in message.tool_uses]
     results = [tool for message in conversation.history for tool in message.tool_results]
-    assert len(results) == 1 and results[0].tool_use_id == "call" and not results[0].is_error
+    if failure_after_completed_turn:
+        assert (tmp_path / "created.txt").read_text() == "keep this result"
+        assert len(writes) == 1 and not writes[0].is_error
+        assert client._client.responses.create.await_count == 2
+        assert calls == ["call"]
+        assert len(results) == 1 and results[0].tool_use_id == "call" and not results[0].is_error
+    else:
+        assert not (tmp_path / "created.txt").exists()
+        assert not writes and not calls and not results
+        assert client._client.responses.create.await_count == 1
     assert agent._pending_tool_turn is None
 
 

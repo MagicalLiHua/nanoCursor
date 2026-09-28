@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import IO, Any
+from io import UnsupportedOperation
 
 from nanocursor.conversation import ConversationManager, Message, ThinkingBlock, ToolResultBlock, ToolUseBlock
 from nanocursor.storage import atomic_write
@@ -52,6 +53,12 @@ class SessionRecord:
     tool_use_id: str | None = None
     is_error: bool = False
     memory_context: dict | None = None
+    record_id: str | None = None
+    generation: int | None = None
+    run_id: str | None = None
+    model_turn_id: str | None = None
+    recovery_source: dict | None = None
+    thinking_blocks: list[dict] | None = None
 
     def to_jsonl(self) -> str:
         data: dict[str, Any] = {
@@ -65,6 +72,10 @@ class SessionRecord:
             data["is_error"] = self.is_error
         if self.memory_context is not None:
             data["memory_context"] = self.memory_context
+        for key in ("record_id", "generation", "run_id", "model_turn_id", "recovery_source", "thinking_blocks"):
+            value = getattr(self, key)
+            if value is not None:
+                data[key] = value
         return json.dumps(data, ensure_ascii=False)
 
 
@@ -72,6 +83,8 @@ class SessionRecord:
     def from_jsonl(cls, line: str) -> SessionRecord | None:
         try:
             data = json.loads(line)
+            if not isinstance(data, dict) or data.get("schema_version", 1) != 1:
+                return None
             return cls(
                 type=RecordType(data["type"]),
                 content=data["content"],
@@ -79,6 +92,10 @@ class SessionRecord:
                 tool_use_id=data.get("tool_use_id"),
                 is_error=data.get("is_error", False),
                 memory_context=data.get("memory_context") if isinstance(data.get("memory_context"), dict) else None,
+                record_id=data.get("record_id"), generation=data.get("generation"),
+                run_id=data.get("run_id"), model_turn_id=data.get("model_turn_id"),
+                recovery_source=data.get("recovery_source"),
+                thinking_blocks=data.get("thinking_blocks"),
             )
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             return None
@@ -126,6 +143,9 @@ class SessionRecord:
                     memory_context=deepcopy(message.memory_context))
             )
 
+        if message.role == "assistant" and message.thinking_blocks:
+            for record in records:
+                record.thinking_blocks = [asdict(block) for block in message.thinking_blocks]
         return records
 
 
@@ -305,11 +325,11 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                             )
                         )
                 messages.append(
-                    Message(role="assistant", content=text, tool_uses=tool_uses)
+                    Message(role="assistant", content=text, tool_uses=tool_uses, thinking_blocks=[ThinkingBlock(**block) for block in (record.thinking_blocks or [])])
                 )
             else:
                 messages.append(
-                    Message(role="assistant", content=record.content or "")
+                    Message(role="assistant", content=record.content or "", thinking_blocks=[ThinkingBlock(**block) for block in (record.thinking_blocks or [])])
                 )
 
     if pending_tool_results:
@@ -415,6 +435,8 @@ class Session:
         self._file = file
         self.meta = meta
         self._sessions_dir = sessions_dir
+        self._recovery = None
+        self._generation = 0
 
     def save_approval_context(self, context) -> None:
         self.append_record(SessionRecord(RecordType.APPROVAL_CONTEXT, context.to_dict(),
@@ -440,6 +462,12 @@ class Session:
                     elif record.type == RecordType.APPROVAL_CONTEXT:
                         context = AuthorizationContext.from_dict(record.content)
                         seen_context = True
+                    elif record.type == RecordType.HISTORY_BOUNDARY:
+                        # A crash may land after the rewind record but before
+                        # the UI publishes its cleared authorization snapshot.
+                        context = AuthorizationContext(complete=False)
+                        seen_context = False
+                        seen_content = True
                     else:
                         seen_content = True
         except (OSError, UnicodeError):
@@ -449,28 +477,96 @@ class Session:
         return context
 
     def append(self, message: Message) -> None:
+        if self._recovery is not None and self._recovery.session is not self:
+            with self._recovery.session_binding(self):
+                return self.append(message)
         records = SessionRecord.from_message(message)
-        for record in records:
-            self._file.write(record.to_jsonl() + "\n")
-        self._file.flush()
+        if self._recovery is not None:
+            # Persisted identity travels with the object through the host and UI;
+            # distinct identical messages are deliberately not deduplicated.
+            identities = getattr(message, "_recovery_record_ids", {})
+            session_key = self._recovery.session_key
+            stored = identities.get(session_key)
+            if stored is not None:
+                return
+            self._append_durable(records)
+            if message.tool_results:
+                for result, record in zip(message.tool_results, records):
+                    result.content = record.content
+                    result.is_error = record.is_error
+            identities[session_key] = [record.record_id for record in records]
+            setattr(message, "_recovery_record_ids", identities)
+        else:
+            for record in records:
+                self._file.write(record.to_jsonl() + "\n")
+            self._file.flush()
+            try:
+                os.fsync(self._file.fileno())
+            except (AttributeError, UnsupportedOperation):
+                pass  # Explicit in-memory test handles have no durable descriptor.
 
         self.meta.message_count += 1
         self.meta.last_active = datetime.now(timezone.utc)
-
         if not self.meta.title and message.role == "user" and message.content:
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
-
         self._save_metadata_after_append()
 
-    def append_record(self, record: SessionRecord) -> None:
-        """追加一条原始 SessionRecord（例如 compact_boundary 标记）。
+    def _append_durable(self, records: list[SessionRecord]) -> None:
+        try:
+            with self._recovery.session_binding(self):
+                self._append_durable_bound(records)
+        except OSError as exc:
+            from nanocursor.recovery import RecoveryStorageError
+            self._recovery.store.failed = True
+            raise RecoveryStorageError("Session projection failed; execution is stopped") from exc
 
-        与 append() 不同，此方法不会更新 message_count/title——boundary 是
-        结构性标记而非对话轮次。last_active 仍会更新，以保证 session 按最近
-        使用排序。
-        """
-        self._file.write(record.to_jsonl() + "\n")
+    def _append_durable_bound(self, records: list[SessionRecord]) -> None:
+        from nanocursor.recovery.store import identifier
+        runtime = self._recovery
+        for record in records:
+            payload = json.loads(record.to_jsonl())
+            if record.type == RecordType.TOOL_RESULT and record.tool_use_id:
+                completed = runtime.tool_record(record.tool_use_id)
+                if completed is not None:
+                    # The model-visible view may be deliberately truncated. The
+                    # complete observed value remains in operations.result.
+                    if completed["recovery_source"]["state"] == "outcome_unknown":
+                        marker = "[Host recovery observation: the external outcome is unknown. This is not a confirmed tool result; do not replay automatically.]"
+                        if not str(record.content).startswith(marker):
+                            record.content = marker + "\n" + str(record.content)
+                        record.is_error = True
+                    completed["content"] = record.content
+                    completed["is_error"] = record.is_error
+                    payload = completed
+            payload.setdefault("record_id", identifier("record"))
+            if record.recovery_source is None:
+                if runtime.run_id is not None:
+                    payload.setdefault("run_id", runtime.run_id)
+                if runtime.model_turn_id is not None:
+                    payload.setdefault("model_turn_id", runtime.model_turn_id)
+            saved = runtime.store.enqueue_record(runtime.session_key, payload,
+                new_generation=record.type == RecordType.HISTORY_BOUNDARY)
+            record.record_id = saved["record_id"]
+            record.generation = saved["generation"]
+            runtime.generation = saved["generation"]
+            self._generation = saved["generation"]
+        path = self._sessions_dir / f"{self.session_id}.jsonl"
         self._file.flush()
+        runtime.store.project(runtime.session_key, path)
+        self._file.close()
+        self._file = path.open("a", encoding="utf-8")
+
+    def append_record(self, record: SessionRecord) -> None:
+        """Persist structural records through the same complete-payload outbox."""
+        if self._recovery is not None:
+            self._append_durable([record])
+        else:
+            self._file.write(record.to_jsonl() + "\n")
+            self._file.flush()
+            try:
+                os.fsync(self._file.fileno())
+            except (AttributeError, UnsupportedOperation):
+                pass
         self.meta.last_active = datetime.now(timezone.utc)
         self._save_metadata_after_append()
 
@@ -482,9 +578,15 @@ class Session:
                 f"Session records were saved, but metadata could not be updated: {exc}"
             ) from exc
 
-    def reset_history(self, messages: list[Message]) -> None:
+    def reset_history(self, messages: list[Message], *, record_id: str | None = None) -> None:
+        boundary = make_history_boundary(messages)
+        boundary.record_id = record_id
+        if record_id is not None and self._recovery is not None:
+            old = self._recovery.store.rows("SELECT payload FROM outbox WHERE record_id=?", (record_id,))
+            if old:
+                boundary = SessionRecord.from_jsonl(old[0]["payload"])
         try:
-            self.append_record(make_history_boundary(messages))
+            self.append_record(boundary)
         except SessionMetadataError:
             self.meta.message_count = len(messages)
             raise
@@ -552,10 +654,23 @@ def _generate_session_id() -> str:
 
 
 class SessionManager:
-    def __init__(self, work_dir: str) -> None:
+    def __init__(self, work_dir: str, *, recovery=None) -> None:
+        self._recovery = recovery
         self._sessions_dir = Path(work_dir) / SESSIONS_DIR
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._sessions_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if recovery is not None:
+            from nanocursor.recovery.store import sync_directory
+            sync_directory(self._sessions_dir.parent)
+            sync_directory(self._sessions_dir.parent.parent)
 
+
+    @property
+    def recovery_runtime(self):
+        return self._recovery
+
+    @recovery_runtime.setter
+    def recovery_runtime(self, runtime):
+        self._recovery = runtime
 
     def create(self) -> Session:
         session_id = _generate_session_id()
@@ -563,13 +678,19 @@ class SessionManager:
         meta = SessionMeta(id=session_id)
         meta.save(self._sessions_dir / f"{session_id}.meta")
 
-        file = open(jsonl_path, "a", encoding="utf-8")  # noqa: SIM115
-        return Session(
-            session_id=session_id,
-            file=file,
-            meta=meta,
-            sessions_dir=self._sessions_dir,
+        fd = os.open(jsonl_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        file = os.fdopen(fd, "a", encoding="utf-8")
+        if self._recovery is not None:
+            from nanocursor.recovery.store import sync_directory
+            sync_directory(self._sessions_dir)
+            sync_directory(self._sessions_dir.parent)
+            sync_directory(self._sessions_dir.parent.parent)
+        session = Session(
+            session_id=session_id, file=file, meta=meta, sessions_dir=self._sessions_dir,
         )
+        if self._recovery is not None:
+            self._recovery.bind_session(session)
+        return session
 
 
     def list(self) -> list[SessionMeta]:
@@ -591,6 +712,14 @@ class SessionManager:
         meta = SessionMeta.load(meta_path)
         if meta is None:
             return None
+
+        if self._recovery is not None:
+            temporary = Session(session_id, jsonl_path.open("a", encoding="utf-8"), meta, self._sessions_dir)
+            try:
+                with self._recovery.session_binding(temporary):
+                    self._recovery.reconcile_session()
+            finally:
+                temporary.close()
 
         raw_records: list[SessionRecord | None] = []
         last_line = b""
@@ -626,6 +755,9 @@ class SessionManager:
             records.append(record)
 
         valid_count = validate_message_chain(records)
+        if self._recovery is not None and valid_count != len(records) and any(record.record_id for record in records[valid_count:]):
+            from nanocursor.recovery import RecoveryRequired
+            raise RecoveryRequired(message="This protected session still has an unfinished tool batch; inspect its live execution before resuming")
         needs_recovery = needs_recovery or valid_count != len(records)
         records = records[:valid_count]
         messages = records_to_messages(records)
@@ -656,13 +788,31 @@ class SessionManager:
             session.close()
             raise
 
+        if self._recovery is not None:
+            session._recovery = self._recovery
+            if self._recovery.session is None or self._recovery.session._file.closed:
+                self._recovery.bind_session(session)
         return ResumeResult(
             session=session,
             messages=messages,
             last_active=last_active,
         )
 
+    def _has_recovery_evidence(self, session_id: str) -> bool:
+        if self._recovery is None:
+            return False
+        store = self._recovery.store
+        if store.rows("SELECT 1 FROM operations WHERE session_id=? LIMIT 1", (session_id,)):
+            return True
+        tables = {row["name"] for row in store.rows("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("checkpoint_records", "file_edit_records", "file_restores"):
+            if table in tables and store.rows(f"SELECT 1 FROM {table} WHERE session_id=? LIMIT 1", (session_id,)):
+                return True
+        return False
+
     def delete(self, session_id: str) -> bool:
+        if self._has_recovery_evidence(session_id):
+            return False
         jsonl_path = self._sessions_dir / f"{session_id}.jsonl"
         meta_path = self._sessions_dir / f"{session_id}.meta"
 
@@ -682,7 +832,7 @@ class SessionManager:
         for meta_path in list(self._sessions_dir.glob("*.meta")):
             meta = SessionMeta.load(meta_path)
             if meta is not None and meta.last_active < cutoff:
-                self.delete(meta.id)
-                removed += 1
+                if self.delete(meta.id):
+                    removed += 1
 
         return removed

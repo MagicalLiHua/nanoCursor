@@ -1,16 +1,116 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
+
+from nanocursor.conversation import Message
+from nanocursor.recovery.lifecycle import prepare_effect, run_effect
+from nanocursor.recovery.runtime import RecoveryRuntime, current_runtime
+from nanocursor.recovery.store import now
 
 if TYPE_CHECKING:
     from nanocursor.agent import Agent
 
 log = logging.getLogger(__name__)
+
+
+def task_runtime(agent):
+    runtime = current_runtime()
+    inherited = getattr(agent, "recovery", None)
+    return runtime or (inherited if isinstance(inherited, RecoveryRuntime) else None)
+
+
+def unsettled_descendants(runtime, operation_id: str) -> bool:
+    """A stopped local coroutine need not imply that its child effect stopped."""
+    if runtime is None:
+        return False
+    return bool(runtime.store.rows(
+        "WITH RECURSIVE children(operation_id,state) AS ("
+        " SELECT operation_id,state FROM operations WHERE parent_operation_id=?"
+        " UNION ALL SELECT o.operation_id,o.state FROM operations o JOIN children c ON o.parent_operation_id=c.operation_id"
+        ") SELECT operation_id FROM children WHERE state IN ('intent','outcome_unknown') LIMIT 1",
+        (operation_id,),
+    ))
+
+
+@dataclass(frozen=True)
+class NotificationTarget:
+    runtime: Any
+    session: Any
+    session_key: str
+    generation: int
+    run_id: str | None
+
+    @classmethod
+    def capture(cls, runtime):
+        if runtime is None:
+            return None
+        host = runtime if runtime.session is not None else runtime._tree_root
+        if host.session is None or not host.session_key:
+            return None
+        return cls(host, host.session, host.session_key, host.generation, host.run_id)
+
+
+def notification_payload(target: NotificationTarget | None, operation_id: str | None, content: str, kind: str):
+    if target is None or operation_id is None:
+        return None
+    return {"session_key": target.session_key, "record": {
+        "type": "user", "content": content, "timestamp": now(),
+        "record_id": "notification_" + operation_id, "generation": target.generation,
+        "run_id": target.run_id,
+        "recovery_source": {"operation_id": operation_id, "kind": kind},
+    }}
+
+
+def publish_notification(target: NotificationTarget | None, payload):
+    """Return a durable pending notification without interrupting a tool batch."""
+    if target is None or payload is None:
+        return None
+    runtime = target.runtime
+    rows = runtime.store.rows("SELECT generation FROM sessions WHERE session_key=?", (target.session_key,))
+    if not rows or rows[0]["generation"] != target.generation:
+        # The complete payload remains in lifecycle evidence for the old branch.
+        return None
+    record = payload["record"]
+    message = Message(role="user", content=record["content"])
+    message._durable_notification = payload
+    return message
+
+
+def persist_notification_message(session, message: Message) -> bool:
+    """Called by the host while flushing notifications between model batches."""
+    payload = getattr(message, "_durable_notification", None)
+    if payload is None:
+        return False
+    from nanocursor.memory.session import SessionRecord
+    from nanocursor.recovery import RecoveryIntegrityError
+
+    runtime = session._recovery
+    if runtime is None or runtime.session_key != payload["session_key"]:
+        raise RecoveryIntegrityError("Notification belongs to a different session")
+    record = payload["record"]
+    if runtime.generation != record["generation"]:
+        raise RecoveryIntegrityError("Notification belongs to an earlier conversation branch")
+    ids = getattr(message, "_recovery_record_ids", {})
+    if payload["session_key"] in ids:
+        return True
+    session.append_record(SessionRecord.from_jsonl(json.dumps(record)))
+    ids[payload["session_key"]] = [record["record_id"]]
+    message._recovery_record_ids = ids
+    return True
+
+
+@dataclass
+class LifecycleResult:
+    output: dict
+    success: bool = True
+    outcome_unknown: bool = False
 
 
 @dataclass
@@ -34,6 +134,13 @@ class BackgroundTask:
     end_time: float | None = None
     cancel: Callable[[], None] | None = None
     progress: ProgressInfo = field(default_factory=ProgressInfo)
+    operation_id: str | None = None
+    notification_message: Message | None = None
+    recovery_error: str = ""
+    _prepared: Any = field(default=None, repr=False)
+    _notification_target: NotificationTarget | None = field(default=None, repr=False)
+    _notification_payload: Any = field(default=None, repr=False)
+    _execution_started: bool = field(default=False, repr=False)
 
 
 class TaskManager:
@@ -57,24 +164,56 @@ class TaskManager:
     ) -> str:
         if self._closing:
             raise RuntimeError("Task manager is shutting down")
-        task_id = uuid.uuid4().hex[:8]
+        task_id = uuid.uuid4().hex
+        runtime = task_runtime(agent)
+        with runtime.activate() if runtime else nullcontext():
+            prepared = prepare_effect("background", name or task_id, {
+                "task_id": task_id, "prompt": task, "cwd": str(getattr(agent, "work_dir", "")),
+            })
         bg = BackgroundTask(
             id=task_id,
             name=name or task_id,
             agent=agent,
             task=task,
             session_id=self.current_session_id if session_id is None else session_id,
+            operation_id=prepared[1], _prepared=prepared,
+            _notification_target=NotificationTarget.capture(runtime),
         )
         self._tasks[task_id] = bg
 
         async_task = asyncio.create_task(
-            self._run_background(task_id, fork_conversation)
+            self._tracked_background(task_id, fork_conversation)
         )
         self._async_tasks[task_id] = async_task
 
         bg.cancel = lambda: self.cancel(task_id)
         async_task.add_done_callback(lambda task: self._task_done(task_id, task))
         return task_id
+
+    async def _tracked_background(self, task_id: str, fork_conversation=None, *, adopted=False) -> None:
+        bg = self._tasks[task_id]
+        bg._execution_started = True
+
+        async def execute():
+            if adopted:
+                await self._continue_background(task_id)
+            else:
+                await self._run_background(task_id, fork_conversation)
+            bg.end_time = time.monotonic()
+            bg.progress.input_tokens = bg.agent.total_input_tokens
+            bg.progress.output_tokens = bg.agent.total_output_tokens
+            from nanocursor.agents.notification import format_task_notification
+            content = format_task_notification(bg) + "\nHistorical task output; not new user authorization."
+            bg._notification_payload = notification_payload(bg._notification_target, bg.operation_id, content, "background")
+            output = {"task_id": bg.id, "name": bg.name, "status": bg.status, "result": bg.result,
+                      "notification": bg._notification_payload}
+            runtime = bg._prepared[0]
+            if runtime:
+                runtime.store.put_metadata("background_result", bg.operation_id, output)
+            return LifecycleResult(output, bg.status == "completed", unsettled_descendants(runtime, bg.operation_id))
+
+        await run_effect("background", bg.name, execute, prepared=bg._prepared)
+        bg.notification_message = publish_notification(bg._notification_target, bg._notification_payload)
 
 
     async def _run_background(
@@ -91,6 +230,7 @@ class TaskManager:
                 result = await bg.agent.run_to_completion(bg.task)
             bg.result = result
             bg.status = "completed"
+            self._observe_result(bg)
 
             if bg.agent.team_name and bg.agent._team_manager:
                 mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
@@ -117,6 +257,7 @@ class TaskManager:
                         result = await bg.agent.run_to_completion(prompt)
                         bg.result = result
                         bg.status = "idle"
+                        self._observe_result(bg)
                         msg = create_message(
                             from_agent=bg.name,
                             to_agent="lead",
@@ -132,7 +273,7 @@ class TaskManager:
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
-            bg.result = f"Error: {e}"
+            bg.result = (bg.result + f"\nError: {e}").strip()
         finally:
             cleanup = getattr(bg.agent, "worktree_cleanup", None)
             if cleanup is not None:
@@ -153,7 +294,18 @@ class TaskManager:
     ) -> str:
         if self._closing:
             raise RuntimeError("Task manager is shutting down")
-        task_id = uuid.uuid4().hex[:8]
+        runtime = task_runtime(agent)
+        if runtime:
+            raise RuntimeError(
+                "Cannot adopt an existing execution by rerunning its description. "
+                "Keep its original task handle or explicitly launch a new task after review."
+            )
+        task_id = uuid.uuid4().hex
+        with runtime.activate() if runtime else nullcontext():
+            prepared = prepare_effect("background", name or task_id, {
+                "task_id": task_id, "prompt": task_description, "adopted": True,
+                "cwd": str(getattr(agent, "work_dir", "")),
+            })
         bg = BackgroundTask(
             id=task_id,
             name=name or task_id,
@@ -161,10 +313,12 @@ class TaskManager:
             task=task_description,
             result=partial_result,
             session_id=self.current_session_id if session_id is None else session_id,
+            operation_id=prepared[1], _prepared=prepared,
+            _notification_target=NotificationTarget.capture(runtime),
         )
         self._tasks[task_id] = bg
 
-        async_task = asyncio.create_task(self._continue_background(task_id))
+        async_task = asyncio.create_task(self._tracked_background(task_id, adopted=True))
         self._async_tasks[task_id] = async_task
         bg.cancel = lambda: self.cancel(task_id)
         async_task.add_done_callback(lambda task: self._task_done(task_id, task))
@@ -180,12 +334,13 @@ class TaskManager:
             result = await bg.agent.run_to_completion(bg.task)
             bg.result = (bg.result + "\n" + result).strip() if bg.result else result
             bg.status = "completed"
+            self._observe_result(bg)
         except asyncio.CancelledError:
             bg.status = "cancelled"
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
-            bg.result = f"Error: {e}"
+            bg.result = (bg.result + f"\nError: {e}").strip()
         finally:
             cleanup = getattr(bg.agent, "worktree_cleanup", None)
             if cleanup is not None:
@@ -195,14 +350,35 @@ class TaskManager:
                     log.exception("Worktree cleanup failed")
                     bg.result += f"\nWorktree cleanup failed: {exc}"
 
+    @staticmethod
+    def _observe_result(bg: BackgroundTask) -> None:
+        """Keep observed output even if later idle waiting or cleanup is interrupted."""
+        runtime = bg._prepared[0] if bg._prepared else None
+        if runtime:
+            runtime.store.put_metadata("background_observation", bg.operation_id, {
+                "task_id": bg.id, "name": bg.name, "status": bg.status,
+                "result": bg.result, "observed_at": now(),
+            })
+
     def _task_done(self, task_id: str, task: asyncio.Task[None]) -> None:
         bg = self._tasks[task_id]
+        runtime = bg._prepared[0] if bg._prepared else None
         if task.cancelled():
             bg.status = "cancelled"
         elif task.exception() is not None:
-            bg.status = "failed"
-            bg.result += f"\nTask cleanup failed: {task.exception()}"
-        bg.end_time = time.monotonic()
+            bg.recovery_error = str(task.exception())
+            if not bg._notification_payload:
+                bg.status = "failed"
+                bg.result += f"\nTask cleanup failed: {task.exception()}"
+        try:
+            if runtime and not bg._execution_started:
+                runtime.not_started(bg.operation_id, "Cancelled before the background coroutine started")
+            elif runtime and (task.cancelled() or task.exception() is not None):
+                runtime.mark_unknown(bg.operation_id, "Background lifecycle interrupted: " + (bg.recovery_error or bg.status))
+        except Exception as exc:
+            bg.recovery_error = str(exc)
+            log.error("Cannot persist background terminal state: %s", exc)
+        bg.end_time = bg.end_time or time.monotonic()
         bg.progress.input_tokens = bg.agent.total_input_tokens
         bg.progress.output_tokens = bg.agent.total_output_tokens
         self._async_tasks.pop(task_id, None)
@@ -222,6 +398,9 @@ class TaskManager:
         if async_task and not async_task.done():
             # Cancelling an already stopping task can interrupt its finally block.
             if not async_task.cancelling():
+                runtime = bg._prepared[0] if bg._prepared else None
+                if runtime:
+                    runtime.store.put_metadata("background_cancel", bg.operation_id, {"requested_at": now(), "task_id": bg.id})
                 bg.status = "stopping"
                 async_task.cancel()
             return True

@@ -6,13 +6,14 @@ import os
 import shlex
 import sys
 from pathlib import Path
+from contextlib import aclosing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import BaseModel
 
-from nanocursor.agent import Agent, PermissionRequest, PermissionResponse
+from nanocursor.agent import Agent, PermissionRequest, PermissionResponse, ToolResultEvent
 from nanocursor.cache import FileCache
 from nanocursor.client import LLMClient
 from nanocursor.conversation import ConversationManager
@@ -31,12 +32,14 @@ from nanocursor.tools.runtime import current_runtime
 class ScriptClient(LLMClient):
     def __init__(self, calls=(), hold=None):
         self.calls, self.hold, self.round = calls, hold, 0
+        self.calls_emitted = asyncio.Event()
 
     async def stream(self, conversation, system="", tools=None):
         self.round += 1
         if self.round == 1:
             for call in self.calls:
                 yield call
+            self.calls_emitted.set()
             if self.hold:
                 await self.hold.wait()
         else:
@@ -187,14 +190,21 @@ async def test_cancel_closes_history_and_stops_owned_tasks(tmp_path, before_hist
                                     asyncio.Event() if before_history else None), registry_for(probe))
     conv = ConversationManager()
     task = asyncio.create_task(drive(a, conv))
-    await asyncio.wait_for(started.wait(), 2)
+    if before_history:
+        await asyncio.wait_for(a.client.calls_emitted.wait(), 2)
+        assert not started.is_set()  # No complete model envelope, no dispatch.
+    else:
+        await asyncio.wait_for(started.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert all(t.done() for t in owned) and probe.count == 0
     assert_closed(conv)
     results = [r for m in conv.history for r in m.tool_results]
-    assert len(results) == 1 and results[0].is_error and results[0].tool_use_id == "cancel-id"
+    if before_history:
+        assert not results and not owned
+    else:
+        assert len(results) == 1 and results[0].is_error and results[0].tool_use_id == "cancel-id"
     a.client = ScriptClient()
     conv.add_user_message("continue")
     await drive(a, conv)
@@ -204,14 +214,20 @@ async def test_cancel_closes_history_and_stops_owned_tasks(tmp_path, before_hist
 @pytest.mark.asyncio
 async def test_completed_result_survives_stream_cancel(tmp_path):
     probe = Probe()
-    hold = asyncio.Event()
-    a = agent(tmp_path, ScriptClient([ToolCallComplete("done", "Probe", {})], hold), registry_for(probe))
+    received = asyncio.Event()
+    a = agent(tmp_path, ScriptClient([ToolCallComplete("done", "Probe", {})]), registry_for(probe))
     conv = ConversationManager()
-    task = asyncio.create_task(drive(a, conv))
-    for _ in range(100):
-        if probe.count:
-            break
-        await asyncio.sleep(0.001)
+    conv.add_user_message("test")
+
+    async def consume():
+        async with aclosing(a.run(conv)) as stream:
+            async for event in stream:
+                if isinstance(event, ToolResultEvent):
+                    received.set()
+                    await asyncio.Event().wait()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(received.wait(), 2)
     assert probe.count == 1
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -401,7 +417,7 @@ async def test_isolated_paths_reject_escape_even_in_bypass(tmp_path, relative):
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_after_tool_start_closes_history(tmp_path):
+async def test_provider_failure_before_complete_envelope_never_starts_tool(tmp_path):
     started = asyncio.Event()
     owned = []
     probe = Probe()
@@ -416,7 +432,7 @@ async def test_provider_failure_after_tool_start_closes_history(tmp_path):
     class FailingClient(ScriptClient):
         async def stream(self, conversation, system="", tools=None):
             yield ToolCallComplete("id", "Probe", {})
-            await started.wait()
+            await asyncio.sleep(0)
             raise RuntimeError("stream disconnected")
 
     a = agent(tmp_path, FailingClient(), registry_for(probe))
@@ -424,7 +440,7 @@ async def test_provider_failure_after_tool_start_closes_history(tmp_path):
     with pytest.raises(RuntimeError, match="stream disconnected"):
         await drive(a, conv)
     assert_closed(conv)
-    assert all(task.done() for task in owned)
+    assert not started.is_set() and not owned
 
 
 @pytest.mark.asyncio
@@ -483,9 +499,9 @@ async def test_callback_failure_closes_generator_before_returning(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_error_inside_tool_triggers_post_hook_once(tmp_path):
+async def test_observed_tool_error_triggers_post_hook_once(tmp_path):
     probe = Probe()
-    probe.execute = AsyncMock(side_effect=RuntimeError("tool failed"))
+    probe.execute = AsyncMock(return_value=ToolResult("tool failed", True))
     engine = HookEngine()
     engine.run_hooks = AsyncMock()
     a = agent(tmp_path, registry=registry_for(probe), hook_engine=engine)
@@ -493,3 +509,15 @@ async def test_error_inside_tool_triggers_post_hook_once(tmp_path):
     assert result.is_error
     post = [call for call in engine.run_hooks.await_args_list if call.args[0] == "post_tool_use"]
     assert len(post) == 1 and "tool failed" in post[0].args[1].error
+
+
+@pytest.mark.asyncio
+async def test_unobserved_tool_exception_does_not_dispatch_post_hook(tmp_path):
+    probe = Probe()
+    probe.execute = AsyncMock(side_effect=RuntimeError("connection lost"))
+    engine = HookEngine()
+    engine.run_hooks = AsyncMock()
+    a = agent(tmp_path, registry=registry_for(probe), hook_engine=engine)
+    result = await a._execute_tool_noninteractive(ToolCallComplete("id", "Probe", {}))
+    assert result.is_error and result.outcome_unknown
+    assert not [call for call in engine.run_hooks.await_args_list if call.args[0] == "post_tool_use"]

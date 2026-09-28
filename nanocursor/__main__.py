@@ -12,6 +12,7 @@ from contextlib import aclosing
 from nanocursor.config import ConfigError, load_config
 from nanocursor.hooks import HookConfigError, HookEngine, load_hooks
 from nanocursor.permissions import PermissionMode
+from nanocursor.recovery import RecoveryRuntime, RecoveryError, RecoveryRequired
 
 
 def main() -> None:
@@ -21,7 +22,7 @@ def main() -> None:
     from nanocursor.workspace import WorkspaceContext
 
     parser = argparse.ArgumentParser(prog="nanocursor", description="nanoCursor AI coding assistant")
-    parser.add_argument("target", nargs="?", help="Workspace path, or setup / doctor")
+    parser.add_argument("target", nargs="?", help="Workspace path, or setup / doctor / recover")
     parser.add_argument("--cwd", metavar="PATH", help="Workspace directory (defaults to current directory)")
     parser.add_argument("--version", action="version", version=f"nanoCursor {get_version()}")
     parser.add_argument("--mode", choices=[m.value for m in PermissionMode], default=None)
@@ -31,16 +32,31 @@ def main() -> None:
                             help="Use API_KEY, BASE_URL and MODEL from this environment group for this invocation")
     parser.add_argument("-p", metavar="PROMPT", default=None, help="Run one prompt non-interactively")
     parser.add_argument("--output-format", choices=["text", "stream-json"], default="text")
-    parser.add_argument("--remote", action="store_true", help="Serve browser UI on 0.0.0.0:18888")
-    parser.add_argument("--json", action="store_true", help="Machine-readable doctor report")
+    parser.add_argument("--remote", action="store_true", help="Unavailable: browser execution is suspended pending recovery support")
+    parser.add_argument("--json", action="store_true", help="Machine-readable doctor or recovery report")
     parser.add_argument("--network", action="store_true", help="Doctor: send a short model test (may incur API charges)")
     parser.add_argument("--trust-project", action="store_true", help="Approve this invocation's project settings, including hooks, MCP and permissions")
+    parser.add_argument("--worktree", nargs="?", const="auto", metavar="NAME", help="Start in a new isolated Git worktree")
+    parser.add_argument("--worktree-from-commit", action="store_true", help="Explicitly accept leaving uncommitted source changes behind")
+    parser.add_argument("--list", action="store_true", help="Recover: list unresolved operations")
+    parser.add_argument("--ack", metavar="OPERATION_ID", help="Recover: record a manual acknowledgement of an unknown outcome")
+    parser.add_argument("--note", help="Recover: describe your manual checks and accepted uncertainty")
     args = parser.parse_args()
-    command = args.target if args.target in {"setup", "doctor"} else "run"
+    command = args.target if args.target in {"setup", "doctor", "recover"} else "run"
     if args.target and command == "run" and args.cwd:
         parser.error("Specify a positional path or --cwd, not both")
-    if (args.json or args.network) and command != "doctor":
-        parser.error("--json and --network are only available with doctor")
+    if args.network and command != "doctor":
+        parser.error("--network is only available with doctor")
+    if args.json and command not in {"doctor", "recover"}:
+        parser.error("--json is only available with doctor or recover")
+    if (args.list or args.ack or args.note) and command != "recover":
+        parser.error("--list, --ack and --note are only available with recover")
+    if bool(args.ack) != bool(args.note):
+        parser.error("--ack and --note must be used together")
+    if args.worktree_from_commit and not args.worktree:
+        parser.error("--worktree-from-commit requires --worktree")
+    if args.worktree and (command != "run" or args.remote):
+        parser.error("--worktree requires local agent execution")
     if command != "run" and (args.p is not None or args.remote or args.mode or args.provider or args.trust_project):
         parser.error("Agent options cannot be used with setup or doctor")
     if command == "setup" and args.env:
@@ -81,9 +97,33 @@ def main() -> None:
                 sys.exit(130)
             return
         workspace = WorkspaceContext.resolve(args.cwd or (args.target if command == "run" else None))
+        if command == "recover":
+            from nanocursor.commands.handlers.recover import recovery_report, format_report, busy_report
+            from nanocursor.recovery import RecoveryStore, WorkspaceBusy
+            store = RecoveryStore()
+            runtime = None
+            try:
+                try:
+                    runtime = RecoveryRuntime.acquire(workspace.active_cwd, store=store)
+                except WorkspaceBusy:
+                    if args.ack:
+                        raise
+                    report = busy_report(store, workspace.active_cwd)
+                else:
+                    if args.ack:
+                        runtime.acknowledge(args.ack, args.note)
+                    report = recovery_report(runtime)
+                print(redact(json.dumps(report, ensure_ascii=False)) if args.json else format_report(report))
+            finally:
+                if runtime:
+                    runtime.close()
+                store.close()
+            return
         if command == "doctor":
             from nanocursor.diagnostics import run_doctor
             sys.exit(run_doctor(workspace, json_output=args.json, network=args.network, env_provider=args.env))
+        if args.remote:
+            raise ConfigError("Browser execution is deferred until durable recovery is connected; use local nanocursor or -p")
         if args.p is None and not args.remote and not interactive:
             raise ConfigError("Interactive mode requires a terminal. Use -p PROMPT for non-interactive execution")
         try:
@@ -130,13 +170,57 @@ def main() -> None:
                 # Re-enter the same trust/selection checks; setup may alter profiles.
                 return main()
             raise CredentialError("No credential available. Run nanocursor setup or set the configured environment variable")
-        if interactive and args.p is None and not args.remote:
+        if args.worktree:
+            from nanocursor.worktree import WorktreeManager
+            from nanocursor.worktree.manager import WorktreeError
+            from nanocursor.config import WorktreeConfig
+            import subprocess
+            import uuid
+            try:
+                wt_config = config.worktree or WorktreeConfig()
+                manager = WorktreeManager(str(workspace.workspace_dir), symlink_directories=wt_config.symlink_directories)
+                name = args.worktree if args.worktree != "auto" else "session-" + uuid.uuid4().hex[:8]
+                base, changes = manager.preview_creation(name)
+                accept = args.worktree_from_commit
+                if changes and not accept:
+                    if interactive and args.p is None:
+                        print(f"Worktree starts from commit {base}. Uncommitted and untracked files remain in the original directory.")
+                        accept = input("Create from committed files? (y/N): ").strip().lower() == "y"
+                        if not accept:
+                            raise KeyboardInterrupt
+                    else:
+                        raise ConfigError(
+                            f"Worktree starts from commit {base} and excludes your uncommitted/untracked files. "
+                            "Use --worktree-from-commit to accept this, or continue without --worktree."
+                        )
+                async def enter_new_worktree():
+                    await manager.create(name, base_branch=base, accept_committed_base=accept)
+                    return await manager.enter(name)
+                runtime = RecoveryRuntime.acquire(workspace.workspace_dir, store=manager.registry.store)
+                try:
+                    with runtime.activate():
+                        runtime.ensure_ready()
+                        from nanocursor.recovery.lifecycle import run_effect
+                        selected = asyncio.run(run_effect("worktree", "create", enter_new_worktree,
+                                                          {"name": name, "base": base}))
+                finally:
+                    runtime.close()
+            except (WorktreeError, ValueError, subprocess.SubprocessError) as exc:
+                raise ConfigError(f"Cannot start in Worktree: {exc}") from exc
+            workspace.restore(selected)
+            wt = manager.active[name]
+            print(f"Worktree: {wt.path}\nBranch: {wt.branch}\nBase: {wt.head_commit}", file=sys.stderr)
+            if manager.symlink_directories:
+                print("Explicitly shared directories: " + ", ".join(manager.symlink_directories), file=sys.stderr)
+        elif interactive and args.p is None and not args.remote:
             previous = workspace.previous_worktree()
             if previous:
                 print(f"Previous Worktree: {previous.worktree_path}")
                 if input("Restore it? Default keeps the current workspace. (y/N): ").strip().lower() == "y":
                     workspace.restore(previous)
-        os.chdir(workspace.active_cwd)
+        # Keep ambient cwd on the retained original checkout; active tools and
+        # hooks use explicit per-agent cwd and may delete their worktree later.
+        os.chdir(workspace.workspace_dir)
         # Nothing above writes project state or starts configured processes.
         try:
             (workspace.active_cwd / ".nanocursor").mkdir(exist_ok=True)
@@ -176,7 +260,7 @@ def main() -> None:
             default_provider=provider.name,
         )
         app.run()
-    except (ConfigError, HookConfigError, OSError) as exc:
+    except (ConfigError, HookConfigError, RecoveryError, OSError) as exc:
         code = getattr(exc, "code", "STARTUP_ERROR")
         message = redact(str(exc))
         if args.p is not None and args.output_format == "stream-json":
@@ -195,6 +279,59 @@ def main() -> None:
 
 
 async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_format: str = "text", *, workspace=None) -> int:
+    from nanocursor.memory.session import SessionManager
+    work_dir = str(workspace.active_cwd) if workspace else os.getcwd()
+    runtime = None
+    session = None
+    persistence_closed = False
+
+    def close_persistence():
+        nonlocal persistence_closed
+        if persistence_closed:
+            return None
+        persistence_closed = True
+        errors = []
+        for close in (session.close if session else None,
+                      runtime._tree_root.close if runtime else None):
+            if close is not None:
+                try:
+                    close()
+                except Exception as exc:
+                    errors.append(exc)
+        return errors[0] if errors else None
+
+    try:
+        runtime = RecoveryRuntime.acquire(work_dir)
+        with runtime.activate():
+            runtime.ensure_ready()
+            manager = SessionManager(str(workspace.workspace_dir) if workspace else work_dir, recovery=runtime)
+            session = manager.create()
+            runtime.bind_session(session)
+            return await _run_prompt_owned(config, permission_mode, hook_engine, prompt, output_format,
+                                           workspace=workspace, recovery=runtime,
+                                           close_persistence=close_persistence)
+    except RecoveryError as exc:
+        cleanup_error = close_persistence()
+        code = "recovery_required" if isinstance(exc, RecoveryRequired) else "recovery_storage_error"
+        status = 3 if isinstance(exc, RecoveryRequired) else 4
+        from nanocursor.runtime import redact
+        message = redact(str(exc))
+        if cleanup_error is not None:
+            message += redact(f"; persistence cleanup also failed: {cleanup_error}")
+        if output_format == "stream-json":
+            print(json.dumps({"type": "error", "code": code, "message": message}), flush=True)
+            print(json.dumps({"type": "result", "result": "", "is_error": True,
+                              "stop_reason": code, "exit_code": status}), flush=True)
+        else:
+            print(f"{code}: {message}. Run nanocursor recover --list", file=sys.stderr)
+        return status
+    finally:
+        # Initialization failures retain their original exception. Normal runs
+        # already closed these resources before publishing the terminal result.
+        close_persistence()
+
+
+async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, output_format: str = "text", *, workspace=None, recovery=None, close_persistence=None) -> int:
     from nanocursor.agent import (
         Agent,
         CompactNotification,
@@ -210,7 +347,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         UsageEvent,
     )
     from nanocursor.client import create_client, resolve_context_window
-    from nanocursor.conversation import ConversationManager
+    from nanocursor.conversation import ConversationManager, Message
     from nanocursor.memory.instructions import load_instructions
     from nanocursor.permissions import (
         DangerousCommandDetector,
@@ -220,7 +357,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     )
     from nanocursor.tools import create_default_registry
     from nanocursor.agents.loader import AgentLoader
-    from nanocursor.agents.task_manager import TaskManager
+    from nanocursor.agents.task_manager import TaskManager, persist_notification_message
+    from nanocursor.agents.notification import format_task_notification
     from nanocursor.agents.trace import TraceManager
     from nanocursor.tools.agent_tool import AgentTool
     from nanocursor.tools.impl.tool_search import ToolSearchTool
@@ -271,15 +409,27 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         context_window=provider.get_context_window(),
         instructions_content=instructions,
         hook_engine=hook_engine,
+        recovery=recovery,
+        session_work_dir=str(workspace.workspace_dir) if workspace else work_dir,
     )
+    if recovery:
+        from nanocursor.filehistory import FileHistory
+        agent.session_id = recovery.session_id
+        agent.file_history = FileHistory(work_dir, recovery.session_id, store=recovery.store,
+                                         workspace_id=recovery.workspace_id, generation=recovery.generation)
+        recovery.file_history = agent.file_history
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(
         repo_root=work_dir,
         symlink_directories=wt_cfg.symlink_directories,
+        recovery_store=recovery.store if recovery else None,
     )
+    if recovery:
+        wt_manager.removal_guard = lambda wt: recovery.ensure_workspace_idle(wt.path)
     trace_manager = TraceManager()
     task_manager = TaskManager()
+    task_manager.current_session_id = agent.session_id
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
     team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager, task_manager=task_manager)
@@ -307,15 +457,12 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         ))
         registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
 
-    def drain_notifications() -> list[str]:
-        notes: list[str] = []
+    def drain_notifications() -> list[Message]:
+        notes: list[Message] = []
         for t in task_manager.poll_completed():
-            notes.append(
-                f"<task-notification>\n<task_id>{t.id}</task_id>\n"
-                f"<status>{t.status}</status>\n<result>{t.result}</result>\n"
-                f"</task-notification>"
-            )
-        notes.extend(team_manager.drain_lead_mailbox())
+            notes.append(t.notification_message or Message("user", format_task_notification(t)))
+        notes.extend(Message("user", f"<system-reminder>\n{note}\n</system-reminder>")
+                     for note in team_manager.drain_lead_mailbox())
         return notes
 
     def drain_mailbox_only() -> list[str]:
@@ -341,18 +488,18 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         nonlocal exit_code, stop_reason
         message = redact(message)
         if fatal:
-            exit_code = 1
+            exit_code = 3 if code == "recovery_required" else 4 if code == "recovery_storage_error" else 1
             stop_reason = code
         if is_json:
             emit_json({"type": "error", "message": message, "code": code, "fatal": fatal})
         else:
             print(f"{'Error' if fatal else 'Warning'}: {message}", file=sys.stderr, flush=True)
 
-    async def consume_turn() -> None:
+    async def consume_turn(*, source: str = "user") -> None:
         nonlocal text_buf, total_input, total_output, num_turns
         base_turns = num_turns
         completed = False
-        async with aclosing(agent.run(conv)) as events:
+        async with aclosing(agent.run(conv, source=source)) as events:
             async for event in events:
                 if isinstance(event, StreamText):
                     text_buf += event.text
@@ -418,8 +565,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
                 notes = drain_notifications()
                 if notes:
                     for note in notes:
-                        conv.add_system_reminder(note)
-                    await consume_turn()
+                        if recovery and recovery.session:
+                            if not persist_notification_message(recovery.session, note):
+                                recovery.persist_message(note)
+                        conv.history.append(note)
+                    await consume_turn(source="notification")
                     if exit_code:
                         break
                 running = any(not t.done() for t in task_manager._async_tasks.values())
@@ -433,6 +583,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     except asyncio.CancelledError:
         report_error("Operation cancelled", "cancelled")
         exit_code = 130
+    except RecoveryError as exc:
+        report_error(str(exc), "recovery_required" if isinstance(exc, RecoveryRequired) else "recovery_storage_error")
     except Exception as exc:
         report_error(str(exc), "runtime_error")
     finally:
@@ -454,6 +606,10 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
                     report_error("Hook processes did not stop", "shutdown_incomplete")
             except Exception as exc:
                 report_error(f"Hook shutdown failed: {exc}", "shutdown_incomplete")
+        if close_persistence is not None:
+            cleanup_error = close_persistence()
+            if cleanup_error is not None:
+                report_error(f"Persistence cleanup failed: {cleanup_error}", "recovery_storage_error")
 
     # Exactly one terminal result, after all requested work and cleanup.
     if is_json:

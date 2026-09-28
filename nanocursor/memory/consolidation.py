@@ -249,6 +249,10 @@ class MemoryConsolidator:
         """Run inline; callers must register/await this task in their lifecycle."""
         if not self.enabled or (self._task is not None and not self._task.done()):
             return
+        from nanocursor.recovery import current_runtime, RecoveryError
+        runtime = current_runtime()
+        if runtime:
+            runtime.ensure_ready()
         now = int(self._clock() * 1000)
         if self._last_scan_at is not None and now - self._last_scan_at < SCAN_THROTTLE_MS:
             return
@@ -262,6 +266,8 @@ class MemoryConsolidator:
                     break
                 try:
                     await self._run_scope(client, store, scope, now)
+                except RecoveryError:
+                    raise
                 except FileNotFoundError:
                     continue
                 except MemoryConflict as exc:
@@ -338,6 +344,10 @@ class MemoryConsolidator:
             request = ConversationManager()
             request.history = [Message(role="user", content=json.dumps(payload, ensure_ascii=False))]
             try:
+                from nanocursor.recovery import current_runtime
+                runtime = current_runtime()
+                if runtime:
+                    runtime.ensure_ready()
                 async with asyncio.timeout(self._timeout):
                     response = await collect_text_response(client, request, system=SYSTEM_PROMPT,
                                                            tools=[], max_output_tokens=output_cap)

@@ -16,6 +16,7 @@ class ToolRuntimeContext:
     spawn_allowed: bool = True
     file_versions: dict[str, Any] = field(default_factory=dict)
     expected_versions: dict[str, Any] | None = None
+    file_history: Any = None
 
 
 _context: ContextVar[ToolRuntimeContext | None] = ContextVar("tool_runtime", default=None)
@@ -50,5 +51,9 @@ def normalize_local_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
     key = {"ReadFile": "file_path", "WriteFile": "file_path", "EditFile": "file_path",
            "Glob": "path", "Grep": "path"}.get(tool_name)
     if key:
+        if tool_name in {"WriteFile", "EditFile"}:
+            from nanocursor.tools.file_io import validate_regular_path
+            context = current_runtime()
+            validate_regular_path(arguments[key], cwd=context.cwd if context else Path.cwd())
         arguments = {**arguments, key: str(resolve_workspace_path(arguments[key]))}
     return arguments

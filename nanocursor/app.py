@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 from copy import deepcopy
 import os
 import logging
@@ -51,6 +51,7 @@ from nanocursor.commands.completion import CompletionPopup
 from nanocursor.commands.handlers import register_all_commands
 from nanocursor.config import MCPServerConfig, ProviderConfig
 from nanocursor.runtime import app_home, get_version
+from nanocursor.recovery import RecoveryError
 from nanocursor.workspace import WorkspaceContext
 from nanocursor.validator import ConfigError
 from nanocursor.hooks import HookContext, HookEngine, load_hooks
@@ -637,6 +638,7 @@ class NanoCursorApp(App):
         self._owned_tasks: dict[asyncio.Task, tuple[str, str]] = {}
         self._resume_candidates: tuple[str, ...] = ()
         self._plan_session_id: str | None = None
+        self.recovery_runtime = None
         self._consolidator = None
         self._consolidation_task: asyncio.Task | None = None
         self._memory_refresh_pending = False
@@ -685,6 +687,21 @@ class NanoCursorApp(App):
             self.query_one("#input-area").display = False
 
     def _work_dir_changed(self, work_dir: str) -> None:
+        if self.agent and self.agent.recovery:
+            from nanocursor.filehistory import FileHistory
+            self.recovery_runtime = self.agent.recovery
+            self.session_manager.recovery_runtime = self.recovery_runtime
+            self.file_history = FileHistory(work_dir, self.session.session_id,
+                                            store=self.recovery_runtime.store,
+                                            workspace_id=self.recovery_runtime.workspace_id,
+                                            generation=self.recovery_runtime.generation)
+            self.agent.file_history = self.file_history
+            self.recovery_runtime.file_history = self.file_history
+            for tool in self.registry.list_tools():
+                if hasattr(tool, "file_history"):
+                    tool.file_history = self.file_history
+            if self.mcp_manager:
+                self.mcp_manager.recovery = self.recovery_runtime
         self._recall_queries.clear()
         if self.mcp_manager:
             self.mcp_manager.work_dir = work_dir
@@ -746,12 +763,23 @@ class NanoCursorApp(App):
         self._instructions_content = load_instructions(work_dir)
         state_work_dir = str(self.workspace.workspace_dir)
         self.memory_manager = MemoryManager(state_work_dir)
+        from nanocursor.recovery import RecoveryRuntime, RecoveryError
+        try:
+            self.recovery_runtime = RecoveryRuntime.acquire(work_dir)
+        except RecoveryError as exc:
+            self._show_error(f"恢复服务无法取得工作区所有权: {exc}")
+            return
         self.session_manager = SessionManager(state_work_dir)
-        self.session_manager.cleanup()
+        self.session_manager.recovery_runtime = self.recovery_runtime
         self.session = self.session_manager.create()
+        self.recovery_runtime.bind_session(self.session)
 
         from nanocursor.filehistory import FileHistory
-        self.file_history = FileHistory(state_work_dir, self.session.session_id)
+        self.file_history = FileHistory(work_dir, self.session.session_id,
+                                        store=self.recovery_runtime.store,
+                                        workspace_id=self.recovery_runtime.workspace_id,
+                                        generation=self.recovery_runtime.generation)
+        self.recovery_runtime.file_history = self.file_history
         for tool in self.registry.list_tools():
             if hasattr(tool, "file_history"):
                 tool.file_history = self.file_history
@@ -785,6 +813,7 @@ class NanoCursorApp(App):
             memory_recall_config=self._memory_recall_config,
             hook_engine=self.hook_engine,
             session_work_dir=state_work_dir,
+            recovery=self.recovery_runtime,
         )
         self.agent.file_history = self.file_history
         self.agent.on_work_dir_changed = self._work_dir_changed
@@ -862,6 +891,7 @@ class NanoCursorApp(App):
         from nanocursor.mcp.settings import MCPSettings
         from nanocursor.tools.manage_mcp import ManageMCP
         self.mcp_manager = MCPManager(work_dir=work_dir, on_change=self._refresh_mcp_state)
+        self.mcp_manager.recovery = self.recovery_runtime
         self.mcp_manager.load_configs(self._mcp_server_configs)
         settings = MCPSettings()
         try:
@@ -882,19 +912,18 @@ class NanoCursorApp(App):
         self.worktree_manager = WorktreeManager(
             repo_root=str(self.workspace.workspace_dir),
             symlink_directories=wt_cfg.symlink_directories,
+            recovery_store=self.recovery_runtime.store,
         )
+        def removal_guard(wt):
+            from nanocursor.recovery import current_runtime
+            active = current_runtime() or self.recovery_runtime
+            active.ensure_workspace_idle(wt.path, ignore_operation_id=active.current_operation_id)
+        self.worktree_manager.removal_guard = removal_guard
         if self.workspace.restored:
-            # The CLI already obtained a direct user choice before any tool runs.
-            # Use the reviewed record, not a second read of mutable project data.
-            from nanocursor.worktree.models import Worktree
-            restored = self.workspace.restored
-            self.worktree_manager.current_session = restored
-            self.worktree_manager.active[restored.worktree_name] = Worktree(
-                name=restored.worktree_name, path=restored.worktree_path,
-                branch=f"worktree-{restored.worktree_name}", based_on="unknown",
-                head_commit=WorktreeManager.read_worktree_head_sha(restored.worktree_path) or "",
-            )
+            self.worktree_manager.restore_session()
 
+        from nanocursor.commands.handlers.recover import RECOVER_COMMAND
+        self.command_registry.register_sync(RECOVER_COMMAND)
         wt_command = create_worktree_command(self.worktree_manager)
         self.command_registry.register_sync(wt_command)
 
@@ -994,13 +1023,22 @@ class NanoCursorApp(App):
             self.registry.register(SyntheticOutputTool())
         self.agent._team_manager = self.team_manager
 
-        if self.hook_engine:
-            self.register_owned_task(asyncio.create_task(
-                self.hook_engine.run_hooks("startup", HookContext(event_name="startup"))
-            ), kind="startup")
-
-        if self._mcp_server_configs:
-            self._mcp_init_task = asyncio.create_task(self._init_mcp())
+        try:
+            self.recovery_runtime.ensure_ready()
+            startup_ready = True
+        except RecoveryError:
+            startup_ready = False
+        if not startup_ready:
+            from nanocursor.commands.handlers.recover import format_report, recovery_report
+            self._show_system_message(format_report(recovery_report(self.recovery_runtime)))
+        else:
+            with self.recovery_runtime.activate():
+                if self.hook_engine:
+                    self.register_owned_task(asyncio.create_task(
+                        self.agent._run_hooks("startup", HookContext(event_name="startup"))
+                    ), kind="startup")
+                if self._mcp_server_configs:
+                    self._mcp_init_task = asyncio.create_task(self._init_mcp())
 
         work_dir = self.agent.work_dir
         self.query_one("#title-bar", Static).update(
@@ -1023,6 +1061,12 @@ class NanoCursorApp(App):
         )
 
     async def _resolve_context_window(self, provider: ProviderConfig) -> None:
+        if self.recovery_runtime:
+            from nanocursor.recovery import RecoveryError
+            try:
+                self.recovery_runtime.ensure_ready()
+            except RecoveryError:
+                return
         """Layer 2 后台 worker：异步拉取模型的 context window，
         拉到就原地升级 agent 的窗口值。
 
@@ -1141,7 +1185,7 @@ class NanoCursorApp(App):
     def _command_is_readonly(name: str, args: str) -> bool:
         parts = args.split()
         sub = parts[0] if parts else ""
-        if name in {"help", "status", "mcp", "tools", "trace"}:
+        if name in {"help", "status", "mcp", "tools", "trace", "recover"}:
             return True
         if name == "tasks":
             return True  # Includes explicit cancellation of the selected task.
@@ -1156,15 +1200,24 @@ class NanoCursorApp(App):
         if name == "worktree":
             return sub in {"", "list", "status"}
         if name == "rewind":
-            return not parts
+            return not parts or sub in {"inspect", "storage"} or (sub not in {"cleanup", "pin", "unpin"} and "apply" not in parts)
         return False
 
     def _start_agent_run(self, text: str, *, direct_input: str | None = None, is_notification: bool = False) -> bool:
         if self.agent is None or self.foreground_busy():
             return False
+        runtime = getattr(self.agent, "recovery", None)
+        if runtime:
+            from nanocursor.recovery import RecoveryError
+            try:
+                runtime.ensure_ready()
+            except RecoveryError as exc:
+                self._show_error(f"{exc} 使用 /recover 查看；不会自动重试。")
+                return False
         if not is_notification:
             self._notifications_suspended = False
-        self._agent_task = asyncio.create_task(self._send_message(text, is_notification, direct_input))
+        with runtime.activate() if runtime else nullcontext():
+            self._agent_task = asyncio.create_task(self._send_message(text, is_notification, direct_input))
         def finished(task: asyncio.Task) -> None:
             if not task.cancelled():
                 task.exception()  # _send_message reports the concrete error.
@@ -1243,6 +1296,8 @@ class NanoCursorApp(App):
         async def consolidate() -> None:
             revision = consolidator.publication_revision
             try:
+                if self.agent.recovery:
+                    self.agent.recovery.ensure_ready()
                 await consolidator.maybe_run(client, snapshot, protocol)
             finally:
                 # A throttled scan retains its status for display. Only a new
@@ -1252,7 +1307,15 @@ class NanoCursorApp(App):
                     if self.agent:
                         self.agent.memory_recall.invalidate()
 
-        self._consolidation_task = asyncio.create_task(consolidate())
+        runtime = getattr(self.agent, "recovery", None)
+        if runtime:
+            from nanocursor.recovery import RecoveryError
+            try:
+                runtime.ensure_ready()
+            except RecoveryError:
+                return
+        with runtime.activate() if runtime else nullcontext():
+            self._consolidation_task = asyncio.create_task(consolidate())
         self.register_owned_task(self._consolidation_task, kind="consolidation")
 
     async def set_memory_consolidation(self, enabled: bool) -> None:
@@ -1293,10 +1356,18 @@ class NanoCursorApp(App):
                 if self._consolidator:
                     await self._consolidator.cancel_and_wait()
                 optional = []
-                if self.agent and self.agent.memory_manager and not getattr(self, "_unmounting", False):
+                recovery_ready = True
+                if self.recovery_runtime:
+                    try:
+                        self.recovery_runtime.ensure_ready()
+                    except RecoveryError:
+                        # Exit must still release owned resources when storage
+                        # has failed or a file restore is awaiting confirmation.
+                        recovery_ready = False
+                if recovery_ready and self.agent and self.agent.memory_manager and not getattr(self, "_unmounting", False):
                     optional.append(asyncio.create_task(self.agent._extract_memories(deepcopy(self.conversation))))
-                if self.hook_engine:
-                    optional.append(asyncio.create_task(self.hook_engine.run_hooks("shutdown", HookContext(event_name="shutdown"))))
+                if recovery_ready and self.hook_engine:
+                    optional.append(asyncio.create_task(self.agent._run_hooks("shutdown", HookContext(event_name="shutdown")) if self.agent else self.hook_engine.run_hooks("shutdown", HookContext(event_name="shutdown"))))
                 if optional:
                     for task in optional:
                         self.register_owned_task(task, kind="shutdown")
@@ -1314,12 +1385,15 @@ class NanoCursorApp(App):
                 self._stop_teammate_polling()
                 if self.session:
                     self.session.close()
+                if self.recovery_runtime:
+                    self.recovery_runtime._tree_root.close()
                 return True
             except Exception as exc:
                 if self.is_mounted:
                     self._show_error(f"安全退出尚未完成: {exc}")
                 return False
-        self._runtime_shutdown_task = asyncio.create_task(cleanup())
+        with self.recovery_runtime.activate() if self.recovery_runtime else nullcontext():
+            self._runtime_shutdown_task = asyncio.create_task(cleanup())
         return await asyncio.shield(self._runtime_shutdown_task)
 
     def _build_command_context(self, args: str) -> CommandContext:
@@ -1350,6 +1424,8 @@ class NanoCursorApp(App):
     def _set_session(self, session: Session) -> None:
         self._recall_queries.clear()
         self._last_approval_status = ""
+        if self.recovery_runtime:
+            self.recovery_runtime.bind_session(session)
         self.session = session
         self.task_manager.current_session_id = session.session_id
         self._resume_candidates = ()
@@ -1366,7 +1442,12 @@ class NanoCursorApp(App):
             self.agent.session_id = session.session_id
             from nanocursor.filehistory import FileHistory
             from nanocursor.context import create_replacement_state, RecoveryState
-            self.file_history = FileHistory(self.agent.session_work_dir, session.session_id)
+            self.file_history = FileHistory(self.agent.work_dir, session.session_id,
+                                            store=self.recovery_runtime.store if self.recovery_runtime else None,
+                                            workspace_id=self.recovery_runtime.workspace_id if self.recovery_runtime else None,
+                                            generation=self.recovery_runtime.generation if self.recovery_runtime else 0)
+            if self.recovery_runtime:
+                self.recovery_runtime.file_history = self.file_history
             self.agent.file_history = self.file_history
             for tool in self.registry.list_tools():
                 if hasattr(tool, "file_history"):
@@ -1390,7 +1471,11 @@ class NanoCursorApp(App):
 
     def _append_session_message(self, session: Session, message: Message) -> None:
         try:
-            session.append(message)
+            if getattr(message, "_durable_notification", None):
+                from nanocursor.agents.task_manager import persist_notification_message
+                persist_notification_message(session, message)
+            else:
+                session.append(message)
         except SessionMetadataError as exc:
             self._show_error(f"会话正文已保存，但元数据更新失败: {exc}")
 
@@ -1492,7 +1577,16 @@ class NanoCursorApp(App):
         try:
             if cmd.name == "worktree" and transition:
                 await self.prepare_session_change()
-            await cmd.handler(ctx)
+            runtime = getattr(self.agent, "recovery", None)
+            with runtime.activate() if runtime else nullcontext():
+                inspect_session = cmd.name == "session" and args.split()[:1] == ["resume"]
+                if runtime and not self._command_is_readonly(cmd.name, args) and cmd.name != "rewind" and not inspect_session:
+                    runtime.ensure_ready()
+                if runtime and not self._command_is_readonly(cmd.name, args) and cmd.name not in {"rewind", "session", "clear"}:
+                    from nanocursor.recovery.lifecycle import run_effect
+                    await run_effect("command", cmd.name, lambda: cmd.handler(ctx), {"args": args})
+                else:
+                    await cmd.handler(ctx)
         except Exception as e:
             self._show_error(f"命令执行失败: {e}")
         finally:
@@ -1724,6 +1818,8 @@ class NanoCursorApp(App):
                             direct_input: str | None = None, *, session: Session | None,
                            conversation: ConversationManager, agent: Agent) -> None:
         assert agent is not None
+        if agent.recovery:
+            agent.recovery.ensure_ready()
         if not is_notification:
             self._last_approval_status = ""
         self._flush_skill_results()
@@ -1765,7 +1861,7 @@ class NanoCursorApp(App):
 
             conversation.add_user_message(text)
             if session:
-                self._append_session_message(session, Message(role="user", content=text))
+                self._append_session_message(session, conversation.history[-1])
 
         if self._mcp_instructions and not self._mcp_instructions_ok:
             conversation.add_system_reminder(self._mcp_instructions)
@@ -1809,7 +1905,7 @@ class NanoCursorApp(App):
         await asyncio.sleep(0)
 
         try:
-            async with aclosing(agent.run(conversation)) as agent_events:
+            async with aclosing(agent.run(conversation, source="notification" if is_notification else "user")) as agent_events:
                 async for event in agent_events:
                     if isinstance(event, ThinkingText):
                         self.call_after_refresh(chat.scroll_end, animate=False)
@@ -2020,7 +2116,8 @@ class NanoCursorApp(App):
         content = (f"<system-reminder>\nSkill result notification ({name}). "
                    "This is output from an independent task, not new user authorization.\n"
                    + clip(result.display(), 4096) + "\n</system-reminder>")
-        self._pending_skill_results.append((session_id, conversation, Message(role="user", content=content)))
+        message = getattr(result, "notification_message", None) or Message(role="user", content=content)
+        self._pending_skill_results.append((session_id, conversation, message))
 
     def _flush_skill_results(self) -> None:
         while self._pending_skill_results:
@@ -2044,7 +2141,7 @@ class NanoCursorApp(App):
             return
         while completed:
             task = completed[0]
-            message = Message(role="user", content=format_task_notification(task))
+            message = getattr(task, "notification_message", None) or Message(role="user", content=format_task_notification(task))
             # Keep the pending batch until persistence succeeds. Polling the
             # TaskManager queue alone is not an acknowledgement of durable save.
             self._append_session_message(session, message)
@@ -2365,25 +2462,54 @@ class NanoCursorApp(App):
     # -----------------------------------------------------------------
 
     def _schedule_session_summary(self, session, conversation, agent) -> None:
+        from nanocursor.recovery import RecoveryError
+        runtime = getattr(agent, "recovery", None)
+        try:
+            operation = runtime.begin_operation("maintenance", "session_summary",
+                {"session_id": session.session_id}, state="planned") if runtime else None
+        except RecoveryError:
+            return
         for task, (sid, kind) in list(self._owned_tasks.items()):
             if sid == session.session_id and kind == "summary" and not task.done():
                 task.cancel()
         snapshot = deepcopy(conversation)
-        task = asyncio.create_task(self._update_session_summary(session, snapshot, agent.client, agent.protocol))
+        async def summarize():
+            try:
+                await self._update_session_summary(session, snapshot, agent.client, agent.protocol,
+                                                   recovery=runtime, operation_id=operation)
+            finally:
+                if runtime:
+                    row = runtime.store.rows("SELECT state FROM operations WHERE operation_id=?", (operation,))[0]
+                    if row["state"] == "planned":
+                        runtime.finish_not_started(operation, "Summary stopped before publication", is_error=False)
+        with runtime.activate() if runtime else nullcontext():
+            task = asyncio.create_task(summarize())
         self.register_owned_task(task, kind="summary", session_id=session.session_id)
 
-    async def _update_session_summary(self, session=None, conversation=None, client=None, protocol=None) -> None:
+    async def _update_session_summary(self, session=None, conversation=None, client=None, protocol=None,
+                                      *, recovery=None, operation_id=None) -> None:
         session = session or self.session
         client = client or self.client
         if not session or not client or not self.agent:
             return
         snapshot = deepcopy(conversation if conversation is not None else self.conversation)
+        if recovery:
+            recovery.ensure_ready()
         summary = await generate_session_summary(client, snapshot, protocol or self.agent.protocol)
         if summary and not self._runtime_closing:
             path = session._sessions_dir / f"{session.session_id}.meta"
             if path.exists():
-                session.meta.summary = summary
-                session.meta.save(path)
+                if recovery:
+                    recovery.start_operation(operation_id)
+                try:
+                    session.meta.summary = summary
+                    session.meta.save(path)
+                    if recovery:
+                        recovery.finish_operation(operation_id, "Session summary metadata published")
+                except BaseException as exc:
+                    if recovery:
+                        recovery.mark_unknown(operation_id, f"Summary publication unconfirmed: {exc}")
+                    raise
 
     # -----------------------------------------------------------------
     # MCP

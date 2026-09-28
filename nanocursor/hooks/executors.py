@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 from nanocursor.hooks.models import Action, ActionResult, HookContext
-from nanocursor.tools.bash import _spawn_owned_shell, _terminate_process_group
+from nanocursor.tools.bash import _spawn_owned_shell, _terminate_process_group, _record_process
+from nanocursor.recovery import RecoveryError
 from nanocursor.tools.runtime import current_runtime
 
 log = logging.getLogger(__name__)
@@ -56,14 +57,22 @@ async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
                 output=f"Command timed out after {action.timeout}s: {command}",
                 success=False,
             )
+        _record_process(proc)
         output = stdout.decode(errors="replace").strip() if stdout else ""
         return ActionResult(output=output, success=proc.returncode == 0)
     except asyncio.CancelledError:
         if proc is not None:
             await _terminate_process_group(proc)
         raise
+    except RecoveryError:
+        if proc is not None:
+            await _terminate_process_group(proc)
+        raise
     except Exception as e:
-        return ActionResult(output=f"Command execution error: {e}", success=False)
+        if proc is not None:
+            await _terminate_process_group(proc)
+        return ActionResult(output=f"Command execution error: {e}", success=False,
+                            outcome_unknown=proc is not None)
 
 
 async def execute_prompt(action: Action, ctx: HookContext) -> ActionResult:
@@ -94,9 +103,9 @@ async def execute_http(action: Action, ctx: HookContext) -> ActionResult:
                     success=200 <= resp.status < 300,
                 )
         except URLError as e:
-            return ActionResult(output=f"HTTP error: {e}", success=False)
+            return ActionResult(output=f"HTTP error: {e}", success=False, outcome_unknown=True)
         except Exception as e:
-            return ActionResult(output=f"HTTP error: {e}", success=False)
+            return ActionResult(output=f"HTTP error: {e}", success=False, outcome_unknown=True)
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _do_request)

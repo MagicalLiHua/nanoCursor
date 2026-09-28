@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from nanocursor.tools.file_io import atomic_write, path_lock
-from nanocursor.tools.runtime import resolve_workspace_path
+from nanocursor.tools.file_io import atomic_write, file_history_context, path_lock, validate_regular_path
+from nanocursor.tools.runtime import current_runtime, resolve_workspace_path
 from nanocursor.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -35,7 +35,13 @@ class WriteFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        path = resolve_workspace_path(params.file_path)
+        try:
+            context = current_runtime()
+            validate_regular_path(params.file_path, cwd=context.cwd if context else None)
+            path = resolve_workspace_path(params.file_path)
+            history, operation_id = file_history_context(self.file_history)
+        except Exception as exc:
+            return ToolResult(output=f"Error writing file: {exc}", is_error=True)
 
         with path_lock(path):
             if self._state_cache is not None and (path.exists() or self._state_cache.has_read(str(path))):
@@ -45,16 +51,21 @@ class WriteFile(Tool):
                     return ToolResult(output=err_msg, is_error=True)
 
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if self.file_history is not None:
-                    self.file_history.track_edit(str(path))
+                edit_id = history.prepare_edit(str(path), params.content, operation_id=operation_id) if history else None
+                if self._state_cache is not None and (path.exists() or self._state_cache.has_read(str(path))):
+                    ok, err_msg = self._state_cache.check(str(path.resolve()))
+                    if not ok:
+                        return ToolResult(output=err_msg, is_error=True)
+                if history:
+                    history.verify_prepared(edit_id)
                 atomic_write(path, params.content)
-                if self.file_history is not None:
-                    self.file_history.record_edit(str(path))
+                if history:
+                    history.applied_edit(edit_id)
                 if self._cache is not None:
                     self._cache.invalidate(str(path.resolve()))
                 if self._state_cache:
                     self._state_cache.update(str(path.resolve()))
             except Exception as e:
                 return ToolResult(output=f"Error writing file: {e}", is_error=True)
-        return ToolResult(output=f"Successfully wrote to {params.file_path}")
+        coverage = "\nThis project-external edit is not covered by workspace checkpoints." if history and edit_id is None else ""
+        return ToolResult(output=f"Successfully wrote to {params.file_path}{coverage}")

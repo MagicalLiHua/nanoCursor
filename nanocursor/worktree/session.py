@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import json
 import logging
+from dataclasses import asdict
 from pathlib import Path
 
+from nanocursor.storage import read_json, write_json
+from nanocursor.validator import ConfigError
 from nanocursor.worktree.models import WorktreeSession
+from nanocursor.worktree.registry import sync_directory
 
 log = logging.getLogger(__name__)
 
@@ -24,18 +27,11 @@ def save_worktree_session(
         # 对齐 Go：传入 nil 时直接删除文件而非写空 JSON，
         # 避免遗留无意义的空文件。文件不存在时静默忽略。
         path.unlink(missing_ok=True)
+        if path.parent.exists():
+            sync_directory(path.parent)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "original_cwd": session.original_cwd,
-        "worktree_path": session.worktree_path,
-        "worktree_name": session.worktree_name,
-        "original_branch": session.original_branch,
-        "original_head_commit": session.original_head_commit,
-        "session_id": session.session_id,
-        "hook_based": session.hook_based,
-    }
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    write_json(path, asdict(session))
+    sync_directory(path.parent)
 
 
 def load_worktree_session(nanocursor_dir: Path) -> WorktreeSession | None:
@@ -43,7 +39,7 @@ def load_worktree_session(nanocursor_dir: Path) -> WorktreeSession | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json(path)
         if not data or "worktree_path" not in data:
             return None
         return WorktreeSession(
@@ -54,7 +50,8 @@ def load_worktree_session(nanocursor_dir: Path) -> WorktreeSession | None:
             original_head_commit=data["original_head_commit"],
             session_id=data.get("session_id", ""),
             hook_based=data.get("hook_based", False),
+            workspace_id=data.get("workspace_id", ""),
         )
-    except (json.JSONDecodeError, KeyError) as e:
+    except (ValueError, KeyError, ConfigError) as e:
         log.warning("Failed to load worktree session: %s", e)
         return None

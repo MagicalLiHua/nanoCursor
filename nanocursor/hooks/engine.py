@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from functools import partial
 
 from nanocursor.hooks.executors import execute_action
+from nanocursor.recovery import RecoveryError
+from nanocursor.recovery.lifecycle import prepare_effect, run_effect
 from nanocursor.hooks.models import ActionResult, Hook, HookContext, ToolRejectedError
 
 log = logging.getLogger(__name__)
@@ -45,13 +48,15 @@ class HookEngine:
             return
         matched = self.find_matching_hooks(event, ctx)
         for hook in matched:
+            prepared = self._prepare(hook, ctx)
             hook.mark_executed()
             if hook.async_exec:
-                task = asyncio.create_task(self._run_single(hook, ctx))
+                started = [False]
+                task = asyncio.create_task(self._run_background(hook, ctx, prepared, started))
                 self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
+                task.add_done_callback(partial(self._task_done, prepared=prepared, started=started))
             else:
-                await self._run_single(hook, ctx)
+                await self._run_single(hook, ctx, prepared)
 
     async def shutdown(self, timeout: float = 5.0) -> bool:
         self._closing = True
@@ -65,9 +70,34 @@ class HookEngine:
         return not pending
 
 
-    async def _run_single(self, hook: Hook, ctx: HookContext) -> None:
+    async def _run_background(self, hook, ctx, prepared, started) -> None:
+        started[0] = True
+        await self._run_single(hook, ctx, prepared)
+
+    def _task_done(self, task: asyncio.Task, *, prepared=None, started=None) -> None:
+        self._tasks.discard(task)
+        if task.cancelled() and started is not None and not started[0]:
+            runtime, operation_id = prepared
+            if runtime and not runtime.store.failed:
+                try:
+                    runtime.not_started(operation_id, "Background hook cancelled before its coroutine started")
+                except RecoveryError:
+                    log.exception("Could not record hook cancellation")
+        if not task.cancelled() and task.exception() is not None:
+            log.error("Background hook stopped: %s", task.exception())
+
+    @staticmethod
+    def _prepare(hook, ctx):
+        if hook.action.type not in {"command", "http"}:
+            return (None, None)
+        # Configured hooks may contain credentials. Record the identity and
+        # action type, never HTTP authorization headers or expanded secrets.
+        return prepare_effect("hook", hook.id, {"event": ctx.event_name, "type": hook.action.type})
+
+    async def _run_single(self, hook: Hook, ctx: HookContext, prepared=None) -> None:
         try:
-            result = await execute_action(hook.action, ctx)
+            result = await run_effect("hook", hook.id, lambda: execute_action(hook.action, ctx),
+                                      prepared=prepared if prepared is not None else self._prepare(hook, ctx))
             if hook.action.type == "prompt" and result.success:
                 self._prompt_messages.append(result.output)
             self._notifications.append(
@@ -82,6 +112,8 @@ class HookEngine:
                 log.warning(
                     "Hook '%s' action failed: %s", hook.id, result.output
                 )
+        except RecoveryError:
+            raise
         except Exception as e:
             log.warning("Hook '%s' execution error: %s", hook.id, e)
             self._notifications.append(
@@ -101,7 +133,8 @@ class HookEngine:
         for hook in matched:
             hook.mark_executed()
             try:
-                result = await execute_action(hook.action, ctx)
+                result = await run_effect("hook", hook.id, lambda: execute_action(hook.action, ctx),
+                                          prepared=self._prepare(hook, ctx))
                 self._notifications.append(
                     HookNotification(
                         hook_id=hook.id,
@@ -116,6 +149,8 @@ class HookEngine:
                         reason=result.output,
                         hook_id=hook.id,
                     )
+            except RecoveryError:
+                raise
             except Exception as e:
                 log.warning("Hook '%s' execution error: %s", hook.id, e)
                 if hook.reject:

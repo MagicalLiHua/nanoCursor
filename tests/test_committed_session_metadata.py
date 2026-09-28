@@ -9,6 +9,7 @@ from nanocursor.context.manager import SUMMARY_PROMPT
 from nanocursor.conversation import Message
 from nanocursor.filehistory import FileHistory
 from nanocursor.memory.session import RecordType, SessionMeta
+from nanocursor.recovery import RecoveryRuntime, RecoveryStore
 from nanocursor.tools.base import StreamEnd, TextDelta
 from nanocursor.tools.write_file import Params, WriteFile
 from test_approval_ui import make_app
@@ -91,7 +92,14 @@ async def test_compaction_keeps_committed_boundary_despite_metadata_error(setup,
 @pytest.mark.parametrize("nth_save", [1, 2])
 async def test_rewind_keeps_committed_history_after_either_metadata_save_fails(setup, monkeypatch, option, nth_save):
     app = make_app(setup)
-    app.agent.file_history = FileHistory(str(setup.root), app.session.session_id)
+    app.recovery_runtime = RecoveryRuntime.acquire(setup.root, session=app.session,
+                                                   store=RecoveryStore(setup.root / ".test-recovery"))
+    app.agent.recovery = app.recovery_runtime
+    app.session_manager.recovery_runtime = app.recovery_runtime
+    app.agent.file_history = FileHistory(str(setup.root), app.session.session_id,
+                                         store=app.recovery_runtime.store,
+                                         workspace_id=app.recovery_runtime.workspace_id)
+    app.recovery_runtime.file_history = app.agent.file_history
     writer = WriteFile(file_history=app.agent.file_history)
     target = setup.root / "rewind.txt"
     assert not (await writer.execute(Params(file_path=str(target), content="checkpoint content"))).is_error
@@ -99,7 +107,9 @@ async def test_rewind_keeps_committed_history_after_either_metadata_save_fails(s
         app.conversation.history.append(message)
         app.session.append(message)
     expected = copy.deepcopy(app.conversation.history)
-    app.agent.file_history.make_snapshot(2, "checkpoint", conversation=app.conversation.history)
+    checkpoint = app.agent.file_history.make_snapshot(2, "checkpoint", conversation=app.conversation.history)
+    if option == 2:
+        expected.append(Message("user", "<system-reminder>Only conversation history was rewound. File changes and external effects were not undone.</system-reminder>"))
     assert not (await writer.execute(Params(file_path=str(target), content="later content"))).is_error
     for message in [Message("user", "later request"), Message("assistant", "later reply")]:
         app.conversation.history.append(message)
@@ -111,12 +121,13 @@ async def test_rewind_keeps_committed_history_after_either_metadata_save_fails(s
 
     async with app.run_test() as pilot:
         show_chat(app)
-        await app._dispatch_command(f"/rewind 1 {option}")
+        await app._dispatch_command(f"/rewind {checkpoint.checkpoint_id} {option} apply")
         assert state["failed"]
         assert any("metadata test failure" in notice for notice in notices)
         assert app.conversation.history == expected
         assert app.conversation.baseline_tokens == 0
         assert target.read_text() == ("checkpoint content" if option == 1 else "later content")
+        assert not app.agent.file_history.pending_restores()
         assert not app.agent.approval_controller.authorization.complete
         restored = app.session_manager.resume(app.session.session_id)
         try:

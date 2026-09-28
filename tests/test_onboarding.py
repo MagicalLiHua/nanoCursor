@@ -445,8 +445,10 @@ def test_remote_and_noninteractive_use_selected_workspace(environment, monkeypat
     monkeypatch.setattr(sys, "argv", ["nanocursor", "--cwd", str(other), "--remote"])
     with patch("nanocursor.remote.RemoteServer") as server:
         server.return_value.run = AsyncMock()
-        main()
-    assert server.call_args.kwargs["workspace"].active_cwd == other
+        with pytest.raises(SystemExit) as failure:
+            main()
+        assert failure.value.code == 1
+        server.assert_not_called()
 
 
 def test_untrusted_project_never_initializes_hooks(environment, monkeypatch):
