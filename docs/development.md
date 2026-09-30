@@ -41,6 +41,8 @@ uv pip compile --no-header --no-annotate packaging/build-requirements.in \
 
 ## 构建与独立安装验收
 
+降低耦合后的模块边界、兼容入口与回归范围见 [重构验收记录](architecture-refactor-results.md)。新增前端和运行功能应使用 `nanocursor.events`、`nanocursor.application` 与 typed command ports；不要让展示层重新修改 Agent 私有状态。`tests/test_architecture_boundaries.py` 和 `tests/test_application_boundaries.py` 随全量测试运行。
+
 ```bash
 uv build --build-constraints packaging/build-constraints.txt
 uv run python scripts/check_distribution.py dist

@@ -7,10 +7,28 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from nanocursor.events import (
+    StreamText,
+    ThinkingText,
+    RetryEvent,
+    ToolUseEvent,
+    ToolResultEvent,
+    TurnComplete,
+    LoopComplete,
+    UsageEvent,
+    ErrorEvent,
+    AgentRunError,
+    CompactNotification,
+    MemoryContextChanged,
+    HookEvent,
+    PermissionResponse,
+    PermissionRequest,
+    PermissionCall,
+    AgentEvent,
+)
 from nanocursor.client import LLMClient, LLMError
 from nanocursor.recovery import RecoveryError, RecoveryRequired, current_runtime as recovery_runtime
 from nanocursor.context import (
@@ -60,138 +78,6 @@ log = logging.getLogger(__name__)
 
 MEMORY_EXTRACTION_INTERVAL = 1
 MAX_OUTPUT_TOKENS_RECOVERIES = 3
-
-
-# ---------------------------------------------------------------------------
-# AgentEvent 事件类型
-# ---------------------------------------------------------------------------
-
-@dataclass
-class StreamText:
-    text: str
-
-
-@dataclass
-class ThinkingText:
-    text: str
-
-
-@dataclass
-class RetryEvent:
-    reason: str
-    wait: float = 0.0
-
-
-@dataclass
-class ToolUseEvent:
-    tool_name: str
-    tool_id: str
-    arguments: dict[str, Any]
-
-
-@dataclass
-class ToolResultEvent:
-    tool_id: str
-    tool_name: str
-    output: str
-    is_error: bool
-    elapsed: float
-
-
-@dataclass
-class TurnComplete:
-    turn: int
-
-
-@dataclass
-class LoopComplete:
-    total_turns: int
-
-
-@dataclass
-class UsageEvent:
-    input_tokens: int
-    output_tokens: int
-
-
-@dataclass
-class ErrorEvent:
-    message: str
-    fatal: bool = True
-    code: str = "agent_error"
-
-
-class AgentRunError(RuntimeError):
-    """A terminal loop failure, also propagated to background callers."""
-
-
-@dataclass
-class CompactNotification:
-    before_tokens: int
-    message: str
-    # 结构化 boundary（摘要 + 原文保留尾部），UI/session 层用它持久化 compact_boundary 记录。
-    # 失败路径下为 None。
-    boundary: "CompactBoundary | None" = None
-    # The persistence owner can restore the exact history and usage anchor if
-    # publishing this candidate boundary fails. No provider/tool is replayed.
-    prior_conversation: ConversationManager | None = None
-
-
-@dataclass
-class MemoryContextChanged:
-    prior_conversation: ConversationManager
-
-
-@dataclass
-class HookEvent:
-    hook_id: str
-    event: str
-    output: str
-    success: bool
-
-
-class PermissionResponse(Enum):
-    ALLOW = "allow"
-    DENY = "deny"
-    ALLOW_ALWAYS = "allow_always"
-    ALLOW_EDITS = "allow_edits"
-
-
-@dataclass
-class PermissionRequest:
-    tool_name: str
-    description: str
-    future: asyncio.Future[PermissionResponse]
-    reason: str = ""
-    cwd: str = ""
-    allow_always: bool = True
-    allow_edits: bool = False
-
-
-@dataclass
-class PermissionCall(ToolCallComplete):
-    """UI-only metadata; never included in tool arguments sent to the model."""
-    approval_reason: str = ""
-    approval_cwd: str = ""
-    allow_always: bool = True
-    allow_edits: bool = False
-
-
-AgentEvent = (
-    StreamText
-    | ThinkingText
-    | RetryEvent
-    | ToolUseEvent
-    | ToolResultEvent
-    | TurnComplete
-    | LoopComplete
-    | UsageEvent
-    | ErrorEvent
-    | PermissionRequest
-    | CompactNotification
-    | MemoryContextChanged
-    | HookEvent
-)
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +335,7 @@ class Agent:
         self.system_prompt_override = system_prompt_override
         self.inject_environment_context = inject_environment_context
         self._loop_count = 0
-        # 记忆提取合并策略（对齐 Go 版 inProgress + pendingContext）：
+        # 记忆提取合并策略：
         # _extracting: 标记是否有提取正在进行
         # _pending_extraction: 提取期间又触发了新请求，标记需要尾随提取
         self._extracting = False
@@ -566,6 +452,60 @@ class Agent:
     @property
     def spawn_allowed(self) -> bool:
         return self._spawn_allowed
+
+    @property
+    def plan_path(self) -> Path:
+        return self._get_plan_path()
+
+    def set_team_manager(self, manager) -> None:
+        self._team_manager = manager
+
+    async def run_hooks(self, event: str, context: HookContext) -> None:
+        await self._run_hooks(event, context)
+
+    async def extract_memories(self, conversation: ConversationManager) -> None:
+        await self._extract_memories(conversation)
+
+    def reset_usage(self) -> None:
+        self._loop_count = 0
+        self.clear_active_skills()
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.usage_missing_requests = 0
+
+    def clear_file_versions(self) -> None:
+        self._file_versions.clear()
+
+    def reset_history_state(self) -> None:
+        self.replacement_state = create_replacement_state()
+        self.recovery_state = RecoveryState()
+        self.clear_active_skills()
+
+    def bind_session(self, session, file_history) -> None:
+        from nanocursor.memory.recall import RecallOutcome
+
+        self._loop_count = 0
+        self.memory_recall.invalidate()
+        self.memory_recall.last = RecallOutcome()
+        self.memory_recall.context_tokens = 0
+        self.memory_recall.injected = self.memory_recall.deduplicated = 0
+        self.session_id = session.session_id
+        self.file_history = file_history
+        for tool in self.registry.list_tools():
+            if hasattr(tool, "file_history"):
+                tool.file_history = file_history
+        self.clear_file_versions()
+        self.reset_history_state()
+        if self.approval_controller:
+            self.approval_controller.authorization = session.load_approval_context()
+            self.approval_controller.revision += 1
+            self.approval_controller.persist_authorization()
+
+    def synchronize_memory_context(self, conversation: ConversationManager) -> None:
+        from nanocursor.memory.context import owned
+        from nanocursor.memory.budget import estimate
+
+        self.memory_recall.context_tokens = sum(estimate(message.content) for message in conversation.history if owned(message))
 
     def set_work_dir(self, work_dir: str, *, isolated: bool = False) -> None:
         from nanocursor.permissions import PathSandbox

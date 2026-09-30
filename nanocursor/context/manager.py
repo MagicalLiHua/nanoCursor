@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from nanocursor.events import CompactBoundary
 from nanocursor.conversation import (
     ConversationManager,
     Message,
@@ -53,20 +54,6 @@ SESSION_SUBDIR = ".nanocursor/session/tool-results"
 # ---------------------------------------------------------------------------
 # 事件
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class CompactBoundary:
-    """Layer 2 压缩的结构化结果，上交给 session 层处理。
-
-    `summary` 是大模型对被摘要前缀生成的摘要；`keep` 是 auto_compact 原样保留、
-    未做改动的近期尾部消息。session 层（持有 sessionId / 文件句柄）会把二者一起
-    内联进一条 compact_boundary 记录，这样 resume 时就能重建压缩后的状态。
-    用这种方式把写操作解耦出去，能让 auto_compact 保持纯粹、不依赖任何 session。
-    """
-
-    summary: str
-    keep: list[Message]
 
 
 @dataclass

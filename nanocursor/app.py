@@ -17,8 +17,13 @@ from textual.message import Message as TMessage
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from nanocursor.agent import (
-    Agent,
+from nanocursor.commands.ports import CommandServices, MemoryControls, SessionActions
+from nanocursor.application.background import BackgroundOptions, assemble_background
+from nanocursor.application.bootstrap import AgentDependencies, AgentSettings, assemble_agent, create_permissions
+from nanocursor.application.execution import ForegroundRun
+from nanocursor.application.session import SessionController, SessionPersistence
+from nanocursor.agent import Agent
+from nanocursor.events import (
     CompactNotification,
     MemoryContextChanged,
     ErrorEvent,
@@ -50,31 +55,16 @@ from nanocursor.commands import (
 from nanocursor.commands.completion import CompletionPopup
 from nanocursor.commands.handlers import register_all_commands
 from nanocursor.config import MCPServerConfig, ProviderConfig
-from nanocursor.runtime import app_home, get_version
+from nanocursor.runtime import get_version
 from nanocursor.recovery import RecoveryError
 from nanocursor.workspace import WorkspaceContext
 from nanocursor.validator import ConfigError
 from nanocursor.hooks import HookContext, HookEngine, load_hooks
 from nanocursor.conversation import ConversationManager, Message
 from nanocursor.mcp import ConnectResult, MCPManager
-from nanocursor.memory import (
-    MemoryManager,
-    Session,
-    SessionManager,
-    find_relevant_memories,
-    generate_session_summary,
-    load_instructions,
-    make_compact_boundary,
-    render_reminder,
-)
+from nanocursor.memory import MemoryManager, Session, SessionManager, find_relevant_memories, generate_session_summary, load_instructions, render_reminder
 from nanocursor.memory.session import SessionMetadataError
-from nanocursor.permissions import (
-    DangerousCommandDetector,
-    PathSandbox,
-    PermissionChecker,
-    PermissionMode,
-    RuleEngine,
-)
+from nanocursor.permissions import PermissionMode
 from nanocursor.agents.loader import AgentLoader
 from nanocursor.agents.task_manager import TaskManager
 from nanocursor.agents.trace import TraceManager
@@ -82,12 +72,12 @@ from nanocursor.agents.notification import format_task_notification
 from nanocursor.commands.handlers.tasks import create_tasks_command
 from nanocursor.skills.executor import SkillExecutor
 from nanocursor.skills.loader import SkillLoader
+from nanocursor.skills.catalog import format_skill_catalog
 from nanocursor.commands.handlers.skill_register import register_skill_commands
 from rich.text import Text as RichText
 from textual.theme import Theme
 from nanocursor.cache import FileCache
 from nanocursor.tools import ToolRegistry, create_default_registry
-from nanocursor.tools.agent_tool import AgentTool
 from nanocursor.tools.ask_user import AskUserEvent, AskUserTool
 from nanocursor.tools.impl.tool_search import ToolSearchTool
 from nanocursor.tools.install_skill import InstallSkillTool
@@ -96,7 +86,7 @@ from nanocursor.worktree.cleanup import start_stale_cleanup_task
 from nanocursor.worktree.manager import WorktreeManager
 from nanocursor.commands.handlers.worktree import create_worktree_command
 from nanocursor.teammate_tree import TeammateTree
-from nanocursor.status import collect_status
+from nanocursor.status import collect_status, collect_mcp_servers
 from nanocursor.status_bar import StatusBar, StatusDetailsScreen
 from nanocursor.file_refs import current_file_ref, expand_at_refs, format_file_ref, scan_files_for_at
 
@@ -723,7 +713,7 @@ class NanoCursorApp(App):
             if self._load_skill_tool:
                 self._load_skill_tool.set_loader(self.skill_loader)
             register_skill_commands(self.command_registry, self.skill_loader, self.skill_executor)
-            self.agent.set_skill_catalog("\n".join(f"- {name}: {desc}" for name, desc in self.skill_loader.get_catalog()))
+            self.agent.set_skill_catalog(format_skill_catalog(self.skill_loader.get_catalog()))
         self.query_one("#title-bar", Static).update(
             self._make_banner(self._selected_provider.model if self._selected_provider else "", work_dir,
                               in_worktree=bool(self.worktree_manager and self.worktree_manager.current_session))
@@ -747,21 +737,13 @@ class NanoCursorApp(App):
         except ConfigError as exc:
             self._show_error(str(exc))
             return
-        sandbox_auto_allow = sandbox_active and self._sandbox_cfg.auto_allow
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(work_dir),
-            rule_engine=RuleEngine(
-                user_rules_path=app_home() / "permissions.yaml",
-                project_rules_path=self.workspace.state_dir / "permissions.yaml",
-                local_rules_path=self.workspace.state_dir / "permissions.local.yaml",
-            ),
-            mode=self._initial_permission_mode,
-            sandbox_enabled=sandbox_auto_allow,
-        )
-
         self._instructions_content = load_instructions(work_dir)
         state_work_dir = str(self.workspace.workspace_dir)
+        settings = AgentSettings(
+            provider, work_dir, state_work_dir, self.workspace.state_dir,
+            self._initial_permission_mode, self._sandbox_cfg, self._instructions_content,
+        )
+        checker = create_permissions(settings, sandbox_active=sandbox_active)
         self.memory_manager = MemoryManager(state_work_dir)
         from nanocursor.recovery import RecoveryRuntime, RecoveryError
         try:
@@ -772,7 +754,7 @@ class NanoCursorApp(App):
         self.session_manager = SessionManager(state_work_dir)
         self.session_manager.recovery_runtime = self.recovery_runtime
         self.session = self.session_manager.create()
-        self.recovery_runtime.bind_session(self.session)
+        SessionController(self.recovery_runtime).bind(self.session, None)
 
         from nanocursor.filehistory import FileHistory
         self.file_history = FileHistory(work_dir, self.session.session_id,
@@ -801,20 +783,12 @@ class NanoCursorApp(App):
         self._exit_plan_tool = ExitPlanModeTool()
         self.registry.register(self._exit_plan_tool)
 
-        self.agent = Agent(
-            client=self.client,
-            registry=self.registry,
-            protocol=provider.protocol,
-            work_dir=work_dir,
-            permission_checker=checker,
-            context_window=provider.get_context_window(),
-            instructions_content=self._instructions_content,
-            memory_manager=self.memory_manager,
-            memory_recall_config=self._memory_recall_config,
-            hook_engine=self.hook_engine,
-            session_work_dir=state_work_dir,
-            recovery=self.recovery_runtime,
-        )
+        self.agent = assemble_agent(
+            settings,
+            AgentDependencies(self.client, self.registry, self.hook_engine, self.recovery_runtime,
+                              self.memory_manager, self._memory_recall_config),
+            permissions=checker,
+        ).agent
         self.agent.file_history = self.file_history
         self.agent.on_work_dir_changed = self._work_dir_changed
         self.agent.on_permission_mode_changed = self._update_mode_label
@@ -835,7 +809,7 @@ class NanoCursorApp(App):
         controller.persist_authorization()
 
         self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
-        self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
+        self._exit_plan_tool._plan_exists = lambda: self.agent.plan_path.exists()
 
         # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
         # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
@@ -862,19 +836,7 @@ class NanoCursorApp(App):
         self.skill_loader.validator = self.skill_executor.validate
         self.skill_loader.reload()
 
-        catalog = self.skill_loader.get_catalog()
-        if catalog:
-            lines = [
-                "You can use the following Skills:",
-                "",
-            ]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
-            self.agent.set_skill_catalog("\n".join(lines))
+        self.agent.set_skill_catalog(format_skill_catalog(self.skill_loader.get_catalog()))
 
         register_skill_commands(
             self.command_registry, self.skill_loader, self.skill_executor
@@ -940,48 +902,16 @@ class NanoCursorApp(App):
             )
         )
 
-        # --- 子 agent 系统初始化 ---
-        self.agent_loader = AgentLoader(
-            work_dir, enable_verification=self._enable_verification_agent
+        background = assemble_background(
+            self.agent, provider, self.worktree_manager, self.task_manager, self.trace_manager,
+            BackgroundOptions(
+                enable_fork=self._enable_fork, enable_teams=self._enable_teams,
+                enable_verification=self._enable_verification_agent, teammate_mode=self._teammate_mode,
+                interactive=True, enable_coordinator=self._enable_coordinator_mode,
+            ),
         )
-        self.agent_loader.load_all()
-
-        # --- Agent 团队系统初始化 ---
-        from nanocursor.teams.manager import TeamManager
-        from nanocursor.tools.team_create import TeamCreateTool
-        from nanocursor.tools.team_delete import TeamDeleteTool
-
-        self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager, task_manager=self.task_manager)
-
-        agent_tool = AgentTool(
-            agent_loader=self.agent_loader,
-            task_manager=self.task_manager,
-            trace_manager=self.trace_manager,
-            parent_agent=self.agent,
-            enable_fork=self._enable_fork,
-            enable_teams=self._enable_teams,
-            provider_config=provider,
-            worktree_manager=self.worktree_manager,
-            team_manager=self.team_manager,
-        )
-        self.registry.register(agent_tool)
-
-        if self._enable_teams:
-            team_create_tool = TeamCreateTool(
-                team_manager=self.team_manager,
-                parent_agent=self.agent,
-                teammate_mode=self._teammate_mode,
-                is_interactive=True,
-                enable_coordinator_mode=self._enable_coordinator_mode,
-                enable_teams=self._enable_teams,
-            )
-            self.registry.register(team_create_tool)
-
-            team_delete_tool = TeamDeleteTool(
-                team_manager=self.team_manager,
-                parent_agent=self.agent,
-            )
-            self.registry.register(team_delete_tool)
+        self.agent_loader = background.loader
+        self.team_manager = background.teams
 
         agent_catalog = self.agent_loader.list_agents()
         if agent_catalog:
@@ -1021,7 +951,7 @@ class NanoCursorApp(App):
 
         if self._enable_teams:
             self.registry.register(SyntheticOutputTool())
-        self.agent._team_manager = self.team_manager
+        self.agent.set_team_manager(self.team_manager)
 
         try:
             self.recovery_runtime.ensure_ready()
@@ -1035,7 +965,7 @@ class NanoCursorApp(App):
             with self.recovery_runtime.activate():
                 if self.hook_engine:
                     self.register_owned_task(asyncio.create_task(
-                        self.agent._run_hooks("startup", HookContext(event_name="startup"))
+                        self.agent.run_hooks("startup", HookContext(event_name="startup"))
                     ), kind="startup")
                 if self._mcp_server_configs:
                     self._mcp_init_task = asyncio.create_task(self._init_mcp())
@@ -1092,6 +1022,9 @@ class NanoCursorApp(App):
 
     def send_user_message(self, text: str) -> None:
         self._start_agent_run(text)
+
+    def send_skill_message(self, display_text: str, name: str, prompt: str) -> None:
+        self._start_agent_run(display_text, model_text=f"# Skill: {name}\n\n{prompt}")
 
     def set_plan_mode(self, enabled: bool) -> None:
         if self.agent is None:
@@ -1203,7 +1136,8 @@ class NanoCursorApp(App):
             return not parts or sub in {"inspect", "storage"} or (sub not in {"cleanup", "pin", "unpin"} and "apply" not in parts)
         return False
 
-    def _start_agent_run(self, text: str, *, direct_input: str | None = None, is_notification: bool = False) -> bool:
+    def _start_agent_run(self, text: str, *, direct_input: str | None = None,
+                         is_notification: bool = False, model_text: str | None = None) -> bool:
         if self.agent is None or self.foreground_busy():
             return False
         runtime = getattr(self.agent, "recovery", None)
@@ -1217,7 +1151,7 @@ class NanoCursorApp(App):
         if not is_notification:
             self._notifications_suspended = False
         with runtime.activate() if runtime else nullcontext():
-            self._agent_task = asyncio.create_task(self._send_message(text, is_notification, direct_input))
+            self._agent_task = asyncio.create_task(self._send_message(text, is_notification, direct_input, model_text))
         def finished(task: asyncio.Task) -> None:
             if not task.cancelled():
                 task.exception()  # _send_message reports the concrete error.
@@ -1365,9 +1299,9 @@ class NanoCursorApp(App):
                         # has failed or a file restore is awaiting confirmation.
                         recovery_ready = False
                 if recovery_ready and self.agent and self.agent.memory_manager and not getattr(self, "_unmounting", False):
-                    optional.append(asyncio.create_task(self.agent._extract_memories(deepcopy(self.conversation))))
+                    optional.append(asyncio.create_task(self.agent.extract_memories(deepcopy(self.conversation))))
                 if recovery_ready and self.hook_engine:
-                    optional.append(asyncio.create_task(self.agent._run_hooks("shutdown", HookContext(event_name="shutdown")) if self.agent else self.hook_engine.run_hooks("shutdown", HookContext(event_name="shutdown"))))
+                    optional.append(asyncio.create_task(self.agent.run_hooks("shutdown", HookContext(event_name="shutdown")) if self.agent else self.hook_engine.run_hooks("shutdown", HookContext(event_name="shutdown"))))
                 if optional:
                     for task in optional:
                         self.register_owned_task(task, kind="shutdown")
@@ -1405,62 +1339,58 @@ class NanoCursorApp(App):
             session_manager=self.session_manager,
             memory_manager=self.memory_manager,
             ui=self,
-            config={
-                "registry": self.command_registry,
-                "set_session": self._set_session,
-                "set_conversation": self._set_conversation,
-                "clear_chat": self._clear_chat,
-                "render_restored": self._render_restored_messages,
-                "skill_loader": self.skill_loader,
-                "skill_executor": self.skill_executor,
-                "register_owned_task": self.register_owned_task,
-                "queue_skill_result": self._queue_skill_result,
-                "session_id": self.session.session_id if self.session else "",
-                "is_session_current": self.is_session_current,
-                "prepare_session_change": self.prepare_session_change,
-            },
+            config=CommandServices(
+                sessions=SessionActions(
+                    set_session=self._set_session,
+                    set_conversation=self._set_conversation,
+                    clear_chat=self._clear_chat,
+                    render_restored=self._render_restored_messages,
+                    prepare_session_change=self.prepare_session_change,
+                    has_active_tasks=self.task_manager.has_active_tasks,
+                    is_running=lambda: self._streaming,
+                    get_resume_candidates=lambda: self._resume_candidates,
+                    set_resume_candidates=self._set_resume_candidates,
+                ),
+                memory=MemoryControls(
+                    recall_changed=self._set_recall_config,
+                    consolidation_status=self._consolidator.status_text if self._consolidator else None,
+                    set_consolidation=self.set_memory_consolidation,
+                ),
+                registry=self.command_registry,
+                skill_loader=self.skill_loader,
+                skill_executor=self.skill_executor,
+                register_owned_task=self.register_owned_task,
+                queue_skill_result=self._queue_skill_result,
+                session_id=self.session.session_id if self.session else "",
+                is_session_current=self.is_session_current,
+                status_snapshot=lambda: collect_status(self),
+                mcp_servers=lambda: collect_mcp_servers(self),
+                mcp_connecting=lambda: self._mcp_connecting,
+            ),
         )
 
     def _set_session(self, session: Session) -> None:
+        SessionController(self.recovery_runtime).bind(
+            session, self.agent, registry=self.registry, on_bound=self._publish_session,
+        )
+        if self.agent:
+            self.file_history = self.agent.file_history
+
+    def _publish_session(self, session: Session) -> None:
         self._recall_queries.clear()
         self._last_approval_status = ""
-        if self.recovery_runtime:
-            self.recovery_runtime.bind_session(session)
         self.session = session
         self.task_manager.current_session_id = session.session_id
         self._resume_candidates = ()
         self._plan_session_id = None
         self._mcp_instructions_ok = False
         self._notifications_suspended = False
-        if self.agent:
-            self.agent._loop_count = 0
-            self.agent.memory_recall.invalidate()
-            from nanocursor.memory.recall import RecallOutcome
-            self.agent.memory_recall.last = RecallOutcome()
-            self.agent.memory_recall.context_tokens = 0
-            self.agent.memory_recall.injected = self.agent.memory_recall.deduplicated = 0
-            self.agent.session_id = session.session_id
-            from nanocursor.filehistory import FileHistory
-            from nanocursor.context import create_replacement_state, RecoveryState
-            self.file_history = FileHistory(self.agent.work_dir, session.session_id,
-                                            store=self.recovery_runtime.store if self.recovery_runtime else None,
-                                            workspace_id=self.recovery_runtime.workspace_id if self.recovery_runtime else None,
-                                            generation=self.recovery_runtime.generation if self.recovery_runtime else 0)
-            if self.recovery_runtime:
-                self.recovery_runtime.file_history = self.file_history
-            self.agent.file_history = self.file_history
-            for tool in self.registry.list_tools():
-                if hasattr(tool, "file_history"):
-                    tool.file_history = self.file_history
-            self.agent._file_versions.clear()
-            self.agent.replacement_state = create_replacement_state()
-            self.agent.recovery_state = RecoveryState()
-            self.agent.clear_active_skills()
-            controller = self.agent.approval_controller
-            if controller:
-                controller.authorization = session.load_approval_context()
-                controller.revision += 1
-                controller.persist_authorization()
+
+    def _set_resume_candidates(self, candidates: tuple[str, ...]) -> None:
+        self._resume_candidates = candidates
+
+    def _set_recall_config(self, config) -> None:
+        self._memory_recall_config = config
 
     def _save_approval_context(self, context) -> None:
         if self.session:
@@ -1470,14 +1400,7 @@ class NanoCursorApp(App):
                 self._show_error(f"授权记录已保存，但会话元数据更新失败: {exc}")
 
     def _append_session_message(self, session: Session, message: Message) -> None:
-        try:
-            if getattr(message, "_durable_notification", None):
-                from nanocursor.agents.task_manager import persist_notification_message
-                persist_notification_message(session, message)
-            else:
-                session.append(message)
-        except SessionMetadataError as exc:
-            self._show_error(f"会话正文已保存，但元数据更新失败: {exc}")
+        SessionPersistence(session, self.conversation, self._show_error).append_message(message)
 
     def _show_approval_status(self, text: str) -> None:
         # Reviewer diagnostics belong in details; the model stays visible.
@@ -1485,30 +1408,11 @@ class NanoCursorApp(App):
         self.refresh_status()
 
     def _persist_compact_boundary(self, notification: CompactNotification, session: Session | None = None) -> None:
-        """Layer-2 compact 后写入 compact_boundary 记录。
-
-        将摘要 + 原样保留的尾部内联到一条记录中，resume 时只需这一条
-        就能重建压缩后的状态。之前已写入磁盘的原始前缀不会被重放。
-        没有活跃 session 或 compact 未产出 boundary 时直接跳过。
-        """
-        session = session or self.session
-        if not session or notification.boundary is None:
-            return
-        record = make_compact_boundary(
-            notification.boundary.summary,
-            notification.boundary.keep,
-        )
-        try:
-            session.append_record(record)
-        except SessionMetadataError as exc:
-            self._show_error(f"压缩结果已保存，但会话元数据更新失败: {exc}")
+        SessionPersistence(session or self.session, self.conversation, self._show_error).commit_compact(notification)
 
     def _set_conversation(self, conv: ConversationManager) -> None:
         self.conversation = conv
-        if self.agent:
-            from nanocursor.memory.context import owned
-            from nanocursor.memory.budget import estimate
-            self.agent.memory_recall.context_tokens = sum(estimate(m.content) for m in conv.history if owned(m))
+        SessionController().set_conversation(conv, self.agent)
         self._mcp_instructions_ok = False
         self.refresh_status()
 
@@ -1774,27 +1678,16 @@ class NanoCursorApp(App):
             register_skill_commands(
                 self.command_registry, self.skill_loader, self.skill_executor
             )
-        catalog = self.skill_loader.get_catalog()
-        if catalog:
-            lines = ["You can use the following Skills:", ""]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
-            self.agent.set_skill_catalog("\n".join(lines))
-        else:
-            self.agent.set_skill_catalog("")
+        self.agent.set_skill_catalog(format_skill_catalog(self.skill_loader.get_catalog()))
 
     async def _send_message(self, text: str, is_notification: bool = False,
-                            direct_input: str | None = None) -> None:
+                            direct_input: str | None = None, model_text: str | None = None) -> None:
         session, conversation, agent = self.session, self.conversation, self.agent
         owner = asyncio.current_task()
         if agent is None or self._runtime_closing:
             return
         try:
-            await self._run_message(text, is_notification, direct_input,
+            await self._run_message(text, is_notification, direct_input, model_text,
                                     session=session, conversation=conversation, agent=agent)
         except asyncio.CancelledError:
             pass
@@ -1815,7 +1708,7 @@ class NanoCursorApp(App):
                     self._schedule_consolidation()
 
     async def _run_message(self, text: str, is_notification: bool = False,
-                            direct_input: str | None = None, *, session: Session | None,
+                            direct_input: str | None = None, model_text: str | None = None, *, session: Session | None,
                            conversation: ConversationManager, agent: Agent) -> None:
         assert agent is not None
         if agent.recovery:
@@ -1859,7 +1752,7 @@ class NanoCursorApp(App):
             await user_row.mount(user_bubble)
             self.call_after_refresh(chat.scroll_end, animate=False)
 
-            conversation.add_user_message(text)
+            conversation.add_user_message(model_text if model_text is not None else text)
             if session:
                 self._append_session_message(session, conversation.history[-1])
 
@@ -1872,7 +1765,7 @@ class NanoCursorApp(App):
         if prefetch_task is not None:
             agent.memory_recall_task = prefetch_task
 
-        history_cursor = len(conversation.history)
+        persistence = SessionPersistence(session, conversation, self._show_error, len(conversation.history))
         # 准备 AI 回复区域
         ai_row = Vertical(classes="ai-row")
         await chat.mount(ai_row)
@@ -1905,7 +1798,7 @@ class NanoCursorApp(App):
         await asyncio.sleep(0)
 
         try:
-            async with aclosing(agent.run(conversation, source="notification" if is_notification else "user")) as agent_events:
+            async with aclosing(ForegroundRun(agent, persistence).events(conversation, source="notification" if is_notification else "user")) as agent_events:
                 async for event in agent_events:
                     if isinstance(event, ThinkingText):
                         self.call_after_refresh(chat.scroll_end, animate=False)
@@ -1973,11 +1866,6 @@ class NanoCursorApp(App):
 
                     elif isinstance(event, TurnComplete):
                         self.refresh_status()
-                        if session:
-                            for msg in conversation.history[history_cursor:]:
-                                self._append_session_message(session, msg)
-                                history_cursor += 1
-
                         collapsible = [
                             (tid, blk) for tid, blk in tool_blocks.items()
                             if isinstance(blk, ToolCallBlock)
@@ -2013,37 +1901,10 @@ class NanoCursorApp(App):
                         )
 
                     elif isinstance(event, CompactNotification):
-                        # auto_compact 已重写 conversation.history（摘要 +
-                        # boundary + 保留尾部）。先持久化 boundary 记录，然后
-                        # 将游标推进到重建后的历史末尾，这样 TurnComplete/LoopComplete
-                        # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
-                        # 前缀作为普通记录重复写入。
-                        try:
-                            self._persist_compact_boundary(event, session)
-                        except Exception:
-                            previous = getattr(event, "prior_conversation", None)
-                            if previous is not None:
-                                conversation.__dict__.clear()
-                                conversation.__dict__.update(previous.__dict__)
-                            raise
                         self._show_system_message(event.message)
-                        history_cursor = len(conversation.history)
                         self.refresh_status()
 
                     elif isinstance(event, MemoryContextChanged):
-                        from nanocursor.memory.session import make_history_boundary
-                        try:
-                            if session:
-                                try:
-                                    session.append_record(make_history_boundary(conversation.history))
-                                except SessionMetadataError as exc:
-                                    self._show_error(f"记忆上下文已保存，但元数据更新失败: {exc}")
-                        except Exception:
-                            conversation.__dict__.clear()
-                            conversation.__dict__.update(event.prior_conversation.__dict__)
-                            history_cursor = len(conversation.history)
-                            raise
-                        history_cursor = len(conversation.history)
                         self.refresh_status()
 
                     elif isinstance(event, ErrorEvent):
@@ -2061,13 +1922,6 @@ class NanoCursorApp(App):
                         self.refresh_status()
                         completed_elapsed = _time.monotonic() - self._thinking_start
                         if session:
-                            for msg in conversation.history[history_cursor:]:
-                                self._append_session_message(session, msg)
-                                history_cursor += 1
-                            session.meta.total_tokens = (
-                                agent.total_input_tokens
-                                + agent.total_output_tokens
-                            )
                             self._schedule_session_summary(session, conversation, agent)
                         if agent.plan_mode:
                             self.register_owned_task(asyncio.create_task(
@@ -2102,12 +1956,6 @@ class NanoCursorApp(App):
             self._show_system_message("Operation cancelled")
         except LLMError as e:
             self._show_error(str(e))
-        finally:
-            # Agent.run closes pending tool calls before returning or raising.
-            # Persist that boundary before another user message can be accepted.
-            if session:
-                for msg in conversation.history[history_cursor:]:
-                    self._append_session_message(session, msg)
 
     def _queue_skill_result(self, session_id, conversation, name, result) -> None:
         from nanocursor.memory.budget import clip
@@ -2221,7 +2069,7 @@ class NanoCursorApp(App):
                 controller.record_user("我在计划确认界面选择了执行当前计划；原有用户限制仍有效。")
             elif choice == PlanChoice.FEEDBACK and feedback:
                 controller.record_user(feedback)
-        plan_path = self.agent._get_plan_path()
+        plan_path = self.agent.plan_path
         plan_exists = plan_path.exists()
         plan_content = ""
         if plan_exists:

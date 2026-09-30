@@ -66,6 +66,10 @@ def estimate_tokens(messages: list[Message]) -> int:
 @dataclass
 class ConversationManager:
     history: list[Message] = field(default_factory=list)
+
+    def restore_state(self, snapshot: ConversationManager) -> None:
+        self.__dict__.clear()
+        self.__dict__.update(snapshot.__dict__)
     env_injected: bool = field(default=False, init=False)
     ltm_injected: bool = field(default=False, init=False)
     # API 报告的每轮真实 prompt 大小，保留用于向后兼容。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
 
 
@@ -22,8 +23,7 @@ async def handle_memory(ctx: CommandContext) -> None:
         if action in {"off", "local", "model"}:
             await service.cancel_and_wait()
             service.config.mode = action
-            if hasattr(ctx.ui, "_memory_recall_config"):
-                ctx.ui._memory_recall_config = service.config
+            command_services(ctx).memory.recall_changed(service.config)
             if action == "off":
                 await _remove_context(ctx, dynamic_only=True)
         elif action != "status":
@@ -32,16 +32,16 @@ async def handle_memory(ctx: CommandContext) -> None:
         ctx.ui.add_system_message(service.status_text())
     elif sub == "consolidate":
         action = parts[1].strip() if len(parts) > 1 else "status"
-        consolidator = getattr(ctx.ui, "_consolidator", None)
-        if consolidator is None:
+        controls = command_services(ctx).memory
+        if controls.consolidation_status is None:
             ctx.ui.add_system_message("后台记忆整理仅在主 Agent 交互界面中可用。")
             return
         if action in {"on", "off"}:
-            await ctx.ui.set_memory_consolidation(action == "on")
+            await controls.set_consolidation(action == "on")
         elif action != "status":
             ctx.ui.add_system_message("用法: /memory consolidate [status | on | off]")
             return
-        ctx.ui.add_system_message(consolidator.status_text())
+        ctx.ui.add_system_message(controls.consolidation_status())
     elif sub == "":
         display = mm.get_display_text()
         ctx.ui.add_system_message(display)
@@ -51,7 +51,7 @@ async def handle_memory(ctx: CommandContext) -> None:
         ctx.ui.add_system_message(display)
 
     elif sub == "clear":
-        prepare = ctx.config.get("prepare_session_change")
+        prepare = command_services(ctx).sessions.prepare_session_change
         if prepare:
             await prepare()
         mm.clear()
@@ -78,7 +78,6 @@ async def _remove_context(ctx: CommandContext, *, dynamic_only: bool = False) ->
         return
     from copy import deepcopy
     from nanocursor.memory.context import owned
-    from nanocursor.memory.session import SessionMetadataError, make_history_boundary
     from nanocursor.memory.budget import estimate
     from nanocursor.memory.recall import RecallOutcome
     service = ctx.agent.memory_recall
@@ -91,14 +90,12 @@ async def _remove_context(ctx: CommandContext, *, dynamic_only: bool = False) ->
     if previous.history == ctx.conversation.history:
         return
     ctx.conversation.reset_usage_anchor()
-    try:
-        if ctx.session:
-            ctx.session.append_record(make_history_boundary(ctx.conversation.history))
-    except SessionMetadataError as exc:
-        ctx.ui.add_system_message(f"记忆上下文已保存，但元数据更新失败: {exc}")
-    except Exception:
-        ctx.conversation.__dict__.update(previous.__dict__)
-        raise
+    from nanocursor.application.session import SessionPersistence
+    from nanocursor.events import MemoryContextChanged
+
+    SessionPersistence(ctx.session, ctx.conversation, ctx.ui.add_system_message).commit_memory(
+        MemoryContextChanged(previous),
+    )
     ctx.ui.refresh_status()
 
 

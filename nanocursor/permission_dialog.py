@@ -7,7 +7,7 @@ from textual.message import Message
 from textual.widgets import Static
 from rich.text import Text
 
-from nanocursor.agent import PermissionResponse
+from nanocursor.events import PermissionResponse
 
 
 _PERM_OPTIONS = [

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from nanocursor.agents.fork import FORK_QUERY_SOURCE
 from nanocursor.tools.base import Tool, ToolResult
 from nanocursor.tools.runtime import current_runtime
 
@@ -47,7 +48,6 @@ PERMISSION_MODE_MAP = {
 }
 
 
-FORK_QUERY_SOURCE = "agent:builtin:fork"
 
 TEAMMATE_ADDENDUM = (
     "\n\nIMPORTANT: You are running as an agent in a team.\n"
@@ -138,15 +138,9 @@ class AgentTool(Tool):
         from nanocursor.agents.fork import ForkError, build_forked_messages
         from nanocursor.agents.parser import AgentDef
         from nanocursor.agents.tool_filter import clone_registry_for_fork, resolve_agent_tools
-        from nanocursor.agent import Agent as AgentClass
+        from nanocursor.agents.factory import AgentFactory, SpawnContext
         from nanocursor.conversation import ConversationManager
-        from nanocursor.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
+        from nanocursor.permissions import PermissionMode
 
         definition: AgentDef | None = None
         conversation: ConversationManager
@@ -251,38 +245,14 @@ class AgentTool(Tool):
                 PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
                 PermissionMode.DEFAULT,
             )
-            checker = PermissionChecker(
-                detector=DangerousCommandDetector(),
-                sandbox=PathSandbox(work_dir),
-                rule_engine=(self._parent_agent.permission_checker.rule_engine
-                             if self._parent_agent.permission_checker else RuleEngine()),
-                mode=pm_enum,
-            )
-
-            # 创建子 agent
-            sub_agent = AgentClass(
-                client=client,
-                registry=filtered_registry,
-                protocol=self._parent_agent.protocol,
-                work_dir=work_dir,
-                spawn_allowed=False,
+            checker = AgentFactory.permissions(self._parent_agent, work_dir, pm_enum)
+            sub_agent = AgentFactory.create(SpawnContext.inherit(
+                self._parent_agent, client=client, registry=filtered_registry,
+                work_dir=work_dir, permissions=checker,
                 sandbox_root=work_dir if wt else self._parent_agent.sandbox_root,
-                max_iterations=definition.max_turns,
-                permission_checker=checker,
-                context_window=self._parent_agent.context_window,
-                instructions_content=definition.system_prompt,
-                hook_engine=self._parent_agent.hook_engine,
-            )
-            sub_agent.parent_id = self._parent_agent.agent_id
-            sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
-
-            # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
-            # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
-            if p.subagent_type is None:
-                from nanocursor.context import clone_replacement_state
-                sub_agent.replacement_state = clone_replacement_state(
-                    self._parent_agent.replacement_state
-                )
+                max_iterations=definition.max_turns, instructions=definition.system_prompt,
+                fork=p.subagent_type is None,
+            ))
 
             # 注册追踪节点
             trace_node = self._trace_manager.create(
@@ -354,15 +324,9 @@ class AgentTool(Tool):
         from nanocursor.agents.fork import ForkError, build_forked_messages
         from nanocursor.agents.parser import AgentDef
         from nanocursor.agents.tool_filter import build_teammate_tools
-        from nanocursor.agent import Agent as AgentClass
+        from nanocursor.agents.factory import AgentFactory, SpawnContext
         from nanocursor.conversation import ConversationManager
-        from nanocursor.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
+        from nanocursor.permissions import PermissionMode
         from nanocursor.teams.models import BackendType, TeammateInfo
         from nanocursor.teams.registry import AgentNameRegistry
 
@@ -475,32 +439,15 @@ class AgentTool(Tool):
         # 6. 创建子 agent 并附加队友专属指令
         instructions = (definition.system_prompt or "") + TEAMMATE_ADDENDUM
 
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=(self._parent_agent.permission_checker.rule_engine
-                         if self._parent_agent.permission_checker else RuleEngine()),
-            mode=PermissionMode.BYPASS,
-        )
-
-        sub_agent = AgentClass(
-            client=client,
-            registry=teammate_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=wt.path,
-            sandbox_root=wt.path,
-            spawn_allowed=False,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=instructions,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        checker = AgentFactory.permissions(self._parent_agent, wt.path, PermissionMode.BYPASS)
+        sub_agent = AgentFactory.create(SpawnContext.inherit(
+            self._parent_agent, client=client, registry=teammate_registry,
+            work_dir=wt.path, permissions=checker, sandbox_root=wt.path,
+            max_iterations=definition.max_turns, instructions=instructions,
+        ))
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
-        sub_agent._team_manager = self._team_manager
+        sub_agent.set_team_manager(self._team_manager)
 
         # 7. 注册名称和成员信息
         AgentNameRegistry.instance().register(teammate_name, agent_id)

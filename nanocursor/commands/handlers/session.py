@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
 from nanocursor.conversation import ConversationManager
 
@@ -12,8 +13,8 @@ async def handle_session(ctx: CommandContext) -> None:
 
     parts = ctx.args.split(None, 1)
     sub = parts[0] if parts else ""
-    tasks = getattr(ctx.ui, "task_manager", None)
-    if (sub == "new" or (sub == "resume" and len(parts) > 1)) and tasks and tasks.has_active_tasks():
+    sessions = command_services(ctx).sessions
+    if (sub == "new" or (sub == "resume" and len(parts) > 1)) and sessions.has_active_tasks():
         ctx.ui.add_system_message("Wait for background tasks to finish before switching sessions.")
         return
 
@@ -57,9 +58,9 @@ async def handle_session(ctx: CommandContext) -> None:
                 title = m.title or "(未命名)"
                 lines.append(f"  {i}. [{m.id}]  {title}  ({m.message_count} msgs, {ts})")
             ctx.ui.add_system_message("\n".join(lines))
-            ctx.ui._resume_candidates = tuple(m.id for m in metas[:15])
+            sessions.set_resume_candidates(tuple(m.id for m in metas[:15]))
             return
-        candidates = getattr(ctx.ui, "_resume_candidates", ())
+        candidates = sessions.get_resume_candidates()
         if session_id.isdigit():
             if not candidates:
                 ctx.ui.add_system_message("请先运行 /session resume 查看候选会话。")
@@ -69,7 +70,7 @@ async def handle_session(ctx: CommandContext) -> None:
                 ctx.ui.add_system_message(f"编号无效，请选择 1–{len(candidates)}，或重新查看列表。")
                 return
             session_id = candidates[idx]
-        prepare = ctx.config.get("prepare_session_change")
+        prepare = command_services(ctx).sessions.prepare_session_change
         if prepare:
             await prepare()
         result = sm.resume(session_id)
@@ -78,32 +79,28 @@ async def handle_session(ctx: CommandContext) -> None:
             return
         if ctx.session:
             ctx.session.close()
-        ctx.ui._resume_candidates = ()
-        ctx.config["set_session"](result.session)
+        sessions.set_resume_candidates(())
+        command_services(ctx).sessions.set_session(result.session)
         conv = ConversationManager()
         for msg in result.messages:
             conv.history.append(msg)
-        ctx.config["set_conversation"](conv)
-        if ctx.agent:
-            ctx.agent._loop_count = 0
-        await ctx.config["render_restored"](result.messages)
+        command_services(ctx).sessions.set_conversation(conv)
+        await command_services(ctx).sessions.render_restored(result.messages)
         ctx.ui.add_system_message(
             f"会话已恢复: {session_id} ({result.session.meta.message_count} msgs)"
         )
 
 
     elif sub == "new":
-        prepare = ctx.config.get("prepare_session_change")
+        prepare = command_services(ctx).sessions.prepare_session_change
         if prepare:
             await prepare()
         new_session = sm.create()
         if ctx.session:
             ctx.session.close()
-        ctx.config["set_session"](new_session)
-        ctx.config["set_conversation"](ConversationManager())
-        if ctx.agent:
-            ctx.agent._loop_count = 0
-        ctx.config["clear_chat"]()
+        command_services(ctx).sessions.set_session(new_session)
+        command_services(ctx).sessions.set_conversation(ConversationManager())
+        command_services(ctx).sessions.clear_chat()
         ctx.ui.add_system_message(f"新会话已创建: {new_session.session_id}")
 
     elif sub == "delete":
@@ -114,7 +111,7 @@ async def handle_session(ctx: CommandContext) -> None:
         if ctx.session and ctx.session.session_id == session_id:
             ctx.ui.add_system_message("不能删除当前活跃的会话。")
             return
-        prepare = ctx.config.get("prepare_session_change")
+        prepare = command_services(ctx).sessions.prepare_session_change
         if prepare:
             await prepare()
         if sm.delete(session_id):

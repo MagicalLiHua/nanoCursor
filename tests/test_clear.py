@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nanocursor.agent import Agent
 from nanocursor.commands.registry import CommandContext, UIController
 from nanocursor.commands.handlers.clear import handle_clear
 from nanocursor.conversation import ConversationManager
@@ -24,6 +25,8 @@ class MockUI:
 
 
 class MockAgent:
+    reset_usage = Agent.reset_usage
+
     def __init__(self, work_dir: str) -> None:
         self.work_dir = work_dir
         self._loop_count = 5

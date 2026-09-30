@@ -4,8 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from nanocursor.agent import (
-    Agent,
+from nanocursor.agent import Agent
+from nanocursor.events import (
     ErrorEvent,
     LoopComplete,
     PermissionRequest,

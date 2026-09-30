@@ -13,6 +13,7 @@ from nanocursor.tools.impl.tool_search import ToolSearchTool
 
 if TYPE_CHECKING:
     from nanocursor.agent import Agent
+    from nanocursor.permissions import PermissionChecker
 
 BUILTINS = frozenset({"ReadFile", "WriteFile", "EditFile", "Bash", "Grep", "Glob"})
 
@@ -80,7 +81,7 @@ def authority(parent: Agent) -> tuple:
 @dataclass(frozen=True)
 class ForkScope:
     registry: ToolRegistry
-    permission_checker: object
+    permission_checker: PermissionChecker | None
     guard: Callable[[], str | None]
     work_dir: str
     sandbox_root: str | None

@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime, timezone
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandType
 from nanocursor.conversation import Message
 from nanocursor.filehistory.history import RewindError
@@ -48,10 +49,7 @@ def _restore_conversation(ctx, snapshot, restore_info) -> None:
     ctx.conversation.env_injected = snapshot.env_injected
     ctx.conversation.ltm_injected = snapshot.ltm_injected
     if ctx.agent:
-        from nanocursor.context import create_replacement_state, RecoveryState
-        ctx.agent.replacement_state = create_replacement_state()
-        ctx.agent.recovery_state = RecoveryState()
-        ctx.agent.clear_active_skills()
+        ctx.agent.reset_history_state()
         controller = ctx.agent.approval_controller
         if controller:
             from nanocursor.permissions.approval_context import AuthorizationContext
@@ -80,8 +78,8 @@ def _append_code_notice(ctx, restore_info) -> None:
 
 
 async def _handle_rewind(ctx) -> None:
-    tasks = getattr(ctx.ui, "task_manager", None)
-    if getattr(ctx.ui, "_streaming", False) or (tasks and tasks.has_active_tasks()):
+    sessions = command_services(ctx).sessions
+    if sessions.is_running() or sessions.has_active_tasks():
         ctx.ui.add_system_message("Wait for running tasks to finish before rewinding.")
         return
     fh = getattr(ctx.agent, "file_history", None)
@@ -172,7 +170,7 @@ async def _handle_rewind(ctx) -> None:
         runtime = getattr(ctx.agent, "recovery", None)
         if runtime is not None:
             runtime.ensure_workspace_idle(allow_restore_id=restore_id)
-        prepare = getattr(ctx, "config", {}).get("prepare_session_change")
+        prepare = command_services(ctx).sessions.prepare_session_change
         if prepare:
             await prepare()
         if not resuming:
@@ -185,10 +183,10 @@ async def _handle_rewind(ctx) -> None:
             _append_code_notice(ctx, info)
         fh.complete_restore(restore_id)
         if ctx.agent:
-            ctx.agent._file_versions.clear()
-        if option in (1, 2) and ctx.config.get("render_restored"):
-            ctx.config["clear_chat"]()
-            await ctx.config["render_restored"](ctx.conversation.history)
+            ctx.agent.clear_file_versions()
+        if option in (1, 2) and command_services(ctx).sessions.render_restored:
+            command_services(ctx).sessions.clear_chat()
+            await command_services(ctx).sessions.render_restored(ctx.conversation.history)
         ctx.ui.add_system_message(f"⟲ Restore {restore_id} complete: {len(changed)} recorded file(s); "
                                   + ("conversation restored." if option in (1, 2) else "conversation retained with restore notice."))
         if option in (1, 2) and ctx.agent and ctx.agent.approval_controller:

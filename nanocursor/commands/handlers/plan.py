@@ -11,7 +11,7 @@ async def handle_plan(ctx: CommandContext) -> None:
     # 重入检测：如果本次会话曾退出过 Plan Mode 且 plan 文件已存在，注入重入提示
     app = ctx.ui
     if getattr(app, "_has_exited_plan_mode", False) and ctx.agent is not None:
-        plan_path = ctx.agent._get_plan_path()
+        plan_path = ctx.agent.plan_path
         plan_exists = plan_path.exists()
         reentry_msg = build_plan_mode_reentry_reminder(str(plan_path), plan_exists)
         if reentry_msg:

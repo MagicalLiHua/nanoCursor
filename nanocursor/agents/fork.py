@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+FORK_QUERY_SOURCE = "agent:builtin:fork"
+
 import copy
 
 from nanocursor.conversation import ConversationManager, Message, ToolResultBlock

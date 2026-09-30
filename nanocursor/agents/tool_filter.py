@@ -203,7 +203,7 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
     """
     import copy
 
-    from nanocursor.tools.agent_tool import FORK_QUERY_SOURCE
+    from nanocursor.agents.fork import FORK_QUERY_SOURCE
 
     forked = ToolRegistry()
     for tool in parent_registry.list_tools():

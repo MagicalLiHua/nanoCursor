@@ -16,6 +16,7 @@ from nanocursor.skills.parser import (
     substitute_arguments,
 )
 from nanocursor.skills.loader import SkillLoader
+from nanocursor.skills.catalog import MAX_CATALOG_CHARS, format_skill_catalog
 from nanocursor.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -258,6 +259,16 @@ class TestSkillLoader:
         loader = SkillLoader(str(tmp_path))
         loader.load_all()
         assert loader.get_source_label("nonexistent") == "unknown"
+
+
+def test_model_skill_catalog_bounds_descriptions_and_total_size() -> None:
+    catalog = [(f"skill-{i}", "very long description " * 100) for i in range(100)]
+    rendered = format_skill_catalog(catalog)
+    assert len(rendered) <= MAX_CATALOG_CHARS
+    assert "- skill-0: " in rendered
+    assert "more Skills omitted" in rendered
+    assert len(rendered.splitlines()[2]) < 270
+    assert format_skill_catalog([]) == ""
 
     def test_malformed_file_skipped(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / ".nanocursor" / "skills"

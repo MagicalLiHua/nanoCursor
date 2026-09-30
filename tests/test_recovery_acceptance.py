@@ -271,7 +271,8 @@ def reset(*args,**kwargs):
  if phase=='after_projection': os.kill(os.getpid(),signal.SIGKILL)
 session.reset_history=reset
 agent=NS(file_history=history,recovery=runtime,approval_controller=controller,
-         clear_active_skills=lambda:None,_file_versions={})
+         clear_active_skills=lambda:None,_file_versions={},
+         reset_history_state=lambda:None,clear_file_versions=lambda:None)
 ctx=NS(agent=agent,session=session,conversation=conversation,args=f'resume {restore_id} apply',
        ui=NS(add_system_message=print),config={})
 asyncio.run(_handle_rewind(ctx))

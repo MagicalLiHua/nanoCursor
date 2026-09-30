@@ -8,19 +8,21 @@ Remote Control 服务器：通过 WebSocket 桥接 Agent 事件和 Web UI。
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 import logging
-import os
 import time
-from pathlib import Path
 from typing import Any
 
 import websockets
-from websockets.asyncio.server import Server as WSServer, ServerConnection
+from websockets.asyncio.server import ServerConnection
 from websockets.http11 import Request, Response
 
-from nanocursor.agent import (
-    Agent,
+from nanocursor.commands.ports import CommandServices
+from nanocursor.status import collect_status, collect_mcp_servers
+from nanocursor.application.execution import ForegroundRun
+from nanocursor.agent import Agent
+from nanocursor.events import (
     CompactNotification,
     ErrorEvent,
     HookEvent,
@@ -35,29 +37,19 @@ from nanocursor.agent import (
     TurnComplete,
     UsageEvent,
 )
-from nanocursor.client import create_client, resolve_context_window
 from nanocursor.commands import CommandContext, CommandRegistry, CommandType
 from nanocursor.commands.handlers import register_all_commands
 from nanocursor.commands.parser import parse_command
 from nanocursor.config import MCPServerConfig, ProviderConfig
-from nanocursor.runtime import app_home
 from nanocursor.workspace import WorkspaceContext
 from nanocursor.conversation import ConversationManager
 from nanocursor.hooks import HookEngine
 from nanocursor.mcp import MCPManager
-from nanocursor.memory import MemoryManager, load_instructions
+from nanocursor.memory import MemoryManager
 from nanocursor.memory.session import Session, SessionManager
-from nanocursor.permissions import (
-    DangerousCommandDetector,
-    PathSandbox,
-    PermissionChecker,
-    PermissionMode,
-    RuleEngine,
-)
+from nanocursor.permissions import PermissionMode
 from nanocursor.skills.loader import SkillLoader
-from nanocursor.tools import ToolRegistry, create_default_registry
-from nanocursor.tools.impl.tool_search import ToolSearchTool
-from nanocursor.tools.load_skill import LoadSkill
+from nanocursor.tools import ToolRegistry
 from nanocursor.web_content import INDEX_HTML
 
 log = logging.getLogger(__name__)
@@ -228,76 +220,6 @@ class RemoteServer:
     def _init_agent(self) -> None:
         from nanocursor.config import ConfigError
         raise ConfigError("Browser execution is deferred; use the protected local CLI.")
-        """初始化 Agent 及相关子系统。"""
-        provider = self.providers[0]
-        work_dir = str(self.workspace.active_cwd)
-
-        # 权限系统
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(work_dir),
-            rule_engine=RuleEngine(
-                user_rules_path=app_home() / "permissions.yaml",
-                project_rules_path=Path(work_dir) / ".nanocursor" / "permissions.yaml",
-                local_rules_path=Path(work_dir) / ".nanocursor" / "permissions.local.yaml",
-            ),
-            mode=self.permission_mode,
-        )
-
-        # 加载自定义指令和记忆
-        instructions = load_instructions(work_dir)
-        self.memory_manager = MemoryManager(work_dir)
-        self.session_manager = SessionManager(work_dir)
-        self.session = self.session_manager.create()
-        self.session_id = self.session.session_id
-
-        # 创建 LLM 客户端
-        client = create_client(provider)
-
-        # 工具注册表
-        self.registry = create_default_registry()
-        from nanocursor.sandbox import configure_bash_sandbox
-        active = configure_bash_sandbox(self.registry, work_dir, self.sandbox_config)
-        checker.sandbox_enabled = active and self.sandbox_config.auto_allow
-        self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
-
-        # Skill 加载
-        self.skill_loader = SkillLoader(work_dir)
-        self.skill_loader.load_all()
-        load_skill_tool = LoadSkill()
-        self.registry.register(load_skill_tool)
-
-        # 创建 Agent
-        self.agent = Agent(
-            client=client,
-            registry=self.registry,
-            protocol=provider.protocol,
-            work_dir=work_dir,
-            permission_checker=checker,
-            context_window=provider.get_context_window(),
-            instructions_content=instructions,
-            memory_manager=self.memory_manager,
-            hook_engine=self.hook_engine,
-        )
-        self.agent.session_id = self.session_id
-
-        # 连接 Skill 到 Agent
-        load_skill_tool.set_loader(self.skill_loader)
-        load_skill_tool.set_agent(self.agent)
-
-        catalog = self.skill_loader.get_catalog()
-        if catalog:
-            lines = ["You can use the following Skills:", ""]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append("If the user's request matches a Skill, call LoadSkill to activate it.")
-            self.agent.set_skill_catalog("\n".join(lines))
-
-        # 初始化对话管理器
-        self.conversation = ConversationManager()
-
-        log.info("Agent initialized: session=%s, model=%s", self.session_id, provider.model)
 
     # ------------------------------------------------------------------
     # MCP 初始化
@@ -370,132 +292,133 @@ class RemoteServer:
         stream_buf = ""
 
         try:
-            async for event in self.agent.run(self.conversation):
-                # 检查取消信号
-                if self._cancel_event.is_set():
-                    break
+            async with aclosing(ForegroundRun(self.agent).events(self.conversation)) as events:
+                async for event in events:
+                    # 检查取消信号
+                    if self._cancel_event.is_set():
+                        break
 
-                if isinstance(event, StreamText):
-                    stream_buf += event.text
-                    await self._broadcast({
-                        "type": "stream_text",
-                        "data": {"text": event.text},
-                    })
-
-                elif isinstance(event, ThinkingText):
-                    await self._broadcast({
-                        "type": "thinking_text",
-                        "data": {"text": event.text},
-                    })
-
-                elif isinstance(event, ToolUseEvent):
-                    await self._broadcast({
-                        "type": "tool_use",
-                        "data": {
-                            "toolId": event.tool_id,
-                            "toolName": event.tool_name,
-                            "args": event.arguments,
-                        },
-                    })
-
-                elif isinstance(event, ToolResultEvent):
-                    # 如果之前有累积的流式文本，先结束它
-                    if stream_buf:
+                    if isinstance(event, StreamText):
+                        stream_buf += event.text
                         await self._broadcast({
-                            "type": "stream_end",
-                            "data": {"text": stream_buf},
+                            "type": "stream_text",
+                            "data": {"text": event.text},
                         })
-                        stream_buf = ""
-                    await self._broadcast({
-                        "type": "tool_result",
-                        "data": {
-                            "toolId": event.tool_id,
-                            "toolName": event.tool_name,
-                            "output": event.output,
-                            "isError": event.is_error,
-                            "elapsed": event.elapsed,
-                        },
-                    })
 
-                elif isinstance(event, PermissionRequest):
-                    # 生成唯一 ID，等待 Web 端回复
-                    perm_id = f"perm_{time.time_ns()}"
-                    self._pending_perms[perm_id] = event.future
-                    await self._broadcast({
-                        "type": "permission_request",
-                        "data": {
-                            "id": perm_id,
-                            "toolName": event.tool_name,
-                            "description": event.description,
-                        },
-                    })
-
-                elif isinstance(event, TurnComplete):
-                    if stream_buf:
+                    elif isinstance(event, ThinkingText):
                         await self._broadcast({
-                            "type": "stream_end",
-                            "data": {"text": stream_buf},
+                            "type": "thinking_text",
+                            "data": {"text": event.text},
                         })
-                        stream_buf = ""
-                    await self._broadcast({
-                        "type": "turn_complete",
-                        "data": {"turn": event.turn},
-                    })
 
-                elif isinstance(event, LoopComplete):
-                    if stream_buf:
+                    elif isinstance(event, ToolUseEvent):
                         await self._broadcast({
-                            "type": "stream_end",
-                            "data": {"text": stream_buf},
+                            "type": "tool_use",
+                            "data": {
+                                "toolId": event.tool_id,
+                                "toolName": event.tool_name,
+                                "args": event.arguments,
+                            },
                         })
-                        stream_buf = ""
-                    elapsed = time.monotonic() - start_time
-                    await self._broadcast({
-                        "type": "loop_complete",
-                        "data": {
-                            "totalTurns": event.total_turns,
-                            "elapsed": elapsed,
-                        },
-                    })
 
-                elif isinstance(event, UsageEvent):
-                    await self._broadcast({
-                        "type": "usage",
-                        "data": {
-                            "inputTokens": event.input_tokens,
-                            "outputTokens": event.output_tokens,
-                        },
-                    })
+                    elif isinstance(event, ToolResultEvent):
+                        # 如果之前有累积的流式文本，先结束它
+                        if stream_buf:
+                            await self._broadcast({
+                                "type": "stream_end",
+                                "data": {"text": stream_buf},
+                            })
+                            stream_buf = ""
+                        await self._broadcast({
+                            "type": "tool_result",
+                            "data": {
+                                "toolId": event.tool_id,
+                                "toolName": event.tool_name,
+                                "output": event.output,
+                                "isError": event.is_error,
+                                "elapsed": event.elapsed,
+                            },
+                        })
 
-                elif isinstance(event, ErrorEvent):
-                    await self._broadcast({
-                        "type": "error",
-                        "data": {"message": event.message},
-                    })
+                    elif isinstance(event, PermissionRequest):
+                        # 生成唯一 ID，等待 Web 端回复
+                        perm_id = f"perm_{time.time_ns()}"
+                        self._pending_perms[perm_id] = event.future
+                        await self._broadcast({
+                            "type": "permission_request",
+                            "data": {
+                                "id": perm_id,
+                                "toolName": event.tool_name,
+                                "description": event.description,
+                            },
+                        })
 
-                elif isinstance(event, CompactNotification):
-                    await self._broadcast({
-                        "type": "compact",
-                        "data": {"message": event.message},
-                    })
+                    elif isinstance(event, TurnComplete):
+                        if stream_buf:
+                            await self._broadcast({
+                                "type": "stream_end",
+                                "data": {"text": stream_buf},
+                            })
+                            stream_buf = ""
+                        await self._broadcast({
+                            "type": "turn_complete",
+                            "data": {"turn": event.turn},
+                        })
 
-                elif isinstance(event, RetryEvent):
-                    await self._broadcast({
-                        "type": "retry",
-                        "data": {
-                            "reason": event.reason,
-                            "waitMs": int(event.wait * 1000),
-                        },
-                    })
+                    elif isinstance(event, LoopComplete):
+                        if stream_buf:
+                            await self._broadcast({
+                                "type": "stream_end",
+                                "data": {"text": stream_buf},
+                            })
+                            stream_buf = ""
+                        elapsed = time.monotonic() - start_time
+                        await self._broadcast({
+                            "type": "loop_complete",
+                            "data": {
+                                "totalTurns": event.total_turns,
+                                "elapsed": elapsed,
+                            },
+                        })
 
-                elif isinstance(event, HookEvent):
-                    status = "ok" if event.success else "error"
-                    await self._broadcast({
-                        "type": "system",
-                        "data": {
-                            "message": f"Hook [{event.hook_id}] {status}: {event.output}"
-                        },
-                    })
+                    elif isinstance(event, UsageEvent):
+                        await self._broadcast({
+                            "type": "usage",
+                            "data": {
+                                "inputTokens": event.input_tokens,
+                                "outputTokens": event.output_tokens,
+                            },
+                        })
+
+                    elif isinstance(event, ErrorEvent):
+                        await self._broadcast({
+                            "type": "error",
+                            "data": {"message": event.message},
+                        })
+
+                    elif isinstance(event, CompactNotification):
+                        await self._broadcast({
+                            "type": "compact",
+                            "data": {"message": event.message},
+                        })
+
+                    elif isinstance(event, RetryEvent):
+                        await self._broadcast({
+                            "type": "retry",
+                            "data": {
+                                "reason": event.reason,
+                                "waitMs": int(event.wait * 1000),
+                            },
+                        })
+
+                    elif isinstance(event, HookEvent):
+                        status = "ok" if event.success else "error"
+                        await self._broadcast({
+                            "type": "system",
+                            "data": {
+                                "message": f"Hook [{event.hook_id}] {status}: {event.output}"
+                            },
+                        })
 
         except asyncio.CancelledError:
             await self._broadcast({
@@ -594,9 +517,11 @@ class RemoteServer:
             session_manager=self.session_manager,
             memory_manager=self.memory_manager,
             ui=self,  # type: ignore[arg-type]
-            config={
-                "registry": self.command_registry,
-            },
+            config=CommandServices(
+                registry=self.command_registry,
+                status_snapshot=lambda: collect_status(self),
+                mcp_servers=lambda: collect_mcp_servers(self),
+            ),
         )
 
     async def _handle_compact(self) -> None:

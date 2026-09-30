@@ -15,6 +15,25 @@ def install(root):
 
 
 @pytest.mark.asyncio
+async def test_inline_slash_sends_skill_body_and_persists_it(memory_app):
+    make, main, root = memory_app
+    save_skill(root.parent / "skills", {"name": "explain", "description": "Explain a change",
+                                        "mode": "inline"}, "Explain this carefully: $ARGUMENTS")
+    app = make()
+    async with app.run_test() as pilot:
+        await command(app, "/explain changed code")
+        await app._agent_task
+        assert len(main.main_history) == 1
+        sent = [m.content for m in main.main_history[0] if m.role == "user"]
+        assert "# Skill: explain\n\nExplain this carefully: changed code" in sent
+        assert "/explain changed code" not in sent
+        restored = app.session_manager.resume(app.session.session_id)
+        assert any(m.content == "# Skill: explain\n\nExplain this carefully: changed code"
+                   for m in restored.messages)
+        restored.session.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(90, 30), (80, 24)])
 async def test_slash_result_is_bounded_persisted_and_available_next_question(memory_app, monkeypatch, size):
     make, main, root = memory_app

@@ -1,23 +1,17 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from rich.markup import escape
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
-from nanocursor.status import collect_mcp_servers
 
 
 async def handle_mcp(ctx: CommandContext) -> None:
-    app = ctx.ui if hasattr(ctx.ui, "agent") else SimpleNamespace(
-        agent=ctx.agent,
-        mcp_manager=getattr(ctx.ui, "mcp_manager", None),
-        _mcp_server_configs=getattr(ctx.ui, "_mcp_server_configs", []),
-    )
-    servers = collect_mcp_servers(app)
+    services = command_services(ctx)
+    servers = services.mcp_servers()
     connected = sum(server.connected for server in servers)
     lines = ["MCP 状态", f"{connected} 已连接 / {len(servers)} 已配置"]
-    if getattr(ctx.ui, "_mcp_connecting", False):
+    if services.mcp_connecting():
         lines.append("正在连接；尚未连接的服务器可能仍在初始化。")
     if not servers:
         lines.append("尚未配置 MCP 服务器。")

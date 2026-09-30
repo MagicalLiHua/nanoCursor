@@ -241,7 +241,8 @@ async def test_rewind_preview_is_readonly_and_requires_stable_confirmation(tmp_p
     point = history.begin_checkpoint(0, "task", conversation=[])
     await write(writer, path, "B")
     ui = NS(add_system_message=Mock())
-    context = NS(agent=NS(file_history=history, _file_versions={}, recovery=None), args="1 3", ui=ui,
+    context = NS(agent=NS(file_history=history, _file_versions={}, recovery=None,
+                          clear_file_versions=Mock()), args="1 3", ui=ui,
                  config={}, session=None, conversation=ConversationManager())
     await _handle_rewind(context)
     assert path.read_text() == "B" and not history.pending_restores()
@@ -270,7 +271,7 @@ async def test_conversation_projection_is_idempotent_when_restore_completion_cra
     for message in conversation.history:
         session.append(message)
     a = NS(file_history=history, recovery=runtime, _file_versions={}, approval_controller=None,
-           clear_active_skills=Mock())
+           clear_active_skills=Mock(), reset_history_state=Mock(), clear_file_versions=Mock())
     context = NS(agent=a, args=f"{point.checkpoint_id} 1 apply", ui=NS(add_system_message=Mock()),
                  config={}, session=session, conversation=conversation)
     original = history.complete_restore

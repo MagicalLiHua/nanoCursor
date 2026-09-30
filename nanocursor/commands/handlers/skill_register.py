@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandRegistry, CommandType
 
 if TYPE_CHECKING:
@@ -40,12 +41,12 @@ def register_skill_commands(
 
 
             async def handler(ctx: CommandContext) -> None:
-                exe = ctx.config.get("skill_executor") if executor is None else executor
+                exe = command_services(ctx).skill_executor if executor is None else executor
                 if exe is None:
                     ctx.ui.add_system_message("Skill 执行器未初始化")
                     return
 
-                skill_loader: SkillLoader | None = ctx.config.get("skill_loader")
+                skill_loader: SkillLoader | None = command_services(ctx).skill_loader
                 if skill_loader is None:
                     ctx.ui.add_system_message("Skill 加载器未初始化")
                     return
@@ -65,8 +66,8 @@ def register_skill_commands(
                     except (ValueError, OSError) as exc:
                         ctx.ui.add_system_message(f"Skill 配置错误: {exc}")
                         return
-                    session_id = ctx.config.get("session_id", "")
-                    is_current = ctx.config.get("is_session_current", lambda _id: True)
+                    session_id = command_services(ctx).session_id
+                    is_current = command_services(ctx).is_session_current
                     ctx.ui.add_system_message(f"⏳ Running {name} skill...")
 
 
@@ -77,7 +78,7 @@ def register_skill_commands(
                                 ctx.ui.add_system_message(
                                     f"[{name} skill result]\n{result.display()}"
                                 )
-                                publish = ctx.config.get("queue_skill_result")
+                                publish = command_services(ctx).queue_skill_result
                                 if publish:
                                     publish(session_id, ctx.conversation, name, result)
                         except asyncio.CancelledError:
@@ -88,14 +89,14 @@ def register_skill_commands(
                                     f"Skill {name} failed: {e}"
                                 )
 
-                    register_task = ctx.config.get("register_owned_task")
+                    register_task = command_services(ctx).register_owned_task
                     if register_task is None:
                         await _run_fork()
                     else:
                         register_task(asyncio.create_task(_run_fork()))
                 else:
                     try:
-                        exe.execute_inline(skill, ctx.args)
+                        prompt = exe.execute_inline(skill, ctx.args)
                     except ValueError as exc:
                         ctx.ui.add_system_message(f"Skill 配置错误: {exc}")
                         return
@@ -103,7 +104,7 @@ def register_skill_commands(
                         f"skill({name})\nSuccessfully loaded skill"
                     )
                     trigger = ctx.args if ctx.args else f"/{name}"
-                    ctx.ui.send_user_message(trigger)
+                    ctx.ui.send_skill_message(trigger, name, prompt)
 
             return handler
 

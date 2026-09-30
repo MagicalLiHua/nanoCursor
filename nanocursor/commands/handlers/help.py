@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
 
 
@@ -10,7 +11,7 @@ def _format_aliases(cmd: Command) -> str:
 
 
 async def handle_help(ctx: CommandContext) -> None:
-    registry = ctx.config["registry"]
+    registry = command_services(ctx).registry
 
     if ctx.args:
         cmd = registry.find(ctx.args.lower())

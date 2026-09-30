@@ -279,6 +279,7 @@ def main() -> None:
 
 
 async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_format: str = "text", *, workspace=None) -> int:
+    from nanocursor.application.session import SessionController
     from nanocursor.memory.session import SessionManager
     work_dir = str(workspace.active_cwd) if workspace else os.getcwd()
     runtime = None
@@ -306,7 +307,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
             runtime.ensure_ready()
             manager = SessionManager(str(workspace.workspace_dir) if workspace else work_dir, recovery=runtime)
             session = manager.create()
-            runtime.bind_session(session)
+            SessionController(runtime).bind(session, None)
             return await _run_prompt_owned(config, permission_mode, hook_engine, prompt, output_format,
                                            workspace=workspace, recovery=runtime,
                                            close_persistence=close_persistence)
@@ -332,8 +333,10 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
 
 
 async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, output_format: str = "text", *, workspace=None, recovery=None, close_persistence=None) -> int:
-    from nanocursor.agent import (
-        Agent,
+    from nanocursor.application.execution import ForegroundRun
+    from nanocursor.application.background import BackgroundOptions, assemble_background
+    from nanocursor.application.bootstrap import AgentDependencies, AgentSettings, assemble_agent, create_permissions
+    from nanocursor.events import (
         CompactNotification,
         ErrorEvent,
         LoopComplete,
@@ -349,22 +352,11 @@ async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, o
     from nanocursor.client import create_client, resolve_context_window
     from nanocursor.conversation import ConversationManager, Message
     from nanocursor.memory.instructions import load_instructions
-    from nanocursor.permissions import (
-        DangerousCommandDetector,
-        PathSandbox,
-        PermissionChecker,
-        RuleEngine,
-    )
     from nanocursor.tools import create_default_registry
-    from nanocursor.agents.loader import AgentLoader
     from nanocursor.agents.task_manager import TaskManager, persist_notification_message
     from nanocursor.agents.notification import format_task_notification
     from nanocursor.agents.trace import TraceManager
-    from nanocursor.tools.agent_tool import AgentTool
     from nanocursor.tools.impl.tool_search import ToolSearchTool
-    from nanocursor.teams.manager import TeamManager
-    from nanocursor.tools.team_create import TeamCreateTool
-    from nanocursor.tools.team_delete import TeamDeleteTool
     from nanocursor.worktree import WorktreeManager
     from nanocursor.config import WorktreeConfig
 
@@ -380,38 +372,22 @@ async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, o
     # 不会抛异常或阻塞启动；失败则退化到映射表。
     await resolve_context_window(provider)
     work_dir = str(workspace.active_cwd) if workspace else os.getcwd()
-    from nanocursor.runtime import app_home
-
-    checker = PermissionChecker(
-        detector=DangerousCommandDetector(),
-        sandbox=PathSandbox(work_dir),
-        rule_engine=RuleEngine(
-            user_rules_path=app_home() / "permissions.yaml",
-            project_rules_path=Path(work_dir) / ".nanocursor" / "permissions.yaml",
-            local_rules_path=Path(work_dir) / ".nanocursor" / "permissions.local.yaml",
-        ),
-        mode=permission_mode,
-    )
 
     instructions = load_instructions(work_dir)
+    settings = AgentSettings(
+        provider, work_dir, str(workspace.workspace_dir) if workspace else work_dir,
+        Path(work_dir) / ".nanocursor", permission_mode, config.sandbox, instructions,
+    )
+    checker = create_permissions(settings)
     registry = create_default_registry()
     from nanocursor.sandbox import configure_bash_sandbox
     active = configure_bash_sandbox(registry, work_dir, config.sandbox)
     checker.sandbox_enabled = active and config.sandbox.auto_allow
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
-    agent = Agent(
-        client=client,
-        registry=registry,
-        protocol=provider.protocol,
-        work_dir=work_dir,
-        permission_checker=checker,
-        context_window=provider.get_context_window(),
-        instructions_content=instructions,
-        hook_engine=hook_engine,
-        recovery=recovery,
-        session_work_dir=str(workspace.workspace_dir) if workspace else work_dir,
-    )
+    agent = assemble_agent(
+        settings, AgentDependencies(client, registry, hook_engine, recovery), permissions=checker,
+    ).agent
     if recovery:
         from nanocursor.filehistory import FileHistory
         agent.session_id = recovery.session_id
@@ -430,32 +406,15 @@ async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, o
     trace_manager = TraceManager()
     task_manager = TaskManager()
     task_manager.current_session_id = agent.session_id
-    agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
-    agent_loader.load_all()
-    team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager, task_manager=task_manager)
-
-    agent_tool = AgentTool(
-        agent_loader=agent_loader,
-        task_manager=task_manager,
-        trace_manager=trace_manager,
-        parent_agent=agent,
-        enable_fork=config.enable_fork,
-        enable_teams=config.enable_teams,
-        provider_config=provider,
-        worktree_manager=wt_manager,
-        team_manager=team_manager,
+    background = assemble_background(
+        agent, provider, wt_manager, task_manager, trace_manager,
+        BackgroundOptions(
+            enable_fork=config.enable_fork, enable_teams=config.enable_teams,
+            enable_verification=config.enable_verification_agent,
+            enable_coordinator=config.enable_coordinator_mode,
+        ),
     )
-    registry.register(agent_tool)
-    if config.enable_teams:
-        registry.register(TeamCreateTool(
-            team_manager=team_manager,
-            parent_agent=agent,
-            teammate_mode="in-process",
-            is_interactive=False,
-            enable_coordinator_mode=config.enable_coordinator_mode,
-            enable_teams=config.enable_teams,
-        ))
-        registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
+    team_manager = background.teams
 
     def drain_notifications() -> list[Message]:
         notes: list[Message] = []
@@ -499,7 +458,7 @@ async def _run_prompt_owned(config, permission_mode, hook_engine, prompt: str, o
         nonlocal text_buf, total_input, total_output, num_turns
         base_turns = num_turns
         completed = False
-        async with aclosing(agent.run(conv, source=source)) as events:
+        async with aclosing(ForegroundRun(agent).events(conv, source=source)) as events:
             async for event in events:
                 if isinstance(event, StreamText):
                     text_buf += event.text

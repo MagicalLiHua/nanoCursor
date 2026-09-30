@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 
 from rich.markup import escape
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
 from nanocursor.runtime import get_version
-from nanocursor.status import collect_status, format_status_details
+from nanocursor.status import format_status_details
 
 
 async def handle_status(ctx: CommandContext) -> None:
-    # The TUI owns connection and provider state; small command adapters may
-    # only supply an Agent and conversation through CommandContext.
-    app = ctx.ui if hasattr(ctx.ui, "agent") else SimpleNamespace(
-        agent=ctx.agent, conversation=ctx.conversation,
-    )
-    lines = [format_status_details(collect_status(app))]
+    snapshot = command_services(ctx).status_snapshot()
+    lines = [format_status_details(snapshot)]
 
     if ctx.session:
         m = ctx.session.meta

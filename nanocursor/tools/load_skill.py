@@ -62,7 +62,6 @@ class LoadSkill(Tool):
             )
 
         from nanocursor.skills.executor import SkillExecutor
-        from nanocursor.skills.parser import substitute_arguments
         from nanocursor.tools.runtime import current_runtime
         runtime = current_runtime()
         if runtime and (not runtime.spawn_allowed or runtime.agent_id != self._agent.agent_id):
@@ -76,7 +75,7 @@ class LoadSkill(Tool):
                 snapshot = executor.snapshot_context(skill.context, conversation)
                 result = await executor.execute_fork(skill, params.args, context_messages=snapshot)
                 return ToolResult(result.display(), result.status != "success")
-            executor.execute_inline(skill, params.args)
-            return ToolResult(f"# Skill: {skill.name}\n\n" + substitute_arguments(skill.prompt_body, params.args))
+            prompt = executor.execute_inline(skill, params.args)
+            return ToolResult(f"# Skill: {skill.name}\n\n" + prompt)
         except (ValueError, OSError) as exc:
             return ToolResult(f"Skill configuration error: {exc}", True)

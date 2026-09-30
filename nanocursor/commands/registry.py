@@ -3,7 +3,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Protocol
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
+
+from nanocursor.commands.ports import CommandServices, command_services
+
+if TYPE_CHECKING:
+    from nanocursor.agent import Agent
+    from nanocursor.conversation import ConversationManager
+    from nanocursor.memory.auto_memory import MemoryManager
+    from nanocursor.memory.session import Session, SessionManager
 
 
 class CommandType(str, Enum):
@@ -17,6 +26,7 @@ class UIController(Protocol):
 
 
     def send_user_message(self, text: str) -> None: ...
+    def send_skill_message(self, display_text: str, name: str, prompt: str) -> None: ...
     def set_plan_mode(self, enabled: bool) -> None: ...
     def get_token_count(self) -> tuple[int, int]: ...
     def refresh_status(self) -> None: ...
@@ -25,13 +35,17 @@ class UIController(Protocol):
 @dataclass
 class CommandContext:
     args: str
-    agent: Any
-    conversation: Any
-    session: Any
-    session_manager: Any
-    memory_manager: Any
+    agent: Agent | None
+    conversation: ConversationManager | None
+    session: Session | None
+    session_manager: SessionManager | None
+    memory_manager: MemoryManager | None
     ui: UIController
-    config: Any
+    config: CommandServices | Mapping[str, object]
+
+    @property
+    def services(self) -> CommandServices:
+        return command_services(self)
 
 
 CommandHandler = Callable[[CommandContext], Awaitable[None]]

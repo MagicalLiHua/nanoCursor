@@ -95,7 +95,7 @@ class SkillExecutor:
             f"\nTools: {', '.join(allowed_tools(skill, self.agent)) or '(none)'}"
             "\nPermission: inherited; operations requiring approval return to the main session")
 
-    def execute_inline(self, skill: SkillDef, args: str) -> None:
+    def execute_inline(self, skill: SkillDef, args: str) -> str:
         validate_definition(skill)
         if skill.mode != "inline":
             raise ValueError("Fork Skill must use the independent executor")
@@ -103,6 +103,7 @@ class SkillExecutor:
         self.agent.activate_skill(skill.name, prompt)
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
+        return prompt
 
     def prepare_fork(self, skill: SkillDef, args: str, *, context_messages: list[Message] | None = None,
                      notify: bool = True) -> SkillInvocation:
@@ -171,7 +172,8 @@ class SkillExecutor:
         return result
 
     async def _execute_prepared_fork(self, invocation: SkillInvocation) -> SkillRunResult:
-        from nanocursor.agent import Agent, ErrorEvent, LoopComplete, StreamText
+        from nanocursor.agents.factory import AgentFactory, SpawnContext
+        from nanocursor.events import ErrorEvent, LoopComplete, StreamText
         selected, scope = invocation.provider, invocation.scope
         model = selected.model if selected else getattr(self.client, "model", "inherited")
         provider = selected.name if selected else "inherited"
@@ -197,15 +199,15 @@ class SkillExecutor:
                     except Exception:
                         pass
             window = selected.get_context_window() if selected else invocation.context_window
-            child = Agent(client=client, registry=scope.registry,
-                          protocol=selected.protocol if selected else self.protocol,
-                          work_dir=scope.work_dir, max_iterations=invocation.max_iterations,
-                          permission_checker=scope.permission_checker, hook_engine=hooks,
-                          spawn_allowed=False, sandbox_root=scope.sandbox_root,
-                          session_work_dir=scope.session_work_dir, context_window=window,
-                          instructions_content=invocation.instructions, execution_guard=scope.guard)
-            child.parent_id = invocation.parent_id
-            child.trace_id = invocation.trace_id
+            child = AgentFactory.create(SpawnContext(
+                client=client, registry=scope.registry,
+                protocol=selected.protocol if selected else self.protocol,
+                work_dir=scope.work_dir, max_iterations=invocation.max_iterations,
+                permissions=scope.permission_checker, hooks=hooks,
+                sandbox_root=scope.sandbox_root, session_work_dir=scope.session_work_dir,
+                context_window=window, instructions=invocation.instructions,
+                guard=scope.guard, parent_id=invocation.parent_id, trace_id=invocation.trace_id,
+            ))
             if self.trace_manager:
                 trace = self.trace_manager.create(f"skill:{invocation.skill.name}", parent_id=invocation.parent_id, trace_id=invocation.trace_id)
                 child.agent_id = trace.agent_id

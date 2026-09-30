@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from nanocursor.commands.ports import command_services
 from nanocursor.commands.registry import Command, CommandContext, CommandType
+from nanocursor.skills.catalog import format_skill_catalog
 
 if TYPE_CHECKING:
     from nanocursor.skills.loader import SkillLoader
@@ -13,7 +15,7 @@ async def handle_skill(ctx: CommandContext) -> None:
     subcmd = parts[0] if parts else "list"
     sub_args = parts[1] if len(parts) > 1 else ""
 
-    loader: SkillLoader | None = ctx.config.get("skill_loader")
+    loader: SkillLoader | None = command_services(ctx).skill_loader
     if loader is None:
         ctx.ui.add_system_message("Skill 系统未初始化")
         return
@@ -64,7 +66,7 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
         f"Path: {skill.source_path or '(builtin)'}",
         f"Directory: {skill.is_directory}",
     ]
-    executor = ctx.config.get("skill_executor")
+    executor = command_services(ctx).skill_executor
     if executor:
         try:
             lines.append(executor.describe(skill))
@@ -76,26 +78,15 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
 async def _handle_reload(ctx: CommandContext, loader: SkillLoader) -> None:
     skills = loader.reload()
 
-    registry = ctx.config.get("registry")
+    registry = command_services(ctx).registry
     if registry is not None:
         from nanocursor.commands.handlers.skill_register import register_skill_commands
-        register_skill_commands(registry, loader, ctx.config.get("skill_executor"))
+        register_skill_commands(registry, loader, command_services(ctx).skill_executor)
 
     # 刷新 agent 的 skill catalog，这样 LLM 能看到新增的 skill
     agent = ctx.agent
     if agent is not None:
-        catalog = loader.get_catalog()
-        if catalog:
-            lines = ["You can use the following Skills:", ""]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
-            agent.set_skill_catalog("\n".join(lines))
-        else:
-            agent.set_skill_catalog("")
+        agent.set_skill_catalog(format_skill_catalog(loader.get_catalog()))
 
     ctx.ui.add_system_message(f"已重新加载 {len(skills)} 个 Skill")
 
